@@ -1,0 +1,28 @@
+name: SDK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sdk/**'
+      - '.github/workflows/sdk.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'sdk/**'
+
+defaults:
+  run:
+    working-directory: sdk
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci || npm install
+      - run: npm test --silent

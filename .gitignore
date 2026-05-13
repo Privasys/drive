@@ -1,0 +1,29 @@
+# Go
+service/drive
+service/dist/
+*.test
+*.out
+coverage.*
+
+# Node
+node_modules/
+sdk/dist/
+sdk/coverage/
+*.log
+.npm/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local dev
+.env
+.env.local
+*.local
+data-dev/

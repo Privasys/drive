@@ -1,0 +1,75 @@
+name: Build & Test (service)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'service/**'
+      - '.github/workflows/service.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'service/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+defaults:
+  run:
+    working-directory: service
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: go mod download
+      - run: go test ./... -count=1 -race
+
+  build:
+    name: Build binary
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o drive ./cmd/drive
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drive
+          path: service/drive
+
+  docker:
+    name: Build & push Docker image
+    runs-on: ubuntu-24.04
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: repo
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - id: version
+        run: echo "value=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: service
+          file: service/Dockerfile
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+          tags: |
+            ghcr.io/${{ steps.repo.outputs.name }}:latest
+            ghcr.io/${{ steps.repo.outputs.name }}:${{ steps.version.outputs.value }}
