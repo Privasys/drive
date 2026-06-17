@@ -58,9 +58,19 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: drive <serve|version> [flags]")
 }
 
+// defaultAddr honours the platform-allocated $PORT (host networking makes a
+// container's listen port its host port, so the management-service assigns it
+// and injects PORT). Falls back to :8443 for local runs.
+func defaultAddr() string {
+	if p := os.Getenv("PORT"); p != "" {
+		return "0.0.0.0:" + p
+	}
+	return "127.0.0.1:8443"
+}
+
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	addr := fs.String("addr", "127.0.0.1:8443", "listen address")
+	addr := fs.String("addr", defaultAddr(), "listen address (env: PORT for the platform-allocated port)")
 	dsn := fs.String("db", "", "SQL DSN; empty == ephemeral SQLite for --dev")
 	data := fs.String("data", "data-dev", "local-disk object backend root (dev only)")
 	dev := fs.Bool("dev", false, "enable dev verifier and ephemeral defaults")

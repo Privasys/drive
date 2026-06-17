@@ -29,5 +29,6 @@ COPY --from=builder /drive /usr/local/bin/drive
 
 EXPOSE 8443
 
+# No --addr: the platform injects $PORT (the serve default binds 0.0.0.0:$PORT).
 ENTRYPOINT ["drive"]
-CMD ["serve", "--addr", "0.0.0.0:8443"]
+CMD ["serve"]
