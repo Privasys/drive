@@ -81,6 +81,56 @@ func (s *Store) AddMember(ctx context.Context, m *Member) error {
 	return err
 }
 
+// TenantMembership pairs a tenant with the member's role in it.
+type TenantMembership struct {
+	Tenant Tenant
+	Role   MemberRole
+}
+
+// TenantsOf returns every tenant sub is a member of, with the role.
+func (s *Store) TenantsOf(ctx context.Context, sub string) ([]TenantMembership, error) {
+	rows, err := s.DB.QueryContext(ctx, s.q(
+		`SELECT t.id, t.kind, t.name, t.created_at, m.role
+		 FROM members m JOIN tenants t ON t.id = m.tenant_id
+		 WHERE m.user_sub = ? ORDER BY t.created_at`), sub)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TenantMembership
+	for rows.Next() {
+		var tm TenantMembership
+		var kind, role string
+		if err := rows.Scan(&tm.Tenant.ID, &kind, &tm.Tenant.Name, &tm.Tenant.CreatedAt, &role); err != nil {
+			return nil, err
+		}
+		tm.Tenant.Kind = TenantKind(kind)
+		tm.Role = MemberRole(role)
+		out = append(out, tm)
+	}
+	return out, rows.Err()
+}
+
+// PersonalTenantOf returns the User-kind tenant sub owns, or ErrNotFound.
+// The API keeps this unique per sub (get-or-create on first login).
+func (s *Store) PersonalTenantOf(ctx context.Context, sub string) (*Tenant, error) {
+	row := s.DB.QueryRowContext(ctx, s.q(
+		`SELECT t.id, t.kind, t.name, t.created_at
+		 FROM members m JOIN tenants t ON t.id = m.tenant_id
+		 WHERE m.user_sub = ? AND m.role = ? AND t.kind = ?
+		 ORDER BY t.created_at LIMIT 1`), sub, string(RoleOwner), string(TenantUser))
+	var t Tenant
+	var kind string
+	if err := row.Scan(&t.ID, &kind, &t.Name, &t.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	t.Kind = TenantKind(kind)
+	return &t, nil
+}
+
 // MemberRoleOf returns the role of user_sub inside tenant, or ErrNotFound.
 func (s *Store) MemberRoleOf(ctx context.Context, tenantID, userSub string) (MemberRole, error) {
 	row := s.DB.QueryRowContext(ctx, s.q(

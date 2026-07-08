@@ -35,6 +35,12 @@ export interface DriveChange {
   At: string;
 }
 
+export interface Me {
+  sub: string;
+  email?: string;
+  tenants: { id: string; kind: TenantKind; name: string; role: string }[];
+}
+
 export interface ConnectOptions {
   baseUrl: string;
   token: string;
@@ -67,7 +73,21 @@ export class PrivasysDrive {
     return new PrivasysDrive(opts);
   }
 
-  // --- tenants -------------------------------------------------------
+  // --- identity + tenants --------------------------------------------
+
+  /** The caller's identity and tenant memberships. */
+  async me(): Promise<Me> {
+    return this.req<Me>("GET", "/v1/me");
+  }
+
+  /**
+   * Get or create the caller's personal tenant. Idempotent: the first
+   * call after login creates it, later calls return the same tenant.
+   * This is the wallet's entry point into the user's drive.
+   */
+  async ensurePersonalTenant(): Promise<Tenant> {
+    return this.req<Tenant>("POST", "/v1/me/tenant");
+  }
 
   async createTenant(input: { kind?: TenantKind; name: string }): Promise<Tenant> {
     return this.req<Tenant>("POST", "/v1/tenants", JSON.stringify({ kind: input.kind ?? "user", name: input.name }), "application/json");

@@ -151,6 +151,59 @@ func TestConfigureRequiresAuthenticatedUser(t *testing.T) {
 	}
 }
 
+func TestPersonalTenantAutoProvision(t *testing.T) {
+	ts := newFullServer(t, nil)
+
+	// First call creates the personal tenant.
+	resp, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("first ensure: %d %s", resp.StatusCode, body)
+	}
+	var first struct{ ID, Kind, Name string }
+	_ = json.Unmarshal(body, &first)
+	if first.Kind != "user" || first.Name != "bertrand@privasys.org" {
+		t.Fatalf("personal tenant: %+v", first)
+	}
+
+	// Second call is idempotent: same tenant, 200.
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("second ensure: %d %s", resp.StatusCode, body)
+	}
+	var second struct{ ID string }
+	_ = json.Unmarshal(body, &second)
+	if second.ID != first.ID {
+		t.Fatalf("ensure not idempotent: %s vs %s", second.ID, first.ID)
+	}
+
+	// /v1/me lists the membership with the owner role.
+	resp, body = doJSON(t, "GET", ts.URL+"/v1/me", devAuth, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("me: %d %s", resp.StatusCode, body)
+	}
+	var me struct {
+		Sub     string
+		Tenants []struct{ ID, Role string }
+	}
+	_ = json.Unmarshal(body, &me)
+	if me.Sub != "user-1" || len(me.Tenants) != 1 ||
+		me.Tenants[0].ID != first.ID || me.Tenants[0].Role != "owner" {
+		t.Fatalf("me listing: %s", body)
+	}
+
+	// A different user gets their own tenant, not this one.
+	other := "Bearer dev:user-2:other@example.com"
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant", other, "")
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("other ensure: %d %s", resp.StatusCode, body)
+	}
+	var otherT struct{ ID string }
+	_ = json.Unmarshal(body, &otherT)
+	if otherT.ID == first.ID {
+		t.Fatal("personal tenants must not be shared across subs")
+	}
+}
+
 func TestCrossUserForbidden(t *testing.T) {
 	ts := newFullServer(t, nil)
 

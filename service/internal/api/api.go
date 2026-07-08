@@ -127,6 +127,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	})
+	mux.Handle("GET /v1/me", s.auth(s.handleMe))
+	mux.Handle("POST /v1/me/tenant", s.auth(s.handleEnsurePersonalTenant))
 	mux.Handle("POST /v1/tenants", s.auth(s.handleCreateTenant))
 	mux.Handle("POST /v1/tenants/{tenantID}/members", s.auth(s.handleAddMember))
 	mux.Handle("POST /v1/tenants/{tenantID}/folders", s.auth(s.handleCreateFolder))
