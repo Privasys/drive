@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,8 +38,17 @@ func TestMintAndParseToken(t *testing.T) {
 		t.Fatalf("envelope mismatch: %+v", got)
 	}
 
-	// Tampering with the body bytes (after re-encoding) must fail.
-	bad := tok[:len(tok)-2] + "AA"
+	// Tampering with the envelope must break the signature. Flip one
+	// byte of the decoded body and re-encode: deterministic, unlike
+	// altering trailing base64 characters of the signature, whose
+	// discarded padding bits can leave the decoded bytes unchanged.
+	dot := strings.IndexByte(tok, '.')
+	body, err := base64.RawURLEncoding.DecodeString(tok[:dot])
+	if err != nil {
+		t.Fatal(err)
+	}
+	body[len(body)/2] ^= 0x01
+	bad := base64.RawURLEncoding.EncodeToString(body) + tok[dot:]
 	if _, err := ParseToken(bad); err == nil {
 		t.Fatal("tampered token must fail")
 	}
