@@ -39,6 +39,7 @@ import (
 	"github.com/Privasys/drive/service/internal/oidc"
 	"github.com/Privasys/drive/service/internal/platform"
 	"github.com/Privasys/drive/service/internal/store"
+	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
 var version = "dev"
@@ -159,12 +160,21 @@ func serve(args []string) error {
 		}
 	}
 
+	// Per-tenant vault MEKs need the manager-minted app identity, so the
+	// client only exists on the platform; off-platform tenants stay on
+	// the instance MEK.
+	var meks *vaultmek.Client
+	if pf.OnPlatform() && pf.ContainerToken != "" {
+		meks = vaultmek.New(pf.ManagerURL+"/api/v1/vault-identity", pf.ContainerToken)
+	}
+
 	srv := &api.Server{
 		Store:    st,
 		Backend:  bk,
 		Grants:   gr,
 		Verifier: verifier,
 		MEK:      mek,
+		MEKs:     meks,
 		Revoked:  revoked,
 		Platform: pf,
 		StateDir: *state,

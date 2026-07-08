@@ -30,6 +30,7 @@ import (
 	"github.com/Privasys/drive/service/internal/oidc"
 	"github.com/Privasys/drive/service/internal/platform"
 	"github.com/Privasys/drive/service/internal/store"
+	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
 // appGrantAudience is the aud an AppGrant envelope must carry.
@@ -46,6 +47,11 @@ type Server struct {
 	// Revoked rejects tokens whose IdP session was revoked (long-lived
 	// API keys). Nil disables the check.
 	Revoked *oidc.RevokedSet
+
+	// MEKs provisions and loads per-tenant vault-held MEKs. Nil
+	// disables vault-held tenant keys (tenants stay on the instance
+	// MEK).
+	MEKs *vaultmek.Client
 
 	// Platform is the enclave-manager environment (empty off-platform).
 	Platform platform.Env
@@ -129,6 +135,7 @@ func (s *Server) Routes() http.Handler {
 	})
 	mux.Handle("GET /v1/me", s.auth(s.handleMe))
 	mux.Handle("POST /v1/me/tenant", s.auth(s.handleEnsurePersonalTenant))
+	mux.Handle("POST /v1/me/tenant/key", s.auth(s.handleTenantKey))
 	mux.Handle("POST /v1/tenants", s.auth(s.handleCreateTenant))
 	mux.Handle("POST /v1/tenants/{tenantID}/members", s.auth(s.handleAddMember))
 	mux.Handle("POST /v1/tenants/{tenantID}/folders", s.auth(s.handleCreateFolder))
@@ -303,7 +310,11 @@ func (s *Server) createFolder(ctx context.Context, p *Principal, tenantID, paren
 	if !s.allowNode(ctx, p, tenantID, parentID, grants.ScopeWrite) {
 		return nil, http.StatusForbidden, errors.New("forbidden")
 	}
-	hmacKey, err := crypto.DeriveNameHMACKey(s.MEK, tenantID)
+	mek, err := s.tenantMEK(ctx, tenantID)
+	if err != nil {
+		return nil, http.StatusBadGateway, err
+	}
+	hmacKey, err := crypto.DeriveNameHMACKey(mek, tenantID)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
@@ -378,11 +389,15 @@ func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentI
 	if !s.allowNode(ctx, p, tenantID, parentID, grants.ScopeWrite) {
 		return nil, http.StatusForbidden, errors.New("forbidden")
 	}
-	dek, err := crypto.DeriveDEK(s.MEK, tenantID)
+	mek, err := s.tenantMEK(ctx, tenantID)
+	if err != nil {
+		return nil, http.StatusBadGateway, err
+	}
+	dek, err := crypto.DeriveDEK(mek, tenantID)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	hmacKey, err := crypto.DeriveNameHMACKey(s.MEK, tenantID)
+	hmacKey, err := crypto.DeriveNameHMACKey(mek, tenantID)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
@@ -447,7 +462,11 @@ func (s *Server) openFile(ctx context.Context, p *Principal, tenantID, fileID st
 	if n.Kind != store.NodeFile {
 		return nil, nil, http.StatusBadRequest, errors.New("not a file")
 	}
-	dek, err := crypto.DeriveDEK(s.MEK, tenantID)
+	mek, err := s.tenantMEK(ctx, tenantID)
+	if err != nil {
+		return nil, nil, http.StatusBadGateway, err
+	}
+	dek, err := crypto.DeriveDEK(mek, tenantID)
 	if err != nil {
 		return nil, nil, http.StatusInternalServerError, err
 	}
@@ -484,9 +503,10 @@ func (s *Server) deleteNode(ctx context.Context, p *Principal, tenantID, nodeID 
 		return storeErrorStatus(err), err
 	}
 	if n.Kind == store.NodeFile && n.WrappedCEK != nil {
-		dek, err := crypto.DeriveDEK(s.MEK, tenantID)
-		if err == nil {
-			_ = manifest.Delete(ctx, s.Backend, dek, tenantID, n.ID, n.WrappedCEK)
+		if mek, merr := s.tenantMEK(ctx, tenantID); merr == nil {
+			if dek, derr := crypto.DeriveDEK(mek, tenantID); derr == nil {
+				_ = manifest.Delete(ctx, s.Backend, dek, tenantID, n.ID, n.WrappedCEK)
+			}
 		}
 	}
 	if err := s.Store.DeleteNode(ctx, tenantID, nodeID, p.Sub); err != nil {
@@ -600,7 +620,12 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, p *Princip
 	if req.Mode == "" {
 		req.Mode = export.ModePlaintext
 	}
-	dek, err := crypto.DeriveDEK(s.MEK, tenantID)
+	mek, err := s.tenantMEK(r.Context(), tenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	dek, err := crypto.DeriveDEK(mek, tenantID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -81,6 +81,34 @@ func (s *Store) AddMember(ctx context.Context, m *Member) error {
 	return err
 }
 
+// SetTenantMekRef persists the tenant's vault MEK reference (JSON).
+func (s *Store) SetTenantMekRef(ctx context.Context, tenantID, ref string) error {
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE tenants SET mek_ref = ? WHERE id = ?`), ref, tenantID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// TenantMekRef returns the tenant's persisted vault MEK reference, or
+// "" when the tenant still uses the instance MEK.
+func (s *Store) TenantMekRef(ctx context.Context, tenantID string) (string, error) {
+	row := s.DB.QueryRowContext(ctx, s.q(
+		`SELECT COALESCE(mek_ref, '') FROM tenants WHERE id = ?`), tenantID)
+	var ref string
+	if err := row.Scan(&ref); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return ref, nil
+}
+
 // TenantMembership pairs a tenant with the member's role in it.
 type TenantMembership struct {
 	Tenant Tenant

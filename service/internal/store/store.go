@@ -199,6 +199,13 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate: %w (stmt: %s)", err, stmt)
 		}
 	}
+	// Additive columns on existing deployments (CREATE IF NOT EXISTS
+	// leaves them untouched); a duplicate-column error means it is
+	// already there.
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE tenants ADD COLUMN mek_ref TEXT`); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+		return fmt.Errorf("migrate: add tenants.mek_ref: %w", err)
+	}
 	return nil
 }
 

@@ -89,6 +89,27 @@ export class PrivasysDrive {
     return this.req<Tenant>("POST", "/v1/me/tenant");
   }
 
+  /**
+   * Provision (or re-arm after a restart) the personal tenant's
+   * vault-held MEK. Pass the bundle from the control plane's
+   * POST /api/v1/apps/{id}/data-keys/grant response; the enclave
+   * generates the key and splits it across the constellation. Later
+   * calls just refresh the attestation token and warm the key cache.
+   */
+  async provisionTenantKey(bundle: {
+    grant?: string;
+    handle?: string;
+    attestation_token?: string;
+    constellation?: {
+      endpoints: string[];
+      mrenclave: string;
+      attestation_server: string;
+      threshold: number;
+    };
+  }): Promise<{ status: string; handle: string }> {
+    return this.req("POST", "/v1/me/tenant/key", JSON.stringify(bundle), "application/json");
+  }
+
   async createTenant(input: { kind?: TenantKind; name: string }): Promise<Tenant> {
     return this.req<Tenant>("POST", "/v1/tenants", JSON.stringify({ kind: input.kind ?? "user", name: input.name }), "application/json");
   }

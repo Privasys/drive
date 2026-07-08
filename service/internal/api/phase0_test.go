@@ -204,6 +204,18 @@ func TestPersonalTenantAutoProvision(t *testing.T) {
 	}
 }
 
+func TestTenantKeyGuards(t *testing.T) {
+	ts := newFullServer(t, nil)
+
+	// Without a vault client (off-platform), the endpoint says so.
+	resp, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{}`)
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("tenant key without vault client: %d %s", resp.StatusCode, body)
+	}
+	// Tenants without a vault MEK keep working on the instance MEK:
+	// the upload/download roundtrip in TestEndToEnd covers that path.
+}
+
 func TestCrossUserForbidden(t *testing.T) {
 	ts := newFullServer(t, nil)
 

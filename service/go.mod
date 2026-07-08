@@ -23,3 +23,12 @@ require (
 	modernc.org/strutil v1.2.1 // indirect
 	modernc.org/token v1.1.0 // indirect
 )
+
+require (
+	enclave-os-mini/clients/go v0.0.0
+	github.com/Privasys/enclave-vaults-client/go v0.0.0
+)
+
+replace enclave-os-mini/clients/go => ../../platform/ra-tls-clients/go
+
+replace github.com/Privasys/enclave-vaults-client/go => ../../platform/enclave-vaults-client/go
