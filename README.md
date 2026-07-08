@@ -6,7 +6,7 @@
 service that powers Privasys Wallet, Privasys Chat, Privasys Secure Room,
 and any third-party app on the Privasys platform.
 
-The tenant — an individual user OR an enterprise — owns the bytes. The
+The tenant (an individual user OR an enterprise) owns the bytes. The
 platform never sees plaintext. Files at rest live as AEAD-sealed,
 content-addressed chunks in any object store the tenant chooses (GCS,
 OVH, S3, Azure, …). The directory listing, ACLs, and key wrapping live
@@ -31,7 +31,7 @@ This is a monorepo:
   CEKs wrapped under per-tenant DEKs derived from a Shamir-shared MEK
   held in the SGX vault constellation.
 - **Tenant model.** `User` (one owner) or `Enterprise` (multiple
-  owners + role-based ACLs at the folder level — SharePoint-style).
+  owners + role-based ACLs at the folder level, SharePoint-style).
 - **Multi-cloud.** Pluggable `ObjectBackend` interface; ship with
   GCS + local-disk; OVH / S3 / Azure follow.
 - **Tamper-evident.** Per-file Merkle tree over chunk ciphertext;
@@ -79,12 +79,12 @@ the image's `org.privasys.manifest` OCI label), persists its index +
 instance config on the sealed per-app `/data` volume
 (`container_storage: true`), and self-recovers the configure-then-freeze
 gate on restart. The image is published to `ghcr.io/privasys/drive` by
-[.github/workflows/service.yml](.github/workflows/service.yml) — **pin
+[.github/workflows/service.yml](.github/workflows/service.yml). **Pin
 deployments by the registry digest printed in the workflow summary, never
 by a mutable tag**.
 
 An instance runs in one of two attestable operating modes, set once at
-configure time: **sovereign** (only tenants can unlock their data — the
+configure time: **sovereign** (only tenants can unlock their data; the
 operator holds no key) or **escrowed** (org master-key escrow with
 policy-gated, audited recovery; ships later).
 

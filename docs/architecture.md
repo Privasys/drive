@@ -20,7 +20,7 @@ canonical, long-lived description of the system.
 │  └─────────┘  └──────────┘  └──────────┘  └─────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │ SQL index (tenants, members, nodes, grants, changes)         │  │
-│  │ — lives on the sealed per-app /data volume                   │  │
+│  │   lives on the sealed per-app /data volume                   │  │
 │  │   (container_storage; vault-backed, measurement-gated DEK)   │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────┘
@@ -54,18 +54,18 @@ Drive itself never calls a model.
 
 ## 2. Data model
 
-- **Tenant** — `User` (one owner) or `Enterprise` (members with roles
+- **Tenant**: `User` (one owner) or `Enterprise` (members with roles
   `owner | admin | contributor | reader`). Per-folder `acl_override`
   jsonb supports SharePoint-style fine-grained ACLs without altering
   the closure tree.
-- **Node** — folder or file. Filenames are stored in plaintext (the
+- **Node**: folder or file. Filenames are stored in plaintext (the
   index lives inside the TDX-protected disk); a 32-byte HMAC tag
   enforces (parent, name) uniqueness.
-- **File manifest** — JSON describing a list of AEAD-sealed chunks
+- **File manifest**: JSON describing a list of AEAD-sealed chunks
   (max 4 MiB plaintext each, XChaCha20-Poly1305) plus a SHA-256
   Merkle root over the chunk ciphertext hashes. The manifest itself
   is sealed under the per-file CEK and persisted next to the chunks.
-- **Grant** — three-audience share:
+- **Grant**: three-audience share:
   - `subject:<sub>` user-to-user (wallet re-wraps the CEK)
   - `link` anonymous static link with URL fragment-secret
   - `app:<mrtd>` third-party platform app authenticated by an
@@ -92,7 +92,7 @@ already carries a `v` field.
 | Surface | Use |
 |---|---|
 | REST `/v1/...` | Wallet, web clients, server-to-server (streaming up/download) |
-| Manifest tools `/tools/...` | Portal Configure/Manage, CLI, MCP, LLM agents — declared in `privasys.json` (`org.privasys.manifest` OCI label) |
+| Manifest tools `/tools/...` | Portal Configure/Manage, CLI, MCP, LLM agents; declared in `privasys.json` (`org.privasys.manifest` OCI label) |
 
 Both surfaces share the same internal handlers and access checks; the
 tools are plain-JSON POST wrappers capped at 8 MiB per file (larger

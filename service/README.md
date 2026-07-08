@@ -1,4 +1,4 @@
-# `service/` — Privasys Drive service
+# `service/`: Privasys Drive service
 
 Go binary that:
 
@@ -12,7 +12,7 @@ Go binary that:
   [object backend](internal/objectstore/objectstore.go) (local-disk
   today; GCS/OVH/S3 in Phase 3).
 - Exposes the operations as REST (`/v1/...`) and as manifest tools
-  (`/tools/...`, plain-JSON POST — what the portal, CLI and MCP surface
+  (`/tools/...`, plain-JSON POST; the surface the portal, CLI and MCP
   invoke).
 - Verifies `privasys.id` bearer tokens in-enclave (offline JWKS), with
   revoked-session polling and the configure-authz role check
@@ -47,7 +47,7 @@ go run ./cmd/drive serve --dev
 ## Threat model in one paragraph
 
 Plaintext bytes never leave the enclave's RAM. The object backend sees
-nothing but content-addressed AEAD ciphertext — even the operator with
+nothing but content-addressed AEAD ciphertext; even the operator with
 root on the storage host cannot enumerate, modify, or correlate
 chunks beyond byte counts. Filenames are stored in plaintext in the
 index because the index lives on the platform's sealed per-app volume

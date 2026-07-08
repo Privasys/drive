@@ -1,7 +1,7 @@
-# `sdk/` — `@privasys/drive-sdk`
+# `sdk/`: `@privasys/drive-sdk`
 
 Tiny TypeScript client over the Privasys Drive REST API. Browser, Node
-(≥20), and React Native compatible — uses `fetch` and Web Streams only.
+(≥20), and React Native compatible; uses `fetch` and Web Streams only.
 
 ```ts
 import { PrivasysDrive } from "@privasys/drive-sdk";

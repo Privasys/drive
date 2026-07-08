@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"errors"
@@ -141,7 +142,7 @@ func serve(args []string) error {
 	}
 	gr := grants.New(db, false)
 
-	mek, err := loadMEK(*mekHex, *dev)
+	mek, err := loadMEK(*mekHex, *state, *dev)
 	if err != nil {
 		return err
 	}
@@ -225,7 +226,13 @@ func manifestPath() string {
 	return ""
 }
 
-func loadMEK(mekHex string, dev bool) ([]byte, error) {
+// loadMEK resolves the interim instance-wide MEK. An explicit hex seed
+// wins (tests / local runs) and --dev uses a deterministic value;
+// otherwise a random MEK is generated on first boot and persisted on
+// the state dir, which on the platform is the sealed /data volume
+// (protected by the vault-backed, measurement-gated volume DEK).
+// Per-tenant vault-held MEKs supersede this instance-wide interim.
+func loadMEK(mekHex, stateDir string, dev bool) ([]byte, error) {
 	if mekHex == "" {
 		mekHex = os.Getenv("DRIVE_MEK_HEX")
 	}
@@ -239,5 +246,22 @@ func loadMEK(mekHex string, dev bool) ([]byte, error) {
 		sum := sha256.Sum256([]byte("privasys-drive-dev-mek-do-not-use-in-prod"))
 		return sum[:], nil
 	}
-	return nil, errors.New("--mek-hex or DRIVE_MEK_HEX required (per-tenant vault MEKs land next; see the plan §5.3)")
+	mekPath := filepath.Join(stateDir, "mek")
+	if b, err := os.ReadFile(mekPath); err == nil {
+		if len(b) != 32 {
+			return nil, fmt.Errorf("persisted MEK at %s has length %d, want 32", mekPath, len(b))
+		}
+		return b, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	mek := make([]byte, 32)
+	if _, err := rand.Read(mek); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(mekPath, mek, 0o600); err != nil {
+		return nil, err
+	}
+	log.Printf("drive: generated instance MEK, persisted on %s", filepath.Clean(stateDir))
+	return mek, nil
 }

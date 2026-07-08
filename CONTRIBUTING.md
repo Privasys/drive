@@ -9,7 +9,7 @@ Thank you for your interest in Privasys Drive.
   merge. Squash-merge is the default.
 - Conventional Commits style for messages
   (`feat(service): add app-grant revocation endpoint`).
-- AGPL-3.0 — by contributing you license your work under the same
+- AGPL-3.0: by contributing you license your work under the same
   terms.
 
 ## Development setup
@@ -51,12 +51,12 @@ go run ./cmd/drive serve --dev
   SQLite and Postgres backends.
 - Crypto invariants (round-trip, tamper-detection, Merkle-root
   stability) live in `service/internal/crypto/*_test.go` and MUST be
-  kept exhaustive — these are the trust core.
+  kept exhaustive; these are the trust core.
 
 ## Reporting bugs
 
 Open a [GitHub issue](https://github.com/Privasys/drive/issues). For
-security bugs, see [SECURITY.md](SECURITY.md) — please do not open
+security bugs, see [SECURITY.md](SECURITY.md); please do not open
 public issues for them.
 
 ## Code review checklist
