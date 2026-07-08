@@ -66,9 +66,10 @@ type configureRequest struct {
 }
 
 // handleConfigure is the role:config manifest tool. The enclave-os
-// manager enforces the configure-authz standard upstream on every
-// configure call; this in-app check is defence in depth for the direct
-// RA-TLS path.
+// manager enforces the configure-authz standard (owner/admin role) on
+// every externally reachable path, including direct RA-TLS; the app
+// must not re-check the role because proxied configure calls do not
+// carry the user's bearer verbatim.
 func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request, p *Principal) {
 	if err := s.configureAllowed(p); err != nil {
 		httpError(w, http.StatusForbidden, err)
@@ -98,27 +99,13 @@ func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request, p *Prin
 	writeJSON(w, http.StatusOK, map[string]any{"status": "configured", "mode": cfg.Mode})
 }
 
-// configureAllowed implements the configure-authz standard: the caller's
-// platform bearer must carry the per-app owner or admin role
-// (privasys-platform:app:<app-id-hex>:owner|admin). App-grant principals
-// can never configure. DevMode (dev verifier, no platform roles) skips
-// the role check.
+// configureAllowed requires an authenticated user principal (app grants
+// can never configure). The owner/admin role itself is enforced by the
+// enclave-os runtime in front of the app; the residual localhost
+// surface inside the TD is a fleet-level concern, not per-app.
 func (s *Server) configureAllowed(p *Principal) error {
 	if !p.IsUser() {
 		return errors.New("app grants cannot configure the instance")
 	}
-	if s.DevMode {
-		return nil
-	}
-	hexID := s.Platform.AppIDHex()
-	if hexID == "" {
-		// Fail closed: without the platform app identity we cannot name
-		// the owner role, so nobody configures.
-		return errors.New("configure requires the platform app identity (PRIVASYS_APP_ID)")
-	}
-	if p.ID.HasRole("privasys-platform:app:"+hexID+":owner") ||
-		p.ID.HasRole("privasys-platform:app:"+hexID+":admin") {
-		return nil
-	}
-	return errors.New("caller lacks the app owner/admin role")
+	return nil
 }

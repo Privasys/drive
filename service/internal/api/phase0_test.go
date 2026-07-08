@@ -132,22 +132,22 @@ func TestConfigPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-func TestConfigureAuthzFailsClosedOffDev(t *testing.T) {
-	// Without DevMode, the dev verifier yields no platform roles, so
-	// configure must be refused — both with and without an app identity.
+func TestConfigureRequiresAuthenticatedUser(t *testing.T) {
+	// The owner/admin role is enforced by the enclave-os runtime in
+	// front of the app (proxied configure calls do not carry the user's
+	// bearer verbatim, so the app cannot re-check it). In-app, configure
+	// requires an authenticated user; anonymous callers are rejected.
 	ts := newFullServer(t, func(s *Server) {
 		s.DevMode = false
 		s.Platform = platform.Env{AppID: "9e107d9d-52bb-4c2e-8f25-7673a955a0d1"}
 	})
-	resp, _ := doJSON(t, "POST", ts.URL+"/configure", devAuth, `{"mode":"sovereign"}`)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("configure without role: %d", resp.StatusCode)
+	resp, _ := doJSON(t, "POST", ts.URL+"/configure", "", `{"mode":"sovereign"}`)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous configure: %d", resp.StatusCode)
 	}
-
-	ts2 := newFullServer(t, func(s *Server) { s.DevMode = false })
-	resp, _ = doJSON(t, "POST", ts2.URL+"/configure", devAuth, `{"mode":"sovereign"}`)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("configure without app identity: %d", resp.StatusCode)
+	resp, _ = doJSON(t, "POST", ts.URL+"/configure", devAuth, `{"mode":"sovereign"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("authenticated configure: %d", resp.StatusCode)
 	}
 }
 

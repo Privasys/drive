@@ -14,9 +14,10 @@ Go binary that:
 - Exposes the operations as REST (`/v1/...`) and as manifest tools
   (`/tools/...`, plain-JSON POST; the surface the portal, CLI and MCP
   invoke).
-- Verifies `privasys.id` bearer tokens in-enclave (offline JWKS), with
-  revoked-session polling and the configure-authz role check
-  (`privasys-platform:app:<id-hex>:owner|admin`) on privileged tools.
+- Verifies `privasys.id` bearer tokens in-enclave (offline JWKS) with
+  revoked-session polling. The configure-authz owner/admin role is
+  enforced by the enclave-os runtime in front of the app; in-app,
+  configure requires an authenticated user and rejects app grants.
 - Mints + verifies Ed25519-signed AppGrant tokens that let third-party
   platform apps act on the tenant's behalf with a scoped, time-bounded,
   revocable grant, confined to the granted node's subtree.

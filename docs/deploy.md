@@ -58,8 +58,12 @@ of the attested configuration.
 Configure via the portal Configure tab, or over RA-TLS:
 `privasys apps configure privasys-drive --set mode=sovereign`.
 
-Privileged calls are additionally checked in-app against the
-configure-authz roles (`privasys-platform:app:<app-id-hex>:owner|admin`).
+The owner/admin configure-authz roles
+(`privasys-platform:app:<app-id-hex>:owner|admin`) are enforced by the
+enclave-os runtime in front of the app on every externally reachable
+path; the app itself only requires an authenticated user (proxied
+configure calls do not carry the user's bearer verbatim, so an in-app
+role re-check would wrongly reject them).
 
 ## 4. Runtime environment
 
