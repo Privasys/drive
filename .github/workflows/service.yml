@@ -69,7 +69,7 @@ jobs:
         run: |
           {
             echo "json<<PRIVASYS_MANIFEST_EOF"
-            jq -c . service/privasys.json
+            jq -c . privasys.json
             echo "PRIVASYS_MANIFEST_EOF"
           } >> "$GITHUB_OUTPUT"
       # provenance:false keeps the pushed manifest a plain single image so
