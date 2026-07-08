@@ -64,14 +64,13 @@ jobs:
       - id: version
         run: echo "value=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
       # The platform reads the app's typed capabilities from the
-      # org.privasys.manifest OCI label — bake the minified privasys.json in.
+      # org.privasys.manifest OCI label. Base64-encode the minified
+      # privasys.json: the action's labels input is CSV-parsed, which
+      # strips interior quotes from raw JSON (any `,"x",` sequence);
+      # the platform accepts base64-encoded JSON labels for this reason.
       - id: manifest
         run: |
-          {
-            echo "json<<PRIVASYS_MANIFEST_EOF"
-            jq -c . privasys.json
-            echo "PRIVASYS_MANIFEST_EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "json=$(jq -c . privasys.json | base64 -w0)" >> "$GITHUB_OUTPUT"
       # provenance:false keeps the pushed manifest a plain single image so
       # the registry digest is stable — deployments pin that digest.
       - id: push
