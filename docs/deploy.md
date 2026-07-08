@@ -39,8 +39,10 @@ The service follows the app-capabilities contract:
   successful `POST /configure`. On restart the service re-applies the
   persisted config and calls the manager's `config-complete` itself; no
   owner is needed after the one-time setup.
-- `readiness_path: /health` (503 until configured), `status_path:
-  /status` (state/activity/message document for the portal).
+- `/health` is process liveness (always 200; the manager's container
+  health check probes it). `readiness_path: /readiness` (503 until
+  configured), `status_path: /status` (state/activity/message document
+  for the portal).
 
 ## 3. Configuration (the `configure` tool)
 

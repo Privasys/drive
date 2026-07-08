@@ -13,7 +13,7 @@
         "name": "configure",
         "title": "Drive instance settings",
         "endpoint": "/configure",
-        "readiness_path": "/health",
+        "readiness_path": "/readiness",
         "status_path": "/status",
         "description": "Set the instance operating mode and defaults, lifting the configure-then-freeze gate. The mode is immutable once set and is part of the attested configuration: 'sovereign' means only tenants can ever unlock their data (the operator holds no key); 'escrowed' adds an org master-key escrow with policy-gated recovery. Settings persist on the sealed volume and re-apply automatically on restart.",
         "inputSchema": {

@@ -63,10 +63,14 @@ const devAuth = "Bearer dev:user-1:bertrand@privasys.org"
 func TestConfigureLifecycle(t *testing.T) {
 	ts := newFullServer(t, nil)
 
-	// Before configure: readiness 503, status awaiting_config.
+	// Before configure: liveness 200, readiness 503, status awaiting_config.
 	resp, _ := doJSON(t, "GET", ts.URL+"/health", "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health (liveness) before configure: %d", resp.StatusCode)
+	}
+	resp, _ = doJSON(t, "GET", ts.URL+"/readiness", "", "")
 	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("health before configure: %d", resp.StatusCode)
+		t.Fatalf("readiness before configure: %d", resp.StatusCode)
 	}
 	resp, body := doJSON(t, "GET", ts.URL+"/status", "", "")
 	if resp.StatusCode != 200 || !strings.Contains(string(body), "awaiting_config") {
@@ -90,9 +94,9 @@ func TestConfigureLifecycle(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("configure: %d %s", resp.StatusCode, body)
 	}
-	resp, _ = doJSON(t, "GET", ts.URL+"/health", "", "")
+	resp, _ = doJSON(t, "GET", ts.URL+"/readiness", "", "")
 	if resp.StatusCode != 200 {
-		t.Fatalf("health after configure: %d", resp.StatusCode)
+		t.Fatalf("readiness after configure: %d", resp.StatusCode)
 	}
 	resp, body = doJSON(t, "GET", ts.URL+"/status", "", "")
 	if !strings.Contains(string(body), `"ready"`) || !strings.Contains(string(body), "sovereign") {

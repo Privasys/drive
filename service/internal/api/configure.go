@@ -7,14 +7,21 @@ import (
 	"github.com/Privasys/drive/service/internal/config"
 )
 
-// handleHealth is the manifest's readiness_path: 503 until the instance
-// is configured, 200 after. (Process liveness is GET /v1/healthz.)
+// handleHealth is process liveness: 200 whenever the service is up. The
+// manager's container health check probes this, so it must not signal
+// configuration state (that is what /readiness is for).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+// handleReadiness is the manifest's readiness_path: 503 until the
+// instance is configured, 200 after.
+func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	if s.CurrentConfig() == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "awaiting_config"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
 }
 
 // appStatusDoc is the tolerant status document the platform reconciler

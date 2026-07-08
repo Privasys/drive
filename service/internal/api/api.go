@@ -107,6 +107,7 @@ func (s *Server) Handler(manifestPath string) http.Handler {
 	mux.Handle("/v1/", s.Routes())
 	mux.Handle("/tools/", s.Tools())
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /readiness", s.handleReadiness)
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.Handle("POST /status", s.auth(s.handleStatusTool))
 	mux.Handle("POST /configure", s.auth(s.handleConfigure))
