@@ -6,43 +6,43 @@ canonical, long-lived description of the system.
 ## 1. Components
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Client (wallet / chat.privasys.org / 3rd-party platform app)        │
-│  - holds OIDC ID-token from privasys.id                              │
-│  - holds (or mints) AppGrant tokens for non-wallet apps              │
-└─────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  Client (wallet / chat.privasys.org / 3rd-party platform app)      │
+│  - holds OIDC ID-token from privasys.id                            │
+│  - holds (or mints) AppGrant tokens for non-wallet apps            │
+└────────────────────────────────────────────────────────────────────┘
                             │  HTTPS + RA-TLS (MRTD pinned)
                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  Drive enclave (TDX, enclave-os-virtual)                             │
-│  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────────┐   │
-│  │ REST API│  │ Tools    │  │ Grants   │  │ AEAD chunk store    │   │
-│  └─────────┘  └──────────┘  └──────────┘  └─────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────────────┐    │
-│  │ SQL index (tenants, members, nodes, grants, changes)         │   │
-│  │ — lives on the sealed per-app /data volume                   │   │
-│  │   (container_storage; vault-backed, measurement-gated DEK)   │   │
-│  └─────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  Drive enclave (TDX, enclave-os-virtual)                           │
+│  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────────┐  │
+│  │ REST API│  │ Tools    │  │ Grants   │  │ AEAD chunk store    │  │
+│  └─────────┘  └──────────┘  └──────────┘  └─────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │ SQL index (tenants, members, nodes, grants, changes)         │  │
+│  │ — lives on the sealed per-app /data volume                   │  │
+│  │   (container_storage; vault-backed, measurement-gated DEK)   │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────┘
                             │       │
               backend keys  │       │  ed25519 keys for AppGrants,
               (DEK, NameHMAC│       │  bound to wallet pubkey
               derived from  │       │
               MEK)          ▼       ▼
               ┌────────────────────────────────────┐
-              │ SGX vault constellation             │
-              │ vault:apps.privasys.org/<app-id>/   │
-              │   data/<tenant-ref>/mek/v1          │
-              │ (owner = the tenant's sub; version  │
-              │  bumped per tenant MEK rotation)    │
+              │ SGX vault constellation            │
+              │ vault:apps.privasys.org/<app-id>/  │
+              │   data/<tenant-ref>/mek/v1         │
+              │ (owner = the tenant's sub; version │
+              │  bumped per tenant MEK rotation)   │
               └────────────────────────────────────┘
                             │
                             ▼
               ┌───────────────────────────────┐
-              │ Object backend per tenant      │
-              │  default: GCS                  │
-              │     bucket: privasys-drive-…   │
-              │  alt: OVH/S3/Azure/local-disk  │
+              │ Object backend per tenant     │
+              │  default: GCS                 │
+              │     bucket: privasys-drive-…  │
+              │  alt: OVH/S3/Azure/local-disk │
               └───────────────────────────────┘
 ```
 
