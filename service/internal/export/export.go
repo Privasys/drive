@@ -55,10 +55,10 @@ type EntryDescriptor struct {
 // export ZIP. It is deterministic for a given tenant snapshot so that
 // two exports of the same tree byte-compare equal in the descriptor.
 type TopManifest struct {
-	TenantID   string            `json:"tenant_id"`
-	Mode       Mode              `json:"mode"`
-	GeneratedAt time.Time        `json:"generated_at"`
-	Entries    []EntryDescriptor `json:"entries"`
+	TenantID    string            `json:"tenant_id"`
+	Mode        Mode              `json:"mode"`
+	GeneratedAt time.Time         `json:"generated_at"`
+	Entries     []EntryDescriptor `json:"entries"`
 }
 
 // WriteZip writes a complete export of tenantID into out. dek is the

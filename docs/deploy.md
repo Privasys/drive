@@ -1,71 +1,99 @@
 # Deploying Privasys Drive
 
-This document describes how the production Drive enclave is deployed.
+Drive deploys as a **standard Privasys container app** on the TDX fleet
+(`enclave-os-virtual`) — no bespoke plumbing. This document describes the
+production deployment contract.
 
 ## 1. Image
 
-Each push to `main` produces a reproducible image tagged
-`ghcr.io/privasys/drive:<sha>` (and `:latest`). Operators pin the
-`@sha256:...` digest in the Enclave OS Virtual workload manifest.
+Each push to `main` builds `ghcr.io/privasys/drive` with the app manifest
+baked into the `org.privasys.manifest` OCI label (from
+`service/privasys.json`) and `provenance: false` so the registry digest is
+stable. The workflow summary prints the pinnable digest.
+
+**Always deploy by digest, never by a mutable tag:**
 
 ```bash
-gh release download <tag> --repo Privasys/drive
-docker pull ghcr.io/privasys/drive:<sha>
+privasys apps create privasys-drive \
+  --image ghcr.io/privasys/drive@sha256:<digest> \
+  --container-storage
+privasys apps deploy privasys-drive --watch
 ```
 
-## 2. Confidential VM
+Note: a package/prebuilt app's capabilities are read from the image label
+at app creation — pushing a new manifest means a new image digest and a
+new version.
 
-Drive runs as a workload inside Enclave OS Virtual on a TDX-capable
-host. The VM disk is LUKS-encrypted and the Postgres data directory
-sits on a dedicated LV mounted under `/var/lib/postgresql/17/main`.
+## 2. Platform contract
 
-The container app manifest looks like:
+The service follows the app-capabilities contract:
 
-```yaml
-name: drive
-image: ghcr.io/privasys/drive@sha256:<digest>
-ports:
-  - 8443
-volumes:
-  - name: pgdata
-    path: /var/lib/postgresql/17/main
-    luks: true
-env:
-  DRIVE_DB_DSN: "postgres://drive:..."
-  DRIVE_OBJECT_BACKEND: "gcs"
-  DRIVE_GCS_BUCKET: "privasys-drive-prod-europe-west9"
-  DRIVE_OIDC_ISSUER: "https://privasys.id"
-  DRIVE_OIDC_AUDIENCE: "privasys-drive"
-ra_tls:
-  oid_extensions:
-    - "1.3.6.1.4.1.55720.1"  # MRTD measurement
-```
+- Listens on the manager-injected `$PORT` (never 8080 — reserved).
+- `container_storage: true` gives it the sealed per-app `/data` LUKS
+  volume; the index DB (`/data/drive.db`), object store
+  (`/data/objects/`) and instance config (`/data/config.json`) live
+  there. The volume's DEK is vault-backed and measurement-gated; an
+  enclave-os or image upgrade requires the app owner to stage + promote
+  the new measurement (WebAuthn step-up).
+- Configure-then-freeze: the manager 503-gates the app until the first
+  successful `POST /configure`. On restart the service re-applies the
+  persisted config and calls the manager's `config-complete` itself — no
+  owner needed after the one-time setup.
+- `readiness_path: /health` (503 until configured), `status_path:
+  /status` (state/activity/message document for the portal).
 
-## 3. Vault
+## 3. Configuration (the `configure` tool)
 
-Each tenant's MEK is reconstructed on demand from a 2-of-4 RawShare
-held by the SGX vault constellation under
-`vault:drive/<tenant_id>/mek/v1`. The wallet's RA-TLS handshake to
-the vault grants a short-lived authorisation header that the Drive
-enclave includes when pulling the share.
+One required field: the **operating mode**, immutable once set and part
+of the attested configuration.
 
-## 4. Object backend
+| Field | Values | Meaning |
+|---|---|---|
+| `mode` | `sovereign` | Only tenants can unlock their data; the operator holds no key and no unlock path. The Privasys public instance runs this. |
+| | `escrowed` | Tenant keys carry an escrow wrap under the org master key (`MEK_org`); recovery is policy-gated and audited. Requires the org key ceremony — not yet shipped; rejected by this build. |
+| `quota_default_bytes` | integer | Default per-tenant quota; 0 = unlimited. |
 
-In production the GCS bucket pattern is:
+Configure via the portal Configure tab, or over RA-TLS:
+`privasys apps configure privasys-drive --set mode=sovereign`.
 
-```
-privasys-drive-<env>-<region>
-e.g. privasys-drive-prod-europe-west9
-```
+Privileged calls are additionally checked in-app against the
+configure-authz roles (`privasys-platform:app:<app-id-hex>:owner|admin`).
 
-Per-tenant prefixes (`t/<tenant_prefix>/...`) keep one bucket safe for
-many tenants; per-region buckets keep data residency simple.
+## 4. Runtime environment
 
-## 5. Smoke test
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | (platform-injected) | Listen port. Local default `127.0.0.1:8443`. |
+| `DRIVE_STATE_DIR` | `/data` on platform, `data-dev` locally | Index DB + objects + config. |
+| `OIDC_ISSUER` | `https://privasys.id` | JWKS verifier issuer (offline, in-enclave). |
+| `OIDC_AUDIENCE` | (unset) | Optional required `aud`. |
+| `OIDC_REVOKED_URL` | `<issuer>/sessions/revoked` | Revoked-session feed; `off` disables. |
+| `DRIVE_MEK_HEX` | (unset) | Interim dev/test MEK. Per-tenant vault MEKs replace this (plan §5.3). |
+| `DRIVE_MANIFEST_PATH` | `/privasys.json` | Manifest served at `GET /privasys.json`. |
+| `PRIVASYS_APP_ID` / `PRIVASYS_CONTAINER_NAME` / `PRIVASYS_CONTAINER_TOKEN` | (manager-injected) | App identity for configure-authz + the config-complete self-recovery call. |
+
+## 5. Vault (target key model)
+
+Per-tenant MEKs are vault keys minted via grant-based `CreateKey` with
+the tenant's privasys.id sub as the only owner principal, handle
+`vault:apps.privasys.org/<app-id>/data/<tenant-ref>/mek/v1`
+(the data-owner-key namespace). Sovereign instances mark them
+exportable to the owner only. Not wired in this build — `DRIVE_MEK_HEX`
+is the interim.
+
+## 6. Object backend
+
+The v1 backend is the sealed local volume (`/data/objects`). Cloud
+backends (GCS first: bucket pattern `privasys-drive-<env>-<region>`,
+per-tenant prefixes `t/<tenant_prefix>/...`) land in Phase 3.
+
+## 7. Smoke test
 
 ```bash
 DRIVE_URL=https://drive-demo.apps-test.privasys.org
-TOKEN=$(privasys-id login --audience privasys-drive)
 
-curl -sS -H "Authorization: Bearer $TOKEN" "$DRIVE_URL/v1/healthz"
+curl -sS "$DRIVE_URL/status"          # state: awaiting_config | ready
+curl -sS "$DRIVE_URL/v1/healthz"      # process liveness
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  -X POST "$DRIVE_URL/tools/list_root" -d '{"tenant_id":"..."}'
 ```

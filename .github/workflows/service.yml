@@ -63,13 +63,32 @@ jobs:
         run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - id: version
         run: echo "value=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v7
+      # The platform reads the app's typed capabilities from the
+      # org.privasys.manifest OCI label — bake the minified privasys.json in.
+      - id: manifest
+        run: |
+          {
+            echo "json<<PRIVASYS_MANIFEST_EOF"
+            jq -c . service/privasys.json
+            echo "PRIVASYS_MANIFEST_EOF"
+          } >> "$GITHUB_OUTPUT"
+      # provenance:false keeps the pushed manifest a plain single image so
+      # the registry digest is stable — deployments pin that digest.
+      - id: push
+        uses: docker/build-push-action@v7
         with:
           context: service
           file: service/Dockerfile
           push: true
+          provenance: false
           build-args: |
             VERSION=${{ steps.version.outputs.value }}
+          labels: |
+            org.privasys.manifest=${{ steps.manifest.outputs.json }}
           tags: |
             ghcr.io/${{ steps.repo.outputs.name }}:latest
             ghcr.io/${{ steps.repo.outputs.name }}:${{ steps.version.outputs.value }}
+      - name: Print pinnable digest
+        run: |
+          echo "Deploy by digest, never by tag:" >> "$GITHUB_STEP_SUMMARY"
+          echo '`ghcr.io/${{ steps.repo.outputs.name }}@${{ steps.push.outputs.digest }}`' >> "$GITHUB_STEP_SUMMARY"

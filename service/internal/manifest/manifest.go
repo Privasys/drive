@@ -29,9 +29,9 @@ type Chunk struct {
 // AEAD-sealed under the per-file CEK before being persisted.
 type Manifest struct {
 	Version    int     `json:"v"`
-	PlainSize  int64   `json:"p"`        // sum of plaintext chunk sizes
-	ChunkSize  uint32  `json:"c"`        // max plaintext per chunk
-	MerkleRoot string  `json:"m"`        // hex(MerkleRoot of CipherHashes)
+	PlainSize  int64   `json:"p"` // sum of plaintext chunk sizes
+	ChunkSize  uint32  `json:"c"` // max plaintext per chunk
+	MerkleRoot string  `json:"m"` // hex(MerkleRoot of CipherHashes)
 	Chunks     []Chunk `json:"k"`
 	MimeHint   string  `json:"t,omitempty"`
 }

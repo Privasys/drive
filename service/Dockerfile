@@ -26,6 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /drive /usr/local/bin/drive
+# The app manifest: also baked into the org.privasys.manifest OCI label
+# by CI (the platform reads capabilities from the label; the file serves
+# GET /privasys.json for runtime introspection).
+COPY privasys.json /privasys.json
 
 EXPOSE 8443
 

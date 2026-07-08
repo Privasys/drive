@@ -9,8 +9,11 @@ import (
 	"time"
 )
 
-// CreateTenant inserts a new tenant.
-func (s *Store) CreateTenant(ctx context.Context, t *Tenant) error {
+// CreateTenant inserts a new tenant and records ownerSub as its owner.
+// User tenants have exactly one member — the owner — which is what the
+// API's access checks key on; Enterprise tenants start with the creator
+// as owner and grow via AddMember.
+func (s *Store) CreateTenant(ctx context.Context, t *Tenant, ownerSub string) error {
 	if t.ID == "" {
 		t.ID = NewID()
 	}
@@ -20,10 +23,25 @@ func (s *Store) CreateTenant(ctx context.Context, t *Tenant) error {
 	if t.Kind != TenantUser && t.Kind != TenantEnterprise {
 		return fmt.Errorf("%w: tenant kind %q", ErrInvalidInput, t.Kind)
 	}
-	_, err := s.DB.ExecContext(ctx, s.q(
+	if ownerSub == "" {
+		return fmt.Errorf("%w: tenant owner required", ErrInvalidInput)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, s.q(
 		`INSERT INTO tenants(id, kind, name, created_at) VALUES (?, ?, ?, ?)`),
-		t.ID, string(t.Kind), t.Name, t.CreatedAt)
-	return err
+		t.ID, string(t.Kind), t.Name, t.CreatedAt); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, s.q(
+		`INSERT INTO members(tenant_id, user_sub, role) VALUES (?, ?, ?)`),
+		t.ID, ownerSub, string(RoleOwner)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetTenant fetches a tenant by id.
@@ -80,8 +98,8 @@ func (s *Store) MemberRoleOf(ctx context.Context, tenantID, userSub string) (Mem
 
 // CreateNode inserts a new folder or file. The caller is responsible
 // for computing NameHMAC; the store enforces uniqueness within (tenant,
-// parent).
-func (s *Store) CreateNode(ctx context.Context, n *Node) error {
+// parent). actor is recorded on the change feed for attribution.
+func (s *Store) CreateNode(ctx context.Context, n *Node, actor string) error {
 	if n.ID == "" {
 		n.ID = NewID()
 	}
@@ -117,8 +135,8 @@ func (s *Store) CreateNode(ctx context.Context, n *Node) error {
 		return err
 	}
 	_, _ = s.DB.ExecContext(ctx, s.q(
-		`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'create', '')`),
-		n.TenantID, n.ID,
+		`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'create', ?)`),
+		n.TenantID, n.ID, actor,
 	)
 	return nil
 }
@@ -169,7 +187,8 @@ func (s *Store) ListChildren(ctx context.Context, tenantID, parentID string) ([]
 }
 
 // DeleteNode removes a single node (and its descendants for folders).
-func (s *Store) DeleteNode(ctx context.Context, tenantID, id string) error {
+// actor is recorded on the change feed for attribution.
+func (s *Store) DeleteNode(ctx context.Context, tenantID, id, actor string) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -206,12 +225,42 @@ func (s *Store) DeleteNode(ctx context.Context, tenantID, id string) error {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, s.q(
-			`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'delete', '')`),
-			tenantID, nid); err != nil {
+			`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'delete', ?)`),
+			tenantID, nid, actor); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// IsDescendantOrSelf reports whether nodeID equals ancestorID or lies in
+// its subtree, by walking the parent chain upward. Used to confine
+// AppGrant principals to their granted node's subtree.
+func (s *Store) IsDescendantOrSelf(ctx context.Context, tenantID, ancestorID, nodeID string) (bool, error) {
+	if ancestorID == "" || nodeID == "" {
+		return false, nil
+	}
+	cur := nodeID
+	for depth := 0; depth < 4096; depth++ {
+		if cur == ancestorID {
+			return true, nil
+		}
+		row := s.DB.QueryRowContext(ctx, s.q(
+			`SELECT parent_id FROM nodes WHERE tenant_id = ? AND id = ?`),
+			tenantID, cur)
+		var parent sql.NullString
+		if err := row.Scan(&parent); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return false, nil
+			}
+			return false, err
+		}
+		if !parent.Valid {
+			return false, nil
+		}
+		cur = parent.String
+	}
+	return false, fmt.Errorf("node tree too deep at %s", nodeID)
 }
 
 // ChangeRow is one entry in the change feed.

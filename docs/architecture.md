@@ -16,11 +16,12 @@ canonical, long-lived description of the system.
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Drive enclave (TDX, enclave-os-virtual)                             │
 │  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────────┐   │
-│  │ REST API│  │ MCP cat. │  │ Grants   │  │ AEAD chunk store    │   │
+│  │ REST API│  │ Tools    │  │ Grants   │  │ AEAD chunk store    │   │
 │  └─────────┘  └──────────┘  └──────────┘  └─────────────────────┘   │
 │  ┌─────────────────────────────────────────────────────────────┐    │
-│  │ Postgres index (tenants, members, nodes, grants, changes)    │   │
-│  │ — lives on a LUKS-encrypted LV inside the VM disk            │   │
+│  │ SQL index (tenants, members, nodes, grants, changes)         │   │
+│  │ — lives on the sealed per-app /data volume                   │   │
+│  │   (container_storage; vault-backed, measurement-gated DEK)   │   │
 │  └─────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────┘
                             │       │
@@ -28,11 +29,13 @@ canonical, long-lived description of the system.
               (DEK, NameHMAC│       │  bound to wallet pubkey
               derived from  │       │
               MEK)          ▼       ▼
-                  ┌────────────────────────┐
-                  │ SGX vault constellation │  (k=2 / n=4 RawShare; key
-                  │ vault:drive/<tenant>/mek│   path versioned per
-                  │                  /v1     │   tenant DEK rotation)
-                  └────────────────────────┘
+              ┌────────────────────────────────────┐
+              │ SGX vault constellation             │
+              │ vault:apps.privasys.org/<app-id>/   │
+              │   data/<tenant-ref>/mek/v1          │
+              │ (owner = the tenant's sub; version  │
+              │  bumped per tenant MEK rotation)    │
+              └────────────────────────────────────┘
                             │
                             ▼
               ┌───────────────────────────────┐
@@ -88,18 +91,21 @@ already carries a `v` field.
 
 | Surface | Use |
 |---|---|
-| REST `/v1/...` | Wallet, web clients, server-to-server |
-| MCP `/mcp/v1/tools` | LLM agents (`chat.privasys.org`, future copilots) |
+| REST `/v1/...` | Wallet, web clients, server-to-server (streaming up/download) |
+| Manifest tools `/tools/...` | Portal Configure/Manage, CLI, MCP, LLM agents — declared in `privasys.json` (`org.privasys.manifest` OCI label) |
 
-Both surfaces share the same internal handlers; MCP advertises a
-catalog and lets agents call the corresponding REST endpoint.
+Both surfaces share the same internal handlers and access checks; the
+tools are plain-JSON POST wrappers capped at 8 MiB per file (larger
+transfers use REST streaming).
 
 ## 5. Operational notes
 
-- The service is delivered as a reproducible OCI image
-  (`ghcr.io/privasys/drive:<sha>`) consumed by Enclave OS Virtual.
-- Postgres runs on a LUKS-encrypted LV inside the VM; backups are
-  PG-native + ciphertext-only chunk replication.
+- The service is delivered as an OCI image (`ghcr.io/privasys/drive`,
+  `provenance: false`) consumed by Enclave OS Virtual; deployments pin
+  the registry digest, never a mutable tag.
+- The index lives on the platform's sealed per-app volume and survives
+  restarts and (owner-promoted) upgrades; backups are ciphertext-only
+  chunk replication plus the platform volume story.
 - Per-tenant quotas, a pull-based change-stream cursor for the
   extraction enclave, and a streamed GDPR ZIP exporter are first-class
   features rather than bolt-ons.

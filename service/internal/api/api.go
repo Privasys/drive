@@ -1,38 +1,122 @@
 // Package api glues the storage primitives behind the Privasys Drive
 // REST surface. The handlers are intentionally thin — every operation
-// has a matching public function in the underlying packages so the MCP
-// surface (next to it) can call them directly without going through HTTP.
+// has a matching public function in the underlying packages so the
+// manifest-tool surface (tools.go) can call them directly without going
+// through HTTP.
 package api
 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/crypto"
 	"github.com/Privasys/drive/service/internal/export"
 	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/manifest"
 	"github.com/Privasys/drive/service/internal/objectstore"
 	"github.com/Privasys/drive/service/internal/oidc"
+	"github.com/Privasys/drive/service/internal/platform"
 	"github.com/Privasys/drive/service/internal/store"
 )
 
+// appGrantAudience is the aud an AppGrant envelope must carry.
+const appGrantAudience = "privasys-drive"
+
 // Server bundles the handlers + their dependencies.
 type Server struct {
-	Store     *store.Store
-	Backend   objectstore.Backend
-	Grants    *grants.Repo
-	Verifier  oidc.Verifier
-	MEK       []byte // single tenant MEK for `--dev`. Production: fetched per tenant from vault.
+	Store    *store.Store
+	Backend  objectstore.Backend
+	Grants   *grants.Repo
+	Verifier oidc.Verifier
+	MEK      []byte // single tenant MEK for `--dev`. Production: fetched per tenant from vault.
+
+	// Revoked rejects tokens whose IdP session was revoked (long-lived
+	// API keys). Nil disables the check.
+	Revoked *oidc.RevokedSet
+
+	// Platform is the enclave-manager environment (empty off-platform).
+	Platform platform.Env
+	// StateDir persists the instance config (the sealed /data volume on
+	// the platform).
+	StateDir string
+	// DevMode relaxes the configure-authz role check (dev verifier runs
+	// without platform roles).
+	DevMode bool
+	Version string
+
+	cfgMu sync.RWMutex
+	cfg   *config.Config
+}
+
+// Principal is an authenticated caller: a platform user (OIDC bearer)
+// or a third-party app presenting an AppGrant token.
+type Principal struct {
+	Sub   string
+	ID    *oidc.Identity   // non-nil for users
+	Grant *grants.Grant    // non-nil for app principals
+	Env   *grants.Envelope // non-nil for app principals
+}
+
+// IsUser reports whether p is an OIDC-authenticated user.
+func (p *Principal) IsUser() bool { return p.ID != nil }
+
+// SetConfig installs (and persists) the instance configuration.
+func (s *Server) SetConfig(c *config.Config) error {
+	if err := c.Save(s.StateDir); err != nil {
+		return err
+	}
+	s.cfgMu.Lock()
+	s.cfg = c
+	s.cfgMu.Unlock()
+	return nil
+}
+
+// InstallConfig sets the in-memory config without persisting (boot-time
+// re-apply of an already-persisted config).
+func (s *Server) InstallConfig(c *config.Config) {
+	s.cfgMu.Lock()
+	s.cfg = c
+	s.cfgMu.Unlock()
+}
+
+// CurrentConfig returns the active config, or nil before configure.
+func (s *Server) CurrentConfig() *config.Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+
+// Handler returns the full HTTP surface: health/status/configure, the
+// REST API under /v1, the manifest tools under /tools, and the manifest
+// document endpoints.
+func (s *Server) Handler(manifestPath string) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/v1/", s.Routes())
+	mux.Handle("/tools/", s.Tools())
+	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /status", s.handleStatus)
+	mux.Handle("POST /status", s.auth(s.handleStatusTool))
+	mux.Handle("POST /configure", s.auth(s.handleConfigure))
+	if manifestPath != "" {
+		mux.HandleFunc("GET /privasys.json", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, manifestPath)
+		})
+		mux.Handle("/mcp/", legacyToolCatalog(manifestPath))
+	}
+	return loggingMiddleware(mux)
 }
 
 // Routes returns the HTTP handler with all REST routes mounted under /v1.
@@ -56,27 +140,89 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/changes", s.auth(s.handleChanges))
 	mux.Handle("POST /v1/tenants/{tenantID}/exports", s.auth(s.handleExport))
 
-	return loggingMiddleware(mux)
+	return mux
 }
 
-type ctxKey string
-
-const idKey ctxKey = "id"
-
-func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *oidc.Identity)) http.Handler {
+// auth authenticates the caller: `Bearer <oidc token>` for users,
+// `AppGrant <envelope>.<sig>` for third-party apps holding a grant.
+func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
+		h := r.Header.Get("Authorization")
+		switch {
+		case strings.HasPrefix(h, "Bearer "):
+			id, err := s.Verifier.Verify(r.Context(), strings.TrimPrefix(h, "Bearer "))
+			if err != nil {
+				http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
+				return
+			}
+			if s.Revoked.Has(id.SID) {
+				http.Error(w, "credential revoked", http.StatusUnauthorized)
+				return
+			}
+			next(w, r, &Principal{Sub: id.Sub, ID: id})
+		case strings.HasPrefix(h, "AppGrant "):
+			p, err := s.verifyAppGrant(r.Context(), strings.TrimSpace(strings.TrimPrefix(h, "AppGrant ")))
+			if err != nil {
+				http.Error(w, "invalid app grant: "+err.Error(), http.StatusUnauthorized)
+				return
+			}
+			next(w, r, p)
+		default:
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
 			return
 		}
-		id, err := s.Verifier.Verify(r.Context(), strings.TrimPrefix(auth, "Bearer "))
-		if err != nil {
-			http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
-			return
-		}
-		next(w, r, id)
 	})
+}
+
+// verifyAppGrant checks an AppGrant token end-to-end: signature (against
+// the embedded key), envelope validity window and audience, then the
+// persisted grant row — active, same tenant/node, and the signing key
+// matches the one the grant was bound to at creation.
+func (s *Server) verifyAppGrant(ctx context.Context, tok string) (*Principal, error) {
+	env, err := grants.ParseToken(tok)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	if env.Exp > 0 && now.Unix() > env.Exp {
+		return nil, errors.New("token expired")
+	}
+	if env.Aud != appGrantAudience {
+		return nil, fmt.Errorf("audience %q != %q", env.Aud, appGrantAudience)
+	}
+	if env.JTI == "" {
+		return nil, errors.New("token has no jti")
+	}
+	g, err := s.Grants.Get(ctx, env.JTI)
+	if err != nil {
+		return nil, errors.New("grant not found")
+	}
+	if !g.IsActive(now) {
+		return nil, errors.New("grant revoked or expired")
+	}
+	if !strings.HasPrefix(g.Subject, grants.SubjectApp) {
+		return nil, errors.New("grant is not an app grant")
+	}
+	if g.TenantID != env.Sub || g.NodeID != env.Node {
+		return nil, errors.New("token does not match the grant")
+	}
+	bound, err := decodePubkey(g.BindingPubkey)
+	if err != nil || len(bound) == 0 {
+		return nil, errors.New("grant has no binding key")
+	}
+	presented, err := decodePubkey(env.PK)
+	if err != nil || !bytes.Equal(bound, presented) {
+		return nil, errors.New("signing key does not match the grant binding")
+	}
+	return &Principal{Sub: g.Subject, Grant: g, Env: env}, nil
+}
+
+// decodePubkey accepts raw-std or std base64 (wallets vary).
+func decodePubkey(s string) ([]byte, error) {
+	if b, err := base64.RawStdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.StdEncoding.DecodeString(s)
 }
 
 // --- handlers ---------------------------------------------------------
@@ -86,7 +232,11 @@ type createTenantRequest struct {
 	Name string           `json:"name"`
 }
 
-func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request, p *Principal) {
+	if !p.IsUser() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	var req createTenantRequest
 	if err := readJSON(r, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -96,12 +246,9 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request, id *
 		req.Kind = store.TenantUser
 	}
 	t := &store.Tenant{Kind: req.Kind, Name: req.Name}
-	if err := s.Store.CreateTenant(r.Context(), t); err != nil {
+	if err := s.Store.CreateTenant(r.Context(), t, p.Sub); err != nil {
 		writeStoreError(w, err)
 		return
-	}
-	if t.Kind == store.TenantEnterprise {
-		_ = s.Store.AddMember(r.Context(), &store.Member{TenantID: t.ID, UserSub: id.Sub, Role: store.RoleOwner})
 	}
 	writeJSON(w, http.StatusCreated, t)
 }
@@ -111,14 +258,14 @@ type addMemberRequest struct {
 	Role    store.MemberRole `json:"role"`
 }
 
-func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	var req addMemberRequest
 	if err := readJSON(r, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !s.canAdmin(r.Context(), tenantID, id.Sub) {
+	if !p.IsUser() || !s.canAdmin(r.Context(), tenantID, p.Sub) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -134,94 +281,107 @@ type createFolderRequest struct {
 	Name     string `json:"name"`
 }
 
-func (s *Server) handleCreateFolder(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) handleCreateFolder(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
-	if !s.canWrite(r.Context(), tenantID, id.Sub) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	var req createFolderRequest
 	if err := readJSON(r, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	hmacKey, err := crypto.DeriveNameHMACKey(s.MEK, tenantID)
+	n, status, err := s.createFolder(r.Context(), p, tenantID, req.ParentID, req.Name)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	n := &store.Node{
-		TenantID: tenantID,
-		Kind:     store.NodeFolder,
-		Name:     req.Name,
-		NameHMAC: crypto.NameHMAC(hmacKey, req.Name),
-	}
-	if req.ParentID != "" {
-		n.ParentID.String = req.ParentID
-		n.ParentID.Valid = true
-	}
-	if err := s.Store.CreateNode(r.Context(), n); err != nil {
-		writeStoreError(w, err)
+		httpError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, nodeView(n))
 }
 
-func (s *Server) handleListRoot(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
-	tenantID := r.PathValue("tenantID")
-	if !s.canRead(r.Context(), tenantID, id.Sub) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+func (s *Server) createFolder(ctx context.Context, p *Principal, tenantID, parentID, name string) (*store.Node, int, error) {
+	if !s.allowNode(ctx, p, tenantID, parentID, grants.ScopeWrite) {
+		return nil, http.StatusForbidden, errors.New("forbidden")
 	}
-	kids, err := s.Store.ListChildren(r.Context(), tenantID, "")
+	hmacKey, err := crypto.DeriveNameHMACKey(s.MEK, tenantID)
 	if err != nil {
-		writeStoreError(w, err)
+		return nil, http.StatusInternalServerError, err
+	}
+	n := &store.Node{
+		TenantID: tenantID,
+		Kind:     store.NodeFolder,
+		Name:     name,
+		NameHMAC: crypto.NameHMAC(hmacKey, name),
+	}
+	if parentID != "" {
+		n.ParentID.String = parentID
+		n.ParentID.Valid = true
+	}
+	if err := s.Store.CreateNode(ctx, n, p.Sub); err != nil {
+		return nil, storeErrorStatus(err), err
+	}
+	return n, http.StatusCreated, nil
+}
+
+func (s *Server) handleListRoot(w http.ResponseWriter, r *http.Request, p *Principal) {
+	tenantID := r.PathValue("tenantID")
+	kids, status, err := s.listChildren(r.Context(), p, tenantID, "")
+	if err != nil {
+		httpError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mapNodes(kids))
 }
 
-func (s *Server) handleListFolder(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) handleListFolder(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	folderID := r.PathValue("folderID")
-	if !s.canRead(r.Context(), tenantID, id.Sub) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	kids, err := s.Store.ListChildren(r.Context(), tenantID, folderID)
+	kids, status, err := s.listChildren(r.Context(), p, tenantID, folderID)
 	if err != nil {
-		writeStoreError(w, err)
+		httpError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, mapNodes(kids))
+}
+
+func (s *Server) listChildren(ctx context.Context, p *Principal, tenantID, folderID string) ([]*store.Node, int, error) {
+	if !s.allowNode(ctx, p, tenantID, folderID, grants.ScopeRead) {
+		return nil, http.StatusForbidden, errors.New("forbidden")
+	}
+	kids, err := s.Store.ListChildren(ctx, tenantID, folderID)
+	if err != nil {
+		return nil, storeErrorStatus(err), err
+	}
+	return kids, http.StatusOK, nil
 }
 
 // handleUploadFile expects the file body in the request body. The
 // metadata (parent, name, mime) come from query parameters so the body
 // stream is exactly the plaintext.
-func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
-	if !s.canWrite(r.Context(), tenantID, id.Sub) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	q := r.URL.Query()
 	name := q.Get("name")
-	parentID := q.Get("parent_id")
-	mime := q.Get("mime")
 	if name == "" {
 		http.Error(w, "name query parameter required", http.StatusBadRequest)
 		return
 	}
+	n, status, err := s.uploadFile(r.Context(), p, tenantID, q.Get("parent_id"), name, q.Get("mime"), r.Body)
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, nodeView(n))
+}
+
+func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentID, name, mime string, body io.Reader) (*store.Node, int, error) {
+	if !s.allowNode(ctx, p, tenantID, parentID, grants.ScopeWrite) {
+		return nil, http.StatusForbidden, errors.New("forbidden")
+	}
 	dek, err := crypto.DeriveDEK(s.MEK, tenantID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 	hmacKey, err := crypto.DeriveNameHMACKey(s.MEK, tenantID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 	n := &store.Node{
 		TenantID: tenantID,
@@ -235,51 +395,30 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request, id *oi
 		n.ParentID.String = parentID
 		n.ParentID.Valid = true
 	}
-	wr, err := manifest.Write(r.Context(), s.Backend, dek, tenantID, n.ID, mime, 0, r.Body)
+	wr, err := manifest.Write(ctx, s.Backend, dek, tenantID, n.ID, mime, 0, body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 	root, err := hex.DecodeString(wr.Manifest.MerkleRoot)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 	n.MerkleRoot = root
 	n.WrappedCEK = wr.WrappedCEK
 	n.ManifestRef = wr.ManifestKey
 	n.PlainSize = wr.Manifest.PlainSize
-	if err := s.Store.CreateNode(r.Context(), n); err != nil {
-		writeStoreError(w, err)
-		return
+	if err := s.Store.CreateNode(ctx, n, p.Sub); err != nil {
+		return nil, storeErrorStatus(err), err
 	}
-	writeJSON(w, http.StatusCreated, nodeView(n))
+	return n, http.StatusCreated, nil
 }
 
-func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	fileID := r.PathValue("fileID")
-	if !s.canRead(r.Context(), tenantID, id.Sub) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	n, err := s.Store.GetNode(r.Context(), tenantID, fileID)
+	n, rc, status, err := s.openFile(r.Context(), p, tenantID, fileID)
 	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	if n.Kind != store.NodeFile {
-		http.Error(w, "not a file", http.StatusBadRequest)
-		return
-	}
-	dek, err := crypto.DeriveDEK(s.MEK, tenantID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	_, rc, err := manifest.Read(r.Context(), s.Backend, dek, tenantID, n.ID, n.WrappedCEK)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpError(w, status, err)
 		return
 	}
 	defer rc.Close()
@@ -294,29 +433,63 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request, id *
 	}
 }
 
-func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) openFile(ctx context.Context, p *Principal, tenantID, fileID string) (*store.Node, io.ReadCloser, int, error) {
+	if !s.allowNode(ctx, p, tenantID, fileID, grants.ScopeRead) {
+		return nil, nil, http.StatusForbidden, errors.New("forbidden")
+	}
+	n, err := s.Store.GetNode(ctx, tenantID, fileID)
+	if err != nil {
+		return nil, nil, storeErrorStatus(err), err
+	}
+	if n.Kind != store.NodeFile {
+		return nil, nil, http.StatusBadRequest, errors.New("not a file")
+	}
+	dek, err := crypto.DeriveDEK(s.MEK, tenantID)
+	if err != nil {
+		return nil, nil, http.StatusInternalServerError, err
+	}
+	_, rc, err := manifest.Read(ctx, s.Backend, dek, tenantID, n.ID, n.WrappedCEK)
+	if err != nil {
+		return nil, nil, http.StatusInternalServerError, err
+	}
+	return n, rc, http.StatusOK, nil
+}
+
+func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !s.canWrite(r.Context(), tenantID, id.Sub) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	status, err := s.deleteNode(r.Context(), p, tenantID, nodeID)
+	if err != nil {
+		httpError(w, status, err)
 		return
 	}
-	n, err := s.Store.GetNode(r.Context(), tenantID, nodeID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteNode(ctx context.Context, p *Principal, tenantID, nodeID string) (int, error) {
+	// Users delete with their write permission; apps need an explicit
+	// delete scope on the grant.
+	need := grants.ScopeWrite
+	if !p.IsUser() {
+		need = grants.ScopeDelete
+	}
+	if !s.allowNode(ctx, p, tenantID, nodeID, need) {
+		return http.StatusForbidden, errors.New("forbidden")
+	}
+	n, err := s.Store.GetNode(ctx, tenantID, nodeID)
 	if err != nil {
-		writeStoreError(w, err)
-		return
+		return storeErrorStatus(err), err
 	}
 	if n.Kind == store.NodeFile && n.WrappedCEK != nil {
 		dek, err := crypto.DeriveDEK(s.MEK, tenantID)
 		if err == nil {
-			_ = manifest.Delete(r.Context(), s.Backend, dek, tenantID, n.ID, n.WrappedCEK)
+			_ = manifest.Delete(ctx, s.Backend, dek, tenantID, n.ID, n.WrappedCEK)
 		}
 	}
-	if err := s.Store.DeleteNode(r.Context(), tenantID, nodeID); err != nil {
-		writeStoreError(w, err)
-		return
+	if err := s.Store.DeleteNode(ctx, tenantID, nodeID, p.Sub); err != nil {
+		return storeErrorStatus(err), err
 	}
-	w.WriteHeader(http.StatusNoContent)
+	return http.StatusNoContent, nil
 }
 
 type createGrantRequest struct {
@@ -327,10 +500,10 @@ type createGrantRequest struct {
 	Meta          string         `json:"meta,omitempty"`
 }
 
-func (s *Server) handleCreateGrant(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) handleCreateGrant(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !s.canShare(r.Context(), tenantID, id.Sub) {
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -343,12 +516,16 @@ func (s *Server) handleCreateGrant(w http.ResponseWriter, r *http.Request, id *o
 		http.Error(w, "subject required", http.StatusBadRequest)
 		return
 	}
+	if strings.HasPrefix(req.Subject, grants.SubjectApp) && req.BindingPubkey == "" {
+		http.Error(w, "app grants require binding_pubkey", http.StatusBadRequest)
+		return
+	}
 	g := &grants.Grant{
 		TenantID:      tenantID,
 		NodeID:        nodeID,
 		Subject:       req.Subject,
 		Scope:         req.Scope,
-		CreatedBy:     id.Sub,
+		CreatedBy:     p.Sub,
 		BindingPubkey: req.BindingPubkey,
 		Meta:          req.Meta,
 	}
@@ -363,10 +540,10 @@ func (s *Server) handleCreateGrant(w http.ResponseWriter, r *http.Request, id *o
 	writeJSON(w, http.StatusCreated, g)
 }
 
-func (s *Server) handleRevokeGrant(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) handleRevokeGrant(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	grantID := r.PathValue("grantID")
-	if !s.canShare(r.Context(), tenantID, id.Sub) {
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -377,29 +554,36 @@ func (s *Server) handleRevokeGrant(w http.ResponseWriter, r *http.Request, id *o
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
-	if !s.canRead(r.Context(), tenantID, id.Sub) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	rows, err := s.Store.ListChanges(r.Context(), tenantID, since, limit)
+	rows, status, err := s.listChanges(r.Context(), p, tenantID, since, limit)
 	if err != nil {
-		writeStoreError(w, err)
+		httpError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, rows)
+}
+
+func (s *Server) listChanges(ctx context.Context, p *Principal, tenantID string, since int64, limit int) ([]store.ChangeRow, int, error) {
+	if !p.IsUser() || !s.canRead(ctx, tenantID, p.Sub) {
+		return nil, http.StatusForbidden, errors.New("forbidden")
+	}
+	rows, err := s.Store.ListChanges(ctx, tenantID, since, limit)
+	if err != nil {
+		return nil, storeErrorStatus(err), err
+	}
+	return rows, http.StatusOK, nil
 }
 
 type exportRequest struct {
 	Mode export.Mode `json:"mode"`
 }
 
-func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, id *oidc.Identity) {
+func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
-	if !s.canRead(r.Context(), tenantID, id.Sub) {
+	if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -428,49 +612,59 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, id *oidc.I
 
 // --- access control ---------------------------------------------------
 
-func (s *Server) tenantKind(ctx context.Context, tenantID string) store.TenantKind {
-	t, err := s.Store.GetTenant(ctx, tenantID)
+// memberRole returns the caller's role in the tenant, or "" when not a
+// member. User tenants have exactly one member: the owner, recorded at
+// tenant creation.
+func (s *Server) memberRole(ctx context.Context, tenantID, sub string) store.MemberRole {
+	r, err := s.Store.MemberRoleOf(ctx, tenantID, sub)
 	if err != nil {
 		return ""
 	}
-	return t.Kind
+	return r
 }
 
 func (s *Server) canRead(ctx context.Context, tenantID, sub string) bool {
-	switch s.tenantKind(ctx, tenantID) {
-	case store.TenantUser:
-		// User tenants have a single owner: the OIDC sub equals the tenant Name in the dev model.
-		// In production, owner mapping comes from the IDP. For now, allow.
-		return true
-	case store.TenantEnterprise:
-		_, err := s.Store.MemberRoleOf(ctx, tenantID, sub)
-		return err == nil
-	}
-	return false
+	return s.memberRole(ctx, tenantID, sub) != ""
 }
 
 func (s *Server) canWrite(ctx context.Context, tenantID, sub string) bool {
-	switch s.tenantKind(ctx, tenantID) {
-	case store.TenantUser:
-		return true
-	case store.TenantEnterprise:
-		r, err := s.Store.MemberRoleOf(ctx, tenantID, sub)
-		if err != nil {
-			return false
-		}
-		return r != store.RoleReader
-	}
-	return false
+	r := s.memberRole(ctx, tenantID, sub)
+	return r != "" && r != store.RoleReader
 }
 
-func (s *Server) canShare(ctx context.Context, tenantID, sub string) bool { return s.canWrite(ctx, tenantID, sub) }
+func (s *Server) canShare(ctx context.Context, tenantID, sub string) bool {
+	return s.canWrite(ctx, tenantID, sub)
+}
+
 func (s *Server) canAdmin(ctx context.Context, tenantID, sub string) bool {
-	r, err := s.Store.MemberRoleOf(ctx, tenantID, sub)
-	if err != nil {
-		// User tenants: implicit admin for any authenticated caller in dev.
-		return s.tenantKind(ctx, tenantID) == store.TenantUser
-	}
+	r := s.memberRole(ctx, tenantID, sub)
 	return r == store.RoleOwner || r == store.RoleAdmin
+}
+
+// allowNode is the per-node access check for both principal kinds.
+// nodeID may be "" for root-level operations (list root, create at
+// root); app principals are always confined to their granted node's
+// subtree, so a root-level operation is never allowed on a grant.
+func (s *Server) allowNode(ctx context.Context, p *Principal, tenantID, nodeID string, need grants.Scope) bool {
+	if p.IsUser() {
+		if need == grants.ScopeRead {
+			return s.canRead(ctx, tenantID, p.Sub)
+		}
+		return s.canWrite(ctx, tenantID, p.Sub)
+	}
+	// App principal: exact tenant, granted scope, node inside the
+	// granted subtree.
+	if p.Grant == nil || p.Grant.TenantID != tenantID {
+		return false
+	}
+	if !p.Grant.HasScope(need) && !(need == grants.ScopeWrite && p.Grant.HasScope("read-write")) {
+		return false
+	}
+	if nodeID == "" {
+		return false
+	}
+	ok, err := s.Store.IsDescendantOrSelf(ctx, tenantID, p.Grant.NodeID, nodeID)
+	return err == nil && ok
 }
 
 // --- helpers ----------------------------------------------------------
@@ -521,7 +715,7 @@ func readJSON(r *http.Request, dst any) error {
 		return errors.New("empty request body")
 	}
 	defer r.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
 	if err != nil {
 		return err
 	}
@@ -531,24 +725,45 @@ func readJSON(r *http.Request, dst any) error {
 	return json.Unmarshal(body, dst)
 }
 
-func writeStoreError(w http.ResponseWriter, err error) {
+func httpError(w http.ResponseWriter, status int, err error) {
+	http.Error(w, err.Error(), status)
+}
+
+func storeErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		http.Error(w, err.Error(), http.StatusNotFound)
+		return http.StatusNotFound
 	case errors.Is(err, store.ErrConflict):
-		http.Error(w, err.Error(), http.StatusConflict)
+		return http.StatusConflict
 	case errors.Is(err, store.ErrInvalidInput):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		return http.StatusBadRequest
 	case errors.Is(err, store.ErrForbidden):
-		http.Error(w, err.Error(), http.StatusForbidden)
+		return http.StatusForbidden
 	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return http.StatusInternalServerError
 	}
+}
+
+func writeStoreError(w http.ResponseWriter, err error) {
+	httpError(w, storeErrorStatus(err), err)
+}
+
+// statusRecorder captures the response status for the request log.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
-		_ = fmt.Sprintf("%s %s", r.Method, r.URL.Path) // intentional no-op for now
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+		log.Printf("%s %s -> %d (%s)", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
 	})
 }

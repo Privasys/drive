@@ -72,9 +72,21 @@ for the per-component developer docs.
 
 ## Production deployment
 
-Drive runs as a TDX container app on `enclave-os-virtual`. The
-reproducible image is published to
-`ghcr.io/privasys/drive:<sha>` by [.github/workflows/build.yml](.github/workflows/build.yml).
+Drive runs as a **standard Privasys container app** on `enclave-os-virtual`
+(TDX): it listens on the platform-injected `$PORT`, declares its typed
+capabilities in [service/privasys.json](service/privasys.json) (baked into
+the image's `org.privasys.manifest` OCI label), persists its index +
+instance config on the sealed per-app `/data` volume
+(`container_storage: true`), and self-recovers the configure-then-freeze
+gate on restart. The image is published to `ghcr.io/privasys/drive` by
+[.github/workflows/service.yml](.github/workflows/service.yml) — **pin
+deployments by the registry digest printed in the workflow summary, never
+by a mutable tag**.
+
+An instance runs in one of two attestable operating modes, set once at
+configure time: **sovereign** (only tenants can unlock their data — the
+operator holds no key) or **escrowed** (org master-key escrow with
+policy-gated, audited recovery; ships later).
 
 ## Security
 

@@ -60,10 +60,10 @@ type Grant struct {
 // Repo persists and queries grants. It is parameterised by the same
 // `?`-style placeholder rewriter as store.Store.
 type Repo struct {
-	DB         *sql.DB
-	Postgres   bool
-	NowFn      func() time.Time
-	IDFn       func() string
+	DB       *sql.DB
+	Postgres bool
+	NowFn    func() time.Time
+	IDFn     func() string
 }
 
 // New returns a Repo bound to db.
@@ -111,6 +111,26 @@ func (r *Repo) Create(ctx context.Context, g *Grant) error {
 		g.ID, g.TenantID, g.NodeID, g.Subject, scope, g.CreatedBy,
 		g.CreatedAt, exp, nullableString(g.BindingPubkey), nullableString(g.Meta))
 	return err
+}
+
+// Get returns a grant by id (any tenant — the caller matches the token's
+// tenant against the row).
+func (r *Repo) Get(ctx context.Context, id string) (*Grant, error) {
+	rows, err := r.DB.QueryContext(ctx, r.q(
+		`SELECT id, tenant_id, node_id, subject, scope, created_by, created_at,
+		        expires_at, revoked_at, binding_pubkey, meta
+		 FROM grants WHERE id = ?`), id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, sql.ErrNoRows
+	}
+	return scanGrant(rows)
 }
 
 // Revoke marks a grant revoked. Idempotent.
@@ -238,16 +258,16 @@ func nullableString(s string) any {
 
 // Envelope is the JSON payload carried by an AppGrant token.
 type Envelope struct {
-	Iss   string   `json:"iss"`            // "https://privasys.id"
-	Aud   string   `json:"aud"`            // "privasys-drive"
-	Sub   string   `json:"sub"`            // tenant id
-	Node  string   `json:"node"`           // node id
-	Scope []Scope  `json:"scope"`
-	MRTD  string   `json:"mrtd"`           // hex-encoded
-	JTI   string   `json:"jti"`            // == grant.ID for revocation lookup
-	Iat   int64    `json:"iat"`
-	Exp   int64    `json:"exp"`
-	PK    string   `json:"pk"`             // base64 ed25519 public key
+	Iss   string  `json:"iss"`  // "https://privasys.id"
+	Aud   string  `json:"aud"`  // "privasys-drive"
+	Sub   string  `json:"sub"`  // tenant id
+	Node  string  `json:"node"` // node id
+	Scope []Scope `json:"scope"`
+	MRTD  string  `json:"mrtd"` // hex-encoded
+	JTI   string  `json:"jti"`  // == grant.ID for revocation lookup
+	Iat   int64   `json:"iat"`
+	Exp   int64   `json:"exp"`
+	PK    string  `json:"pk"` // base64 ed25519 public key
 }
 
 // MintToken signs env with priv and returns the wire form.

@@ -18,6 +18,23 @@ type Identity struct {
 	Issuer   string
 	Audience string
 	Email    string
+	// Roles carries the platform `roles` claim (audience-filtered by the
+	// IdP); the configure-authz check reads the per-app owner/admin roles
+	// from here.
+	Roles []string
+	// SID is the IdP session the token is bound to (the revocation
+	// handle for long-lived API keys). Empty for session-less tokens.
+	SID string
+}
+
+// HasRole reports whether the token carried the given role.
+func (id *Identity) HasRole(role string) bool {
+	for _, r := range id.Roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
 }
 
 // Verifier validates a bearer token and returns the carrier's identity.

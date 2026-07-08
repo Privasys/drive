@@ -1,0 +1,242 @@
+{
+    "store": {
+        "tagline": "Per-tenant end-to-end encrypted file storage: AEAD-sealed chunks in any cloud bucket, the index and keys inside an attested TDX enclave, and grants a tenant can verify and revoke.",
+        "category": "Data & Storage",
+        "keywords": "drive, storage, files, encrypted, e2ee, xchacha20, merkle, gdpr export, share, appgrant, ra-tls, attestation, enclave os, tdx, confidential computing, mcp",
+        "website_url": "https://privasys.org",
+        "support_email": "contact@privasys.org",
+        "privacy_url": "https://privasys.org/legal/privacy/",
+        "tos_url": "https://privasys.org/legal/terms/",
+        "description": "Privasys Drive is the per-tenant encrypted file store behind Privasys Wallet, Chat and Secure Room, and a storage backend any platform app or agent can be granted scoped access to. File content is split into content-addressed chunks, each AEAD-sealed (XChaCha20-Poly1305) under a per-file key wrapped under the tenant's key; the cloud bucket only ever sees opaque ciphertext. The directory index, ACLs and wrapped keys live inside the attested enclave on the sealed per-app volume. Every file carries a Merkle root so clients detect tampering, and a GDPR-grade ZIP export (plaintext or ciphertext) is built in. An instance runs in one of two attestable operating modes: sovereign (only tenants can unlock their data — the operator holds no key) or escrowed (tenant keys carry an escrow wrap under the operator's master key, unlockable only through an audited, policy-gated recovery path)."
+    },
+    "configure": {
+        "name": "configure",
+        "title": "Drive instance settings",
+        "endpoint": "/configure",
+        "readiness_path": "/health",
+        "status_path": "/status",
+        "description": "Set the instance operating mode and defaults, lifting the configure-then-freeze gate. The mode is immutable once set and is part of the attested configuration: 'sovereign' means only tenants can ever unlock their data (the operator holds no key); 'escrowed' adds an org master-key escrow with policy-gated recovery. Settings persist on the sealed volume and re-apply automatically on restart.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["sovereign", "escrowed"],
+                    "description": "Operating mode, immutable once set. sovereign: tenant keys have the tenant as the only owner; no operator unlock path exists. escrowed: every tenant key additionally carries an escrow wrap under the org master key, openable only via the audited recover_tenant policy path (requires the org master-key setup; not yet available in this build).",
+                    "x-privasys": {
+                        "label": "Operating mode",
+                        "help": "sovereign: only tenants can unlock their data — the operator holds no key. escrowed: adds org escrow with policy-gated recovery (leaver/misconduct); requires the MEK_org ceremony."
+                    }
+                },
+                "quota_default_bytes": {
+                    "type": "integer",
+                    "description": "Default per-tenant storage quota in bytes. 0 means unlimited.",
+                    "default": 0,
+                    "x-privasys": {
+                        "label": "Default tenant quota (bytes)"
+                    }
+                }
+            },
+            "required": ["mode"]
+        }
+    },
+    "tools": [
+        {
+            "name": "configure",
+            "role": "config",
+            "title": "Drive instance settings",
+            "endpoint": "/configure",
+            "description": "Set the instance operating mode and defaults, lifting the configure-then-freeze gate. The mode is immutable once set and is part of the attested configuration. Returns {status: \"configured\", mode}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["sovereign", "escrowed"],
+                        "description": "Operating mode, immutable once set. sovereign: tenant keys have the tenant as the only owner; no operator unlock path exists. escrowed: adds an org master-key escrow with policy-gated recovery (not yet available in this build).",
+                        "x-privasys": {
+                            "label": "Operating mode",
+                            "help": "sovereign: only tenants can unlock their data — the operator holds no key. escrowed: adds org escrow with policy-gated recovery."
+                        }
+                    },
+                    "quota_default_bytes": {
+                        "type": "integer",
+                        "description": "Default per-tenant storage quota in bytes. 0 means unlimited.",
+                        "default": 0,
+                        "x-privasys": {
+                            "label": "Default tenant quota (bytes)"
+                        }
+                    }
+                },
+                "required": ["mode"]
+            }
+        },
+        {
+            "name": "status",
+            "role": "status",
+            "title": "Instance status",
+            "endpoint": "/status",
+            "description": "Report the instance status: state (awaiting_config | ready), operating mode, version and message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "list_root",
+            "title": "List drive root",
+            "endpoint": "/tools/list_root",
+            "description": "List the root-level folders and files of a tenant's drive. Names and metadata come from the enclave-held index; content never leaves the enclave unencrypted except to an authorised caller.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant whose drive root to list."
+                    }
+                },
+                "required": ["tenant_id"]
+            }
+        },
+        {
+            "name": "list_folder",
+            "title": "List a folder",
+            "endpoint": "/tools/list_folder",
+            "description": "List the immediate children (folders and files) of a folder.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant the folder belongs to."
+                    },
+                    "folder_id": {
+                        "type": "string",
+                        "description": "The folder node id returned by list_root, list_folder or create_folder."
+                    }
+                },
+                "required": ["tenant_id", "folder_id"]
+            }
+        },
+        {
+            "name": "create_folder",
+            "title": "Create a folder",
+            "endpoint": "/tools/create_folder",
+            "description": "Create a folder, optionally under a parent folder (omit parent_id for the drive root). Returns the new node.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant to create the folder in."
+                    },
+                    "parent_id": {
+                        "type": "string",
+                        "description": "Parent folder node id; omit for the drive root."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Folder name, unique within the parent."
+                    }
+                },
+                "required": ["tenant_id", "name"]
+            }
+        },
+        {
+            "name": "write_file",
+            "title": "Write a file",
+            "endpoint": "/tools/write_file",
+            "description": "Upload a file. The content is chunked, AEAD-sealed under a fresh per-file key and stored content-addressed; the returned node carries the Merkle root over the ciphertext chunks. For large files use the streaming REST endpoint instead (this tool caps content at 8 MiB).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant to write into."
+                    },
+                    "parent_id": {
+                        "type": "string",
+                        "description": "Parent folder node id; omit for the drive root."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "File name, unique within the parent."
+                    },
+                    "mime": {
+                        "type": "string",
+                        "description": "Optional MIME type hint, e.g. application/pdf."
+                    },
+                    "content_base64": {
+                        "type": "string",
+                        "description": "File content, base64-encoded (max 8 MiB decoded)."
+                    }
+                },
+                "required": ["tenant_id", "name", "content_base64"]
+            }
+        },
+        {
+            "name": "read_file",
+            "title": "Read a file",
+            "endpoint": "/tools/read_file",
+            "description": "Read a file's plaintext (decrypted inside the enclave for this authorised call only) plus its metadata and Merkle root. Files over 8 MiB must use the streaming REST endpoint.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant the file belongs to."
+                    },
+                    "file_id": {
+                        "type": "string",
+                        "description": "The file node id."
+                    }
+                },
+                "required": ["tenant_id", "file_id"]
+            }
+        },
+        {
+            "name": "delete_node",
+            "title": "Delete a file or folder",
+            "endpoint": "/tools/delete_node",
+            "description": "Delete a file, or a folder recursively. Sealed chunk data for deleted files is removed from the object store.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant the node belongs to."
+                    },
+                    "node_id": {
+                        "type": "string",
+                        "description": "The node id to delete."
+                    }
+                },
+                "required": ["tenant_id", "node_id"]
+            }
+        },
+        {
+            "name": "changes",
+            "title": "Change feed",
+            "endpoint": "/tools/changes",
+            "description": "Read the tenant's change feed (create/delete events with actor attribution) strictly after a sequence number. Drives ingestion pipelines and sync clients.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant whose feed to read."
+                    },
+                    "since": {
+                        "type": "integer",
+                        "description": "Return changes with seq strictly greater than this. 0 (default) starts from the beginning."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max entries to return (default 100, max 1000)."
+                    }
+                },
+                "required": ["tenant_id"]
+            }
+        }
+    ]
+}
