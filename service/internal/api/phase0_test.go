@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -208,12 +209,20 @@ func TestPersonalTenantAutoProvision(t *testing.T) {
 }
 
 // fakeMEKs is a deterministic in-memory MEKProvider for tests.
-type fakeMEKs struct{ mek []byte }
+type fakeMEKs struct {
+	mek     []byte
+	loadErr error // when set, Load fails (simulates a stale attestation token)
+}
 
 func (f *fakeMEKs) Provision(_ context.Context, b vaultmek.Bundle) (vaultmek.Ref, error) {
 	return vaultmek.Ref{Handle: b.Handle, Endpoints: b.Endpoints, Threshold: b.Threshold}, nil
 }
-func (f *fakeMEKs) Load(context.Context, vaultmek.Ref) ([]byte, error) { return f.mek, nil }
+func (f *fakeMEKs) Load(context.Context, vaultmek.Ref) ([]byte, error) {
+	if f.loadErr != nil {
+		return nil, f.loadErr
+	}
+	return f.mek, nil
+}
 
 // Unwrap fakes the vault by XORing with a fixed pad (deterministic,
 // reversible) so a sealed round-trip is testable without a vault.
@@ -471,6 +480,118 @@ func TestSealedTransportDataPlane(t *testing.T) {
 	resp, _ = sealed("POST", "/configure", `{"mode":"sovereign"}`)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("sealed configure must be forbidden: %d", resp.StatusCode)
+	}
+}
+
+func TestEnterpriseFolderACLOverride(t *testing.T) {
+	ts := newFullServer(t, nil)
+	owner := devAuth // dev:user-1
+	contributor := "Bearer dev:contrib:c@x"
+
+	// Enterprise tenant; owner adds a contributor.
+	resp, body := doJSON(t, "POST", ts.URL+"/v1/tenants", owner, `{"kind":"enterprise","name":"Acme"}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create tenant: %d %s", resp.StatusCode, body)
+	}
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	resp, _ = doJSON(t, "POST", ts.URL+"/v1/tenants/"+tenant.ID+"/members", owner,
+		`{"user_sub":"contrib","role":"contributor"}`)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("add member: %d", resp.StatusCode)
+	}
+
+	// Two folders: "finance" (to be restricted) and "shared".
+	mkdir := func(name string) string {
+		_, b := doJSON(t, "POST", ts.URL+"/v1/tenants/"+tenant.ID+"/folders", owner,
+			fmt.Sprintf(`{"name":"%s"}`, name))
+		var n struct{ ID string }
+		_ = json.Unmarshal(b, &n)
+		return n.ID
+	}
+	finance := mkdir("finance")
+	shared := mkdir("shared")
+
+	// Before override: the contributor can list both.
+	for _, f := range []string{finance, shared} {
+		resp, _ = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/folders/"+f, contributor, "")
+		if resp.StatusCode != 200 {
+			t.Fatalf("pre-override contributor list %s: %d", f, resp.StatusCode)
+		}
+	}
+
+	// Restrict finance to owner+admin.
+	resp, body = doJSON(t, "PUT", ts.URL+"/v1/tenants/"+tenant.ID+"/nodes/"+finance+"/acl", owner,
+		`{"roles":["owner","admin"]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("set acl: %d %s", resp.StatusCode, body)
+	}
+
+	// Contributor is now denied inside finance, still allowed in shared,
+	// and the owner keeps access to finance (cannot be locked out).
+	resp, _ = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/folders/"+finance, contributor, "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("contributor in restricted finance should be 403, got %d", resp.StatusCode)
+	}
+	resp, _ = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/folders/"+shared, contributor, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("contributor in shared should be 200, got %d", resp.StatusCode)
+	}
+	resp, _ = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/folders/"+finance, owner, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("owner in restricted finance should be 200, got %d", resp.StatusCode)
+	}
+
+	// A child of finance inherits the override (nearest-ancestor walk):
+	// the owner creates a subfolder, the contributor is denied there too.
+	_, b := doJSON(t, "POST", ts.URL+"/v1/tenants/"+tenant.ID+"/folders", owner,
+		fmt.Sprintf(`{"name":"q1","parent_id":"%s"}`, finance))
+	var sub struct{ ID string }
+	_ = json.Unmarshal(b, &sub)
+	resp, _ = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/folders/"+sub.ID, contributor, "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("contributor in finance/q1 should be 403 (inherited), got %d", resp.StatusCode)
+	}
+
+	// Clearing the override restores contributor access.
+	doJSON(t, "PUT", ts.URL+"/v1/tenants/"+tenant.ID+"/nodes/"+finance+"/acl", owner, `{"roles":[]}`)
+	resp, _ = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/folders/"+finance, contributor, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("contributor after clearing override: %d", resp.StatusCode)
+	}
+}
+
+func TestVaultKeyStaleReturns409(t *testing.T) {
+	fake := &fakeMEKs{mek: make([]byte, 32)}
+	ts := newFullServer(t, func(s *Server) { s.MEKs = fake })
+
+	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+
+	// Provision a vault MEK (sets the tenant's mek_ref).
+	resp, _ := doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth,
+		`{"grant":"g","handle":"h","constellation":{"endpoints":["v:1"],"mrenclave":"00","attestation_server":"as","threshold":1}}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("provision: %d", resp.StatusCode)
+	}
+
+	// Now the vault load fails (stale attestation token). A content op
+	// must return an actionable 409 vault_key_stale, not an opaque 502.
+	fake.loadErr = errors.New("attestation token expired")
+	content := base64.StdEncoding.EncodeToString([]byte("x"))
+	resp, body = doJSON(t, "POST", ts.URL+"/tools/write_file", devAuth,
+		fmt.Sprintf(`{"tenant_id":"%s","name":"f.txt","content_base64":"%s"}`, tenant.ID, content))
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "vault_key_stale") {
+		t.Fatalf("stale vault key should be 409 vault_key_stale, got %d %s", resp.StatusCode, body)
+	}
+
+	// Re-arm (load succeeds again) and the op works.
+	fake.loadErr = nil
+	resp, _ = doJSON(t, "POST", ts.URL+"/tools/write_file", devAuth,
+		fmt.Sprintf(`{"tenant_id":"%s","name":"f.txt","content_base64":"%s"}`, tenant.ID, content))
+	if resp.StatusCode != 200 {
+		t.Fatalf("after re-arm: %d", resp.StatusCode)
 	}
 }
 

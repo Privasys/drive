@@ -162,6 +162,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}", s.auth(s.handleDownloadFile))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}", s.auth(s.handleDeleteNode))
 
+	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/acl", s.auth(s.handleSetNodeACL))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/grants/{grantID}", s.auth(s.handleRevokeGrant))
 	mux.Handle("GET /v1/tenants/{tenantID}/changes", s.auth(s.handleChanges))
@@ -741,6 +742,15 @@ func (s *Server) memberRole(ctx context.Context, tenantID, sub string) store.Mem
 	return r
 }
 
+// tenantKind returns the tenant's kind, or "" on error.
+func (s *Server) tenantKind(ctx context.Context, tenantID string) store.TenantKind {
+	t, err := s.Store.GetTenant(ctx, tenantID)
+	if err != nil {
+		return ""
+	}
+	return t.Kind
+}
+
 func (s *Server) canRead(ctx context.Context, tenantID, sub string) bool {
 	return s.memberRole(ctx, tenantID, sub) != ""
 }
@@ -766,9 +776,9 @@ func (s *Server) canAdmin(ctx context.Context, tenantID, sub string) bool {
 func (s *Server) allowNode(ctx context.Context, p *Principal, tenantID, nodeID string, need grants.Scope) bool {
 	if p.IsUser() {
 		if need == grants.ScopeRead {
-			return s.canRead(ctx, tenantID, p.Sub)
+			return s.canRead(ctx, tenantID, p.Sub) && s.aclAllows(ctx, tenantID, nodeID, p.Sub)
 		}
-		return s.canWrite(ctx, tenantID, p.Sub)
+		return s.canWrite(ctx, tenantID, p.Sub) && s.aclAllows(ctx, tenantID, nodeID, p.Sub)
 	}
 	// App principal: exact tenant, granted scope, node inside the
 	// granted subtree.
@@ -783,6 +793,66 @@ func (s *Server) allowNode(ctx context.Context, p *Principal, tenantID, nodeID s
 	}
 	ok, err := s.Store.IsDescendantOrSelf(ctx, tenantID, p.Grant.NodeID, nodeID)
 	return err == nil && ok
+}
+
+// aclAllows applies enterprise folder ACL overrides: if the nearest
+// ancestor of nodeID (or nodeID itself) carries an override, the
+// caller's role must be in its permitted set. The tenant owner is
+// always allowed (an override cannot lock the owner out). User tenants
+// and paths with no override inherit the tenant ACL unchanged (allow).
+func (s *Server) aclAllows(ctx context.Context, tenantID, nodeID, sub string) bool {
+	if nodeID == "" || s.tenantKind(ctx, tenantID) != store.TenantEnterprise {
+		return true
+	}
+	roles, err := s.Store.EffectiveACL(ctx, tenantID, nodeID)
+	if err != nil {
+		return false
+	}
+	if roles == nil {
+		return true // no override in the path
+	}
+	role := s.memberRole(ctx, tenantID, sub)
+	if role == store.RoleOwner {
+		return true
+	}
+	for _, r := range roles {
+		if store.MemberRole(r) == role {
+			return true
+		}
+	}
+	return false
+}
+
+// handleSetNodeACL sets or clears a folder's ACL override (owner/admin).
+// Body: {"roles": ["owner","admin","contributor"]}; an empty/absent
+// roles list clears the override (inherit the tenant ACL).
+func (s *Server) handleSetNodeACL(w http.ResponseWriter, r *http.Request, p *Principal) {
+	tenantID := r.PathValue("tenantID")
+	nodeID := r.PathValue("nodeID")
+	if !p.IsUser() || !s.canAdmin(r.Context(), tenantID, p.Sub) {
+		httpError(w, http.StatusForbidden, errors.New("owner/admin only"))
+		return
+	}
+	var req struct {
+		Roles []string `json:"roles"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	for _, role := range req.Roles {
+		switch store.MemberRole(role) {
+		case store.RoleOwner, store.RoleAdmin, store.RoleContributor, store.RoleReader:
+		default:
+			httpError(w, http.StatusBadRequest, fmt.Errorf("unknown role %q", role))
+			return
+		}
+	}
+	if err := s.Store.SetNodeACL(r.Context(), tenantID, nodeID, req.Roles); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"node_id": nodeID, "roles": req.Roles})
 }
 
 // --- helpers ----------------------------------------------------------
@@ -844,6 +914,16 @@ func readJSON(r *http.Request, dst any) error {
 }
 
 func httpError(w http.ResponseWriter, status int, err error) {
+	// A stale/unavailable vault MEK is recoverable by re-arming; emit a
+	// machine-readable 409 so a client re-arms and retries rather than
+	// treating it as a hard failure, regardless of the status the caller
+	// mapped it to.
+	if errors.Is(err, ErrVaultKeyStale) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": err.Error(), "code": "vault_key_stale",
+		})
+		return
+	}
 	http.Error(w, err.Error(), status)
 }
 

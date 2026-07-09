@@ -239,3 +239,49 @@ func testisDescendantOrSelf(t *testing.T, s *Store) {
 		}
 	}
 }
+
+func TestEffectiveACL(t *testing.T) { forEachStore(t, testeffectiveACL) }
+
+func testeffectiveACL(t *testing.T, s *Store) {
+	ctx := context.Background()
+	tt := &Tenant{Kind: TenantEnterprise, Name: "e"}
+	_ = s.CreateTenant(ctx, tt, "owner")
+
+	top := &Node{TenantID: tt.ID, Kind: NodeFolder, Name: "top", NameHMAC: []byte("tttttttttttttttttttttttttttttttt")}
+	_ = s.CreateNode(ctx, top, "owner")
+	child := &Node{TenantID: tt.ID, ParentID: sql.NullString{String: top.ID, Valid: true},
+		Kind: NodeFolder, Name: "child", NameHMAC: []byte("cccccccccccccccccccccccccccccccc")}
+	_ = s.CreateNode(ctx, child, "owner")
+
+	// No override anywhere: inherit (nil).
+	if roles, err := s.EffectiveACL(ctx, tt.ID, child.ID); err != nil || roles != nil {
+		t.Fatalf("no-override EffectiveACL = %v %v", roles, err)
+	}
+	// Override on top governs the child (nearest-ancestor walk).
+	if err := s.SetNodeACL(ctx, tt.ID, top.ID, []string{"owner", "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	roles, err := s.EffectiveACL(ctx, tt.ID, child.ID)
+	if err != nil || len(roles) != 2 || roles[0] != "owner" || roles[1] != "admin" {
+		t.Fatalf("inherited EffectiveACL = %v %v", roles, err)
+	}
+	// A closer override on the child wins.
+	_ = s.SetNodeACL(ctx, tt.ID, child.ID, []string{"contributor"})
+	roles, _ = s.EffectiveACL(ctx, tt.ID, child.ID)
+	if len(roles) != 1 || roles[0] != "contributor" {
+		t.Fatalf("closest-override EffectiveACL = %v", roles)
+	}
+	// Clearing the child override falls back to top's.
+	_ = s.SetNodeACL(ctx, tt.ID, child.ID, nil)
+	roles, _ = s.EffectiveACL(ctx, tt.ID, child.ID)
+	if len(roles) != 2 {
+		t.Fatalf("after clear, EffectiveACL = %v", roles)
+	}
+	// ACL override on a file is rejected.
+	f := &Node{TenantID: tt.ID, ParentID: sql.NullString{String: top.ID, Valid: true},
+		Kind: NodeFile, Name: "f", NameHMAC: []byte("ffffffffffffffffffffffffffffffff")}
+	_ = s.CreateNode(ctx, f, "owner")
+	if err := s.SetNodeACL(ctx, tt.ID, f.ID, []string{"admin"}); err == nil {
+		t.Fatal("SetNodeACL on a file must fail")
+	}
+}

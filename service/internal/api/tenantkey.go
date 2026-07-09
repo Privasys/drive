@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -19,6 +20,14 @@ type MEKProvider interface {
 	Unwrap(ctx context.Context, ref vaultmek.Ref, ciphertext, iv []byte) ([]byte, error)
 }
 
+// ErrVaultKeyStale means the tenant's vault MEK could not be loaded
+// (typically the stored attestation token expired since the last
+// re-arm). It is recoverable: the owner re-arms via
+// POST /v1/me/tenant/key with a fresh grant bundle. Callers surface it
+// as 409 with a machine-readable code so a client auto-re-arms rather
+// than treating it as a hard failure.
+var ErrVaultKeyStale = errors.New("tenant vault key unavailable; re-arm via POST /v1/me/tenant/key")
+
 // tenantMEK resolves the master key protecting a tenant's content: the
 // tenant's own vault-held MEK when provisioned, else the instance MEK
 // (the pre-vault interim, kept as fallback so old tenants keep working).
@@ -34,7 +43,14 @@ func (s *Server) tenantMEK(ctx context.Context, tenantID string) ([]byte, error)
 	if perr != nil {
 		return nil, perr
 	}
-	return s.MEKs.Load(ctx, r)
+	mek, lerr := s.MEKs.Load(ctx, r)
+	if lerr != nil {
+		// A tenant with a vault ref whose Load fails is recoverable by
+		// re-arming (the wallet does this on login; the stored
+		// attestation token expires ~15 min after the last re-arm).
+		return nil, fmt.Errorf("%w: %v", ErrVaultKeyStale, lerr)
+	}
+	return mek, nil
 }
 
 type tenantKeyRequest struct {

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -409,6 +410,68 @@ func (s *Store) TenantUsageBytes(ctx context.Context, tenantID string) (int64, e
 		return 0, err
 	}
 	return total, nil
+}
+
+// SetNodeACL sets (or clears, when roles is nil) a folder's ACL
+// override: the set of enterprise roles permitted at and below it,
+// narrowing the inherited tenant ACL (SharePoint-style). Only folders
+// carry overrides.
+func (s *Store) SetNodeACL(ctx context.Context, tenantID, nodeID string, roles []string) error {
+	n, err := s.GetNode(ctx, tenantID, nodeID)
+	if err != nil {
+		return err
+	}
+	if n.Kind != NodeFolder {
+		return fmt.Errorf("%w: ACL overrides apply to folders only", ErrInvalidInput)
+	}
+	var blob any
+	if len(roles) > 0 {
+		b, merr := json.Marshal(map[string][]string{"roles": roles})
+		if merr != nil {
+			return merr
+		}
+		blob = b
+	}
+	_, err = s.DB.ExecContext(ctx, s.q(
+		`UPDATE nodes SET acl_override = ? WHERE tenant_id = ? AND id = ?`),
+		blob, tenantID, nodeID)
+	return err
+}
+
+// EffectiveACL returns the permitted-role set governing nodeID: the
+// override of the nearest ancestor (or nodeID itself) that carries one,
+// walking up to the root. Returns nil when no override is in the path
+// (the tenant ACL is inherited unchanged). Empty nodeID (a root-level
+// operation) inherits.
+func (s *Store) EffectiveACL(ctx context.Context, tenantID, nodeID string) ([]string, error) {
+	cur := nodeID
+	for depth := 0; cur != "" && depth < 4096; depth++ {
+		row := s.DB.QueryRowContext(ctx, s.q(
+			`SELECT parent_id, acl_override FROM nodes WHERE tenant_id = ? AND id = ?`),
+			tenantID, cur)
+		var parent sql.NullString
+		var acl []byte
+		if err := row.Scan(&parent, &acl); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		if len(acl) > 0 {
+			var doc struct {
+				Roles []string `json:"roles"`
+			}
+			if err := json.Unmarshal(acl, &doc); err != nil {
+				return nil, fmt.Errorf("parse acl_override on %s: %w", cur, err)
+			}
+			return doc.Roles, nil
+		}
+		if !parent.Valid {
+			return nil, nil
+		}
+		cur = parent.String
+	}
+	return nil, nil
 }
 
 // IsDescendantOrSelf reports whether nodeID equals ancestorID or lies in

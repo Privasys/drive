@@ -56,8 +56,11 @@ Drive itself never calls a model.
 
 - **Tenant**: `User` (one owner) or `Enterprise` (members with roles
   `owner | admin | contributor | reader`). Per-folder `acl_override`
-  jsonb supports SharePoint-style fine-grained ACLs without altering
-  the closure tree.
+  (`{"roles":[...]}`) narrows the inherited tenant ACL SharePoint-style:
+  a member's role must be in the nearest ancestor override's permitted
+  set (the owner is never locked out). Set via
+  `PUT /v1/tenants/{id}/nodes/{folderID}/acl` (owner/admin);
+  enforced in `allowNode` on every read/write.
 - **Node**: folder or file. Filenames are stored in plaintext (the
   index lives inside the TDX-protected disk); a 32-byte HMAC tag
   enforces (parent, name) uniqueness.
