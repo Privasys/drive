@@ -1,6 +1,6 @@
 {
   "name": "@privasys/drive-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript client for Privasys Drive — encrypted multi-tenant file storage in TDX.",
   "license": "AGPL-3.0",
   "author": "Privasys",
@@ -36,5 +36,8 @@
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "@types/node": "^22.10.2"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   }
 }

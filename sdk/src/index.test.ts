@@ -99,3 +99,38 @@ test("listChanges builds the since/limit query", async () => {
   assert.match(captured!.url, /since=42/);
   assert.match(captured!.url, /limit=10/);
 });
+
+test("setupPersonalDrive chains tenant, grant fetch and key provisioning", async () => {
+  const calls: string[] = [];
+  const drive = PrivasysDrive.connect({
+    baseUrl: "https://drive.example",
+    token: "tok",
+    fetch: makeFakeFetch((r) => {
+      calls.push(r.url);
+      if (r.url.endsWith("/v1/me/tenant")) {
+        return new Response(JSON.stringify({ ID: "t1", Kind: "user", Name: "me" }), { status: 201 });
+      }
+      if (r.url.includes("/data-keys/grant")) {
+        assert.equal(r.headers["authorization"], "Bearer tok");
+        return new Response(JSON.stringify({
+          grant: "g",
+          handle_hint: "apps.privasys.org/x/data/y/mek/v1",
+          attestation_token: "at",
+          constellation: { endpoints: ["v1:1"], mrenclave: "00", attestation_server: "as", threshold: 1 },
+        }), { status: 201 });
+      }
+      if (r.url.endsWith("/v1/me/tenant/key")) {
+        const body = JSON.parse(String(r.body));
+        assert.equal(body.grant, "g");
+        assert.equal(body.handle, "apps.privasys.org/x/data/y/mek/v1");
+        assert.equal(body.constellation.threshold, 1);
+        return new Response(JSON.stringify({ status: "provisioned", handle: body.handle }), { status: 201 });
+      }
+      throw new Error("unexpected url " + r.url);
+    }),
+  });
+  const out = await drive.setupPersonalDrive({ mgmtBaseUrl: "https://mgmt.example/", appId: "app-1" });
+  assert.equal(out.key.status, "provisioned");
+  assert.equal(calls.length, 3);
+  assert.match(calls[1], /mgmt\.example\/api\/v1\/apps\/app-1\/data-keys\/grant/);
+});

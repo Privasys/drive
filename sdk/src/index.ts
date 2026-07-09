@@ -110,6 +110,43 @@ export class PrivasysDrive {
     return this.req("POST", "/v1/me/tenant/key", JSON.stringify(bundle), "application/json");
   }
 
+  /**
+   * One-call login setup: ensure the personal tenant exists, fetch a
+   * data-key grant from the control plane (the caller's own sub becomes
+   * the vault key owner), and provision or re-arm the tenant's
+   * vault-held MEK on the Drive enclave. The wallet calls this once
+   * after each login; it is idempotent.
+   */
+  async setupPersonalDrive(opts: { mgmtBaseUrl: string; appId: string }): Promise<{
+    tenant: Tenant;
+    key: { status: string; handle: string };
+  }> {
+    const tenant = await this.ensurePersonalTenant();
+    const res = await this.fetcher(
+      `${opts.mgmtBaseUrl.replace(/\/$/, "")}/api/v1/apps/${enc(opts.appId)}/data-keys/grant`,
+      { method: "POST", headers: { Authorization: `Bearer ${this.token}` } },
+    );
+    if (!res.ok) throw await asError(res);
+    const bundle = (await res.json()) as {
+      grant: string;
+      handle_hint: string;
+      attestation_token?: string;
+      constellation: {
+        endpoints: string[];
+        mrenclave: string;
+        attestation_server: string;
+        threshold: number;
+      };
+    };
+    const key = await this.provisionTenantKey({
+      grant: bundle.grant,
+      handle: bundle.handle_hint,
+      attestation_token: bundle.attestation_token,
+      constellation: bundle.constellation,
+    });
+    return { tenant, key };
+  }
+
   async createTenant(input: { kind?: TenantKind; name: string }): Promise<Tenant> {
     return this.req<Tenant>("POST", "/v1/tenants", JSON.stringify({ kind: input.kind ?? "user", name: input.name }), "application/json");
   }

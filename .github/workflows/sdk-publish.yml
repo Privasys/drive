@@ -1,0 +1,63 @@
+name: Publish SDK
+
+# Publishes @privasys/drive-sdk to the GitHub Packages npm registry
+# (the same flow as the auth SDK): the workflow's own GITHUB_TOKEN
+# authenticates, so no separate npm token exists. First-party apps
+# install with an .npmrc pointing @privasys at npm.pkg.github.com.
+
+on:
+  push:
+    tags:
+      - 'sdk-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@privasys'
+
+      - name: Install dependencies
+        working-directory: sdk
+        run: npm ci
+
+      - name: Test
+        working-directory: sdk
+        run: npm test
+
+      - name: Build
+        working-directory: sdk
+        run: npm run build
+
+      - name: Verify build output
+        working-directory: sdk
+        run: |
+          test -f dist/index.js
+          test -f dist/index.d.ts
+
+      - name: Publish to GitHub Packages
+        working-directory: sdk
+        # Tolerate re-runs: republishing an existing version exits 1
+        # with "cannot publish over the previously published versions".
+        run: |
+          set +e
+          out=$(npm publish 2>&1)
+          rc=$?
+          echo "$out"
+          if [ $rc -ne 0 ] && echo "$out" | grep -q "cannot publish over the previously published versions"; then
+            echo "::notice::Version already published."
+            exit 0
+          fi
+          exit $rc
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
