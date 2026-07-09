@@ -28,6 +28,7 @@ func (s *Server) Tools() http.Handler {
 	mux.Handle("POST /tools/delete_node", s.auth(s.toolDeleteNode))
 	mux.Handle("POST /tools/changes", s.auth(s.toolChanges))
 	mux.Handle("POST /tools/my_drive", s.auth(s.toolMyDrive))
+	mux.Handle("POST /tools/rearm_tenant_key", s.auth(s.toolRearmTenantKey))
 	mux.Handle("POST /tools/set_bucket_cred", s.auth(s.toolSetBucketCred))
 	mux.Handle("POST /tools/get_bucket_cred", s.auth(s.toolGetBucketCred))
 	mux.Handle("POST /tools/delete_bucket_cred", s.auth(s.toolDeleteBucketCred))
@@ -46,6 +47,44 @@ func (s *Server) toolMyDrive(w http.ResponseWriter, r *http.Request, p *Principa
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tenant_id": t.ID, "name": t.Name, "kind": t.Kind, "created": created,
 	})
+}
+
+// toolRearmTenantKey refreshes the attestation token on the caller's
+// personal-tenant vault MEK ref and warms the MEK cache — the recovery
+// for a 409 vault_key_stale. Token-only: provisioning a NEW tenant key
+// (grant bundle) stays on the wallet's sealed REST path.
+func (s *Server) toolRearmTenantKey(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		AttestationToken string `json:"attestation_token"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !p.IsUser() {
+		httpError(w, http.StatusForbidden, errors.New("user principals only"))
+		return
+	}
+	if s.MEKs == nil {
+		httpError(w, http.StatusNotImplemented, errors.New("vault-held tenant keys are not available on this instance"))
+		return
+	}
+	t, err := s.Store.PersonalTenantOf(r.Context(), p.Sub)
+	if err != nil {
+		httpError(w, http.StatusNotFound, errors.New("no personal tenant"))
+		return
+	}
+	existing, _ := s.Store.TenantMekRef(r.Context(), t.ID)
+	if existing == "" {
+		httpError(w, http.StatusConflict, errors.New("tenant has no vault MEK to re-arm"))
+		return
+	}
+	handle, status, rerr := s.rearmTenantKey(r.Context(), t.ID, existing, req.AttestationToken)
+	if rerr != nil {
+		httpError(w, status, rerr)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "loaded", "handle": handle})
 }
 
 // toolSetBucketCred stores or rotates a tenant's sealed BYO bucket

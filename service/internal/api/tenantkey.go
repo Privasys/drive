@@ -54,6 +54,28 @@ func (s *Server) tenantMEK(ctx context.Context, tenantID string) ([]byte, error)
 	return mek, nil
 }
 
+// rearmTenantKey refreshes the stored attestation token on a tenant's
+// existing MEK ref (when a fresh one is supplied) and warms the
+// in-memory MEK cache by loading the key. This is the recovery for
+// ErrVaultKeyStale; the wallet runs it on login and agents via the
+// rearm_tenant_key tool.
+func (s *Server) rearmTenantKey(ctx context.Context, tenantID, existingRef, attToken string) (handle string, status int, err error) {
+	ref, perr := vaultmek.ParseRef(existingRef)
+	if perr != nil {
+		return "", http.StatusInternalServerError, perr
+	}
+	if attToken != "" {
+		ref.AttToken = attToken
+		if err := s.Store.SetTenantMekRef(ctx, tenantID, vaultmek.RefJSON(ref)); err != nil {
+			return "", http.StatusInternalServerError, err
+		}
+	}
+	if _, err := s.MEKs.Load(ctx, ref); err != nil {
+		return "", http.StatusBadGateway, err
+	}
+	return ref.Handle, http.StatusOK, nil
+}
+
 type tenantKeyRequest struct {
 	Grant            string `json:"grant"`
 	Handle           string `json:"handle"`
@@ -94,23 +116,12 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 	}
 
 	if existing, _ := s.Store.TenantMekRef(r.Context(), t.ID); existing != "" {
-		ref, perr := vaultmek.ParseRef(existing)
-		if perr != nil {
-			httpError(w, http.StatusInternalServerError, perr)
+		handle, status, rerr := s.rearmTenantKey(r.Context(), t.ID, existing, req.AttestationToken)
+		if rerr != nil {
+			httpError(w, status, rerr)
 			return
 		}
-		if req.AttestationToken != "" {
-			ref.AttToken = req.AttestationToken
-			if err := s.Store.SetTenantMekRef(r.Context(), t.ID, vaultmek.RefJSON(ref)); err != nil {
-				writeStoreError(w, err)
-				return
-			}
-		}
-		if _, err := s.MEKs.Load(r.Context(), ref); err != nil {
-			httpError(w, http.StatusBadGateway, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "loaded", "handle": ref.Handle})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "loaded", "handle": handle})
 		return
 	}
 

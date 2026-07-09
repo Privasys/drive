@@ -249,6 +249,22 @@
             }
         },
         {
+            "name": "rearm_tenant_key",
+            "title": "Re-arm tenant vault key",
+            "endpoint": "/tools/rearm_tenant_key",
+            "description": "Refresh the attestation token on the caller's personal-tenant vault MEK and reload it. Run this after a 409 vault_key_stale (the stored attestation token expires about 15 minutes after the last re-arm; the wallet re-arms on login). Pass a fresh aud=attestation-server token.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "attestation_token": {
+                        "type": "string",
+                        "description": "A fresh aud=attestation-server bearer used by the enclave to verify the vaults' quotes when reading key shares back."
+                    }
+                },
+                "required": ["attestation_token"]
+            }
+        },
+        {
             "name": "set_bucket_cred",
             "title": "Set BYO bucket credential",
             "endpoint": "/tools/set_bucket_cred",
