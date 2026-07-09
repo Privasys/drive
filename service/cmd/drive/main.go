@@ -140,11 +140,7 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	objectsDir := filepath.Join(*state, "objects")
-	if err := os.MkdirAll(objectsDir, 0o700); err != nil {
-		return err
-	}
-	bk, err := objectstore.NewLocal(objectsDir)
+	bk, err := openBackend(context.Background(), *state)
 	if err != nil {
 		return err
 	}
@@ -227,6 +223,33 @@ func serve(args []string) error {
 	sdCtx, sdCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer sdCancel()
 	return httpSrv.Shutdown(sdCtx)
+}
+
+// openBackend selects the instance object backend from the environment:
+// DRIVE_OBJECT_BACKEND=gcs uses Google Cloud Storage (DRIVE_GCS_BUCKET,
+// optional DRIVE_GCS_KEY_FILE — else application default credentials);
+// anything else uses the local-disk backend under <state>/objects. A
+// per-tenant BYO bucket credential can override this per tenant later.
+func openBackend(ctx context.Context, state string) (objectstore.Backend, error) {
+	switch strings.ToLower(os.Getenv("DRIVE_OBJECT_BACKEND")) {
+	case "gcs":
+		bucket := os.Getenv("DRIVE_GCS_BUCKET")
+		var creds []byte
+		if kf := os.Getenv("DRIVE_GCS_KEY_FILE"); kf != "" {
+			b, err := os.ReadFile(kf)
+			if err != nil {
+				return nil, fmt.Errorf("DRIVE_GCS_KEY_FILE: %w", err)
+			}
+			creds = b
+		}
+		return objectstore.NewGCS(ctx, objectstore.GCSConfig{Bucket: bucket, CredentialsJSON: creds})
+	default:
+		objectsDir := filepath.Join(state, "objects")
+		if err := os.MkdirAll(objectsDir, 0o700); err != nil {
+			return nil, err
+		}
+		return objectstore.NewLocal(objectsDir)
+	}
 }
 
 // manifestPath locates the image-baked privasys.json (also the source of
