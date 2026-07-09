@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -109,23 +110,27 @@ func (c *Client) cachedFreshToken(now int64) string {
 	return ""
 }
 
-// refreshToken fetches (and caches) a fresh attestation token, or
-// returns "" when no refresher is configured or it fails.
-func (c *Client) refreshToken(ctx context.Context) string {
+// refreshToken fetches (and caches) a fresh attestation token. Returns
+// ("", nil) when no refresher is configured.
+func (c *Client) refreshToken(ctx context.Context) (string, error) {
 	c.tokMu.Lock()
 	r := c.refresh
 	c.tokMu.Unlock()
 	if r == nil {
-		return ""
+		return "", nil
 	}
 	tok, exp, err := r(ctx)
-	if err != nil || tok == "" {
-		return ""
+	if err != nil {
+		log.Printf("vaultmek: attestation-token refresh failed: %v", err)
+		return "", err
+	}
+	if tok == "" {
+		return "", fmt.Errorf("vaultmek: refresher returned an empty token")
 	}
 	c.tokMu.Lock()
 	c.freshTok, c.freshExp = tok, exp
 	c.tokMu.Unlock()
-	return tok
+	return tok, nil
 }
 
 func (c *Client) policy(mrenclaveHex, attServer, attToken string, nonce []byte) (*ratls.VerificationPolicy, error) {
@@ -235,7 +240,11 @@ func (c *Client) Unwrap(ctx context.Context, ref Ref, ciphertext, iv []byte) ([]
 	if err != nil {
 		// The stored token may simply have expired; fetch a fresh one and
 		// retry once (self-heal, no owner round-trip).
-		if ft := c.refreshToken(ctx); ft != "" && ft != tok {
+		ft, rerr := c.refreshToken(ctx)
+		if rerr != nil {
+			return nil, fmt.Errorf("%v (token self-heal failed: %v)", err, rerr)
+		}
+		if ft != "" && ft != tok {
 			return c.unwrapOnce(ctx, ref, ft, ciphertext, iv)
 		}
 	}
@@ -284,7 +293,11 @@ func (c *Client) Load(ctx context.Context, ref Ref) ([]byte, error) {
 		// The stored token expires ~15 min after the last re-arm; with a
 		// refresher configured the client self-heals instead of failing
 		// until the owner comes back.
-		if ft := c.refreshToken(ctx); ft != "" && ft != tok {
+		ft, rerr := c.refreshToken(ctx)
+		if rerr != nil {
+			return nil, fmt.Errorf("%v (token self-heal failed: %v)", err, rerr)
+		}
+		if ft != "" && ft != tok {
 			mek, err = c.loadOnce(ctx, ref, ft)
 		}
 	}

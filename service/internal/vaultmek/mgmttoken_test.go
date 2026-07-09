@@ -123,7 +123,7 @@ func TestClientTokenCache(t *testing.T) {
 	if got := c.cachedFreshToken(time.Now().Unix()); got != "" {
 		t.Fatalf("cache should start empty, got %q", got)
 	}
-	if got := c.refreshToken(context.Background()); got != "fresh-tok" {
+	if got, rerr := c.refreshToken(context.Background()); rerr != nil || got != "fresh-tok" {
 		t.Fatalf("refreshToken = %q", got)
 	}
 	if got := c.cachedFreshToken(time.Now().Unix()); got != "fresh-tok" {
