@@ -365,6 +365,19 @@ func (s *Store) DeleteNode(ctx context.Context, tenantID, id, actor string) erro
 	return tx.Commit()
 }
 
+// TenantUsageBytes returns the total plaintext bytes stored by a tenant
+// (the sum of file sizes; folders are 0). Used for quota enforcement.
+func (s *Store) TenantUsageBytes(ctx context.Context, tenantID string) (int64, error) {
+	row := s.DB.QueryRowContext(ctx, s.q(
+		`SELECT COALESCE(SUM(plain_size), 0) FROM nodes WHERE tenant_id = ? AND kind = ?`),
+		tenantID, string(NodeFile))
+	var total int64
+	if err := row.Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
 // IsDescendantOrSelf reports whether nodeID equals ancestorID or lies in
 // its subtree, by walking the parent chain upward. Used to confine
 // AppGrant principals to their granted node's subtree.

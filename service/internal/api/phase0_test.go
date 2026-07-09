@@ -267,6 +267,72 @@ func TestTenantKeySwitchRewrapsContent(t *testing.T) {
 	}
 }
 
+func TestQuotaEnforcement(t *testing.T) {
+	// Configure a tiny quota, then prove writes are metered and the
+	// ceiling holds.
+	ts := newFullServer(t, nil)
+	resp, _ := doJSON(t, "POST", ts.URL+"/configure", devAuth, `{"mode":"sovereign","quota_default_bytes":20}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("configure quota: %d", resp.StatusCode)
+	}
+	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+
+	write := func(name, plain string) int {
+		b := base64.StdEncoding.EncodeToString([]byte(plain))
+		resp, _ := doJSON(t, "POST", ts.URL+"/tools/write_file", devAuth,
+			fmt.Sprintf(`{"tenant_id":"%s","name":"%s","content_base64":"%s"}`, tenant.ID, name, b))
+		return resp.StatusCode
+	}
+	if s := write("a.txt", "0123456789"); s != 200 { // 10 bytes, fits
+		t.Fatalf("first write: %d", s)
+	}
+	if s := write("b.txt", "0123456789"); s != 200 { // 10 more, exactly 20
+		t.Fatalf("second write (fills quota): %d", s)
+	}
+	if s := write("c.txt", "x"); s != http.StatusRequestEntityTooLarge { // over
+		t.Fatalf("over-quota write should be 413, got %d", s)
+	}
+
+	// /v1/quota reports the usage.
+	resp, body = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/quota", devAuth, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("quota endpoint: %d", resp.StatusCode)
+	}
+	var q struct {
+		Used, Limit, Remaining int64
+		Unlimited              bool
+	}
+	// tolerant field names
+	var raw map[string]any
+	_ = json.Unmarshal(body, &raw)
+	q.Used = int64(raw["used_bytes"].(float64))
+	q.Limit = int64(raw["limit_bytes"].(float64))
+	if q.Used != 20 || q.Limit != 20 {
+		t.Fatalf("quota report: used=%d limit=%d (%s)", q.Used, q.Limit, body)
+	}
+
+	// Deleting frees quota; a new small write then fits.
+	// (find b.txt id)
+	_, body = doJSON(t, "POST", ts.URL+"/tools/list_root", devAuth, fmt.Sprintf(`{"tenant_id":"%s"}`, tenant.ID))
+	var listed struct {
+		Nodes []struct{ ID, Name string }
+	}
+	_ = json.Unmarshal(body, &listed)
+	var bID string
+	for _, n := range listed.Nodes {
+		if n.Name == "b.txt" {
+			bID = n.ID
+		}
+	}
+	doJSON(t, "POST", ts.URL+"/tools/delete_node", devAuth,
+		fmt.Sprintf(`{"tenant_id":"%s","node_id":"%s"}`, tenant.ID, bID))
+	if s := write("d.txt", "12345"); s != 200 {
+		t.Fatalf("write after freeing quota: %d", s)
+	}
+}
+
 func TestSealedTransportDataPlane(t *testing.T) {
 	ts := newFullServer(t, nil)
 	const sub = "wallet-user-9"

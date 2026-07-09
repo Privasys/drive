@@ -53,7 +53,7 @@ of the attested configuration.
 |---|---|---|
 | `mode` | `sovereign` | Only tenants can unlock their data; the operator holds no key and no unlock path. The Privasys public instance runs this. |
 | | `escrowed` | Tenant keys carry an escrow wrap under the org master key (`MEK_org`); recovery is policy-gated and audited. Requires the org key ceremony, which has not shipped yet; rejected by this build. |
-| `quota_default_bytes` | integer | Default per-tenant quota; 0 = unlimited. |
+| `quota_default_bytes` | integer | Per-tenant storage ceiling in bytes, enforced on upload (0 = unlimited). `GET /v1/tenants/{id}/quota` reports usage. |
 
 Configure via the portal Configure tab, or over RA-TLS:
 `privasys apps configure privasys-drive --set mode=sovereign`.

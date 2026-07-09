@@ -165,6 +165,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/grants/{grantID}", s.auth(s.handleRevokeGrant))
 	mux.Handle("GET /v1/tenants/{tenantID}/changes", s.auth(s.handleChanges))
+	mux.Handle("GET /v1/tenants/{tenantID}/quota", s.auth(s.handleQuota))
 	mux.Handle("POST /v1/tenants/{tenantID}/exports", s.auth(s.handleExport))
 
 	return mux
@@ -414,6 +415,23 @@ func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentI
 	if !s.allowNode(ctx, p, tenantID, parentID, grants.ScopeWrite) {
 		return nil, http.StatusForbidden, errors.New("forbidden")
 	}
+	// Quota: a 0 limit is unlimited. Fast-reject when already at/over the
+	// ceiling; otherwise cap the upload so a streamed body cannot blow
+	// past it, and make the precise check after the write.
+	limit := s.quotaLimit()
+	var remaining int64
+	if limit > 0 {
+		used, uerr := s.Store.TenantUsageBytes(ctx, tenantID)
+		if uerr != nil {
+			return nil, http.StatusInternalServerError, uerr
+		}
+		remaining = limit - used
+		if remaining <= 0 {
+			return nil, http.StatusRequestEntityTooLarge,
+				fmt.Errorf("tenant storage quota reached (%d bytes)", limit)
+		}
+		body = io.LimitReader(body, remaining+1)
+	}
 	mek, err := s.tenantMEK(ctx, tenantID)
 	if err != nil {
 		return nil, http.StatusBadGateway, err
@@ -450,10 +468,27 @@ func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentI
 	n.WrappedCEK = wr.WrappedCEK
 	n.ManifestRef = wr.ManifestKey
 	n.PlainSize = wr.Manifest.PlainSize
+	// Precise quota check now that the true size is known: the capped
+	// reader let at most remaining+1 bytes through, so a file exactly at
+	// remaining passes and anything larger is rejected and cleaned up.
+	if limit > 0 && n.PlainSize > remaining {
+		_ = manifest.Delete(ctx, s.Backend, dek, tenantID, n.ID, n.WrappedCEK)
+		return nil, http.StatusRequestEntityTooLarge,
+			fmt.Errorf("upload would exceed the tenant storage quota (%d bytes)", limit)
+	}
 	if err := s.Store.CreateNode(ctx, n, p.Sub); err != nil {
 		return nil, storeErrorStatus(err), err
 	}
 	return n, http.StatusCreated, nil
+}
+
+// quotaLimit returns the per-tenant byte ceiling from the instance
+// config (0 = unlimited). A per-tenant override can layer on later.
+func (s *Server) quotaLimit() int64 {
+	if cfg := s.CurrentConfig(); cfg != nil {
+		return cfg.QuotaDefaultBytes
+	}
+	return 0
 }
 
 func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -623,6 +658,32 @@ func (s *Server) listChanges(ctx context.Context, p *Principal, tenantID string,
 		return nil, storeErrorStatus(err), err
 	}
 	return rows, http.StatusOK, nil
+}
+
+func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request, p *Principal) {
+	tenantID := r.PathValue("tenantID")
+	if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
+		return
+	}
+	used, err := s.Store.TenantUsageBytes(r.Context(), tenantID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	limit := s.quotaLimit()
+	out := map[string]any{"used_bytes": used, "limit_bytes": limit, "unlimited": limit == 0}
+	if limit > 0 {
+		out["remaining_bytes"] = max64(0, limit-used)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 type exportRequest struct {
