@@ -18,6 +18,7 @@ import (
 	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/platform"
+	"github.com/Privasys/drive/service/internal/store"
 	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
@@ -558,6 +559,42 @@ func TestEnterpriseFolderACLOverride(t *testing.T) {
 	resp, _ = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/folders/"+finance, contributor, "")
 	if resp.StatusCode != 200 {
 		t.Fatalf("contributor after clearing override: %d", resp.StatusCode)
+	}
+}
+
+func TestBackendSelection(t *testing.T) {
+	_, srv := newTestServer(t)
+	srv.MEKs = &fakeMEKs{mek: make([]byte, 32)}
+	ctx := context.Background()
+
+	tOwner := &store.Tenant{Kind: store.TenantUser, Name: "o"}
+	if err := srv.Store.CreateTenant(ctx, tOwner, "o"); err != nil {
+		t.Fatal(err)
+	}
+
+	// No BYO credential: the instance default backend.
+	bk, err := srv.backendFor(ctx, tOwner.ID)
+	if err != nil || bk != srv.Backend {
+		t.Fatalf("no-cred backend: %v (want instance default)", err)
+	}
+
+	// A BYO credential routes into the BYO branch. An unsupported
+	// content type surfaces a clear error (proving selection, without
+	// needing a live cloud client).
+	cred := SealedBucketCred{
+		KeyRef:        vaultmek.Ref{Handle: "h", Endpoints: []string{"v:1"}},
+		CiphertextB64: base64.RawURLEncoding.EncodeToString([]byte("x")),
+		IvB64:         base64.RawURLEncoding.EncodeToString([]byte("iv")),
+		ContentType:   "s3-keypair", // not yet supported
+		Bucket:        "b",
+	}
+	blob, _ := json.Marshal(cred)
+	if err := srv.Store.SetTenantBucketCred(ctx, tOwner.ID, string(blob)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.backendFor(ctx, tOwner.ID); err == nil ||
+		!strings.Contains(err.Error(), "unsupported bucket credential") {
+		t.Fatalf("BYO-cred backend selection: %v (want unsupported-content-type)", err)
 	}
 }
 

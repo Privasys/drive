@@ -64,6 +64,9 @@ type Server struct {
 
 	cfgMu sync.RWMutex
 	cfg   *config.Config
+
+	backendsOnce sync.Once
+	backends     *tenantBackends
 }
 
 // authVia records how a principal authenticated.
@@ -461,7 +464,11 @@ func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentI
 		n.ParentID.String = parentID
 		n.ParentID.Valid = true
 	}
-	wr, err := manifest.Write(ctx, s.Backend, dek, tenantID, n.ID, mime, 0, body)
+	bk, err := s.backendFor(ctx, tenantID)
+	if err != nil {
+		return nil, http.StatusBadGateway, err
+	}
+	wr, err := manifest.Write(ctx, bk, dek, tenantID, n.ID, mime, 0, body)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
@@ -477,7 +484,7 @@ func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentI
 	// reader let at most remaining+1 bytes through, so a file exactly at
 	// remaining passes and anything larger is rejected and cleaned up.
 	if limit > 0 && n.PlainSize > remaining {
-		_ = manifest.Delete(ctx, s.Backend, dek, tenantID, n.ID, n.WrappedCEK)
+		_ = manifest.Delete(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
 		return nil, http.StatusRequestEntityTooLarge,
 			fmt.Errorf("upload would exceed the tenant storage quota (%d bytes)", limit)
 	}
@@ -535,7 +542,11 @@ func (s *Server) openFile(ctx context.Context, p *Principal, tenantID, fileID st
 	if err != nil {
 		return nil, nil, http.StatusInternalServerError, err
 	}
-	_, rc, err := manifest.Read(ctx, s.Backend, dek, tenantID, n.ID, n.WrappedCEK)
+	bk, err := s.backendFor(ctx, tenantID)
+	if err != nil {
+		return nil, nil, http.StatusBadGateway, err
+	}
+	_, rc, err := manifest.Read(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
 	if err != nil {
 		return nil, nil, http.StatusInternalServerError, err
 	}
@@ -570,7 +581,9 @@ func (s *Server) deleteNode(ctx context.Context, p *Principal, tenantID, nodeID 
 	if n.Kind == store.NodeFile && n.WrappedCEK != nil {
 		if mek, merr := s.tenantMEK(ctx, tenantID); merr == nil {
 			if dek, derr := crypto.DeriveDEK(mek, tenantID); derr == nil {
-				_ = manifest.Delete(ctx, s.Backend, dek, tenantID, n.ID, n.WrappedCEK)
+				if bk, berr := s.backendFor(ctx, tenantID); berr == nil {
+					_ = manifest.Delete(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
+				}
 			}
 		}
 	}
@@ -721,9 +734,14 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, p *Princip
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	bk, err := s.backendFor(r.Context(), tenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="drive-export.zip"`)
-	if _, err := export.WriteZip(r.Context(), s.Store, s.Backend, dek, tenantID, req.Mode, w); err != nil {
+	if _, err := export.WriteZip(r.Context(), s.Store, bk, dek, tenantID, req.Mode, w); err != nil {
 		// Headers already sent — best effort.
 		return
 	}

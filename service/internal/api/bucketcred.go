@@ -28,6 +28,9 @@ type SealedBucketCred struct {
 	// ContentType labels the credential for the object backend
 	// (e.g. "gcs-sa-json", "s3-keypair", "ovh-token").
 	ContentType string `json:"content_type"`
+	// Bucket is the target bucket name (plaintext metadata, not secret);
+	// the sealed plaintext holds only the credential material.
+	Bucket string `json:"bucket"`
 }
 
 // bucketCredential unwraps the tenant's sealed bucket credential
