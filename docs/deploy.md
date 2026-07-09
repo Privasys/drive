@@ -52,7 +52,7 @@ of the attested configuration.
 | Field | Values | Meaning |
 |---|---|---|
 | `mode` | `sovereign` | Only tenants can unlock their data; the operator holds no key and no unlock path. The Privasys public instance runs this. |
-| | `escrowed` | Tenant keys carry an escrow wrap under the org master key (`MEK_org`); recovery is policy-gated and audited. Requires the org key ceremony, which has not shipped yet; rejected by this build. |
+| | `escrowed` | Tenant keys carry an escrow wrap under the org master key (`MEK_org`); every escrow is disclosed to the tenant via the audit log. Escrowed setup needs `org_mek_ref` (the `MEK_org` vault reference, a RawShare the org created) + `recovery` (`{issuer, quorum, approvers?, disclose}`), sent via the API/CLI (not the portal form). Escrow-wrap and disclosure are active; the audited `recover_tenant` enforcement gate ships next (`POST /v1/tenants/{id}/recover` returns 501 until then). |
 | `quota_default_bytes` | integer | Per-tenant storage ceiling in bytes, enforced on upload (0 = unlimited). `GET /v1/tenants/{id}/quota` reports usage. |
 
 Configure via the portal Configure tab, or over RA-TLS:

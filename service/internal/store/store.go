@@ -214,12 +214,34 @@ func (s *Store) migrate(ctx context.Context) error {
 	for _, col := range []string{
 		`ALTER TABLE tenants ADD COLUMN mek_ref TEXT`,
 		`ALTER TABLE tenants ADD COLUMN bucket_cred TEXT`,
+		`ALTER TABLE tenants ADD COLUMN escrow_wrap TEXT`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, col); err != nil {
 			msg := strings.ToLower(err.Error())
 			if !strings.Contains(msg, "duplicate") && !strings.Contains(msg, "exists") {
 				return fmt.Errorf("migrate: %q: %w", col, err)
 			}
+		}
+	}
+	// Audit log: append-only security events (escrow-wrap, recovery),
+	// disclosed to the affected tenant. Separate from the change feed.
+	auditSeq := "INTEGER PRIMARY KEY"
+	if s.Dialect == DialectPostgres {
+		auditSeq = "BIGSERIAL PRIMARY KEY"
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS audit (
+			seq ` + auditSeq + `,
+			tenant_id TEXT NOT NULL,
+			event TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			detail TEXT NOT NULL DEFAULT '',
+			at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS audit_tenant ON audit(tenant_id, seq)`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migrate audit: %w", err)
 		}
 	}
 	return nil

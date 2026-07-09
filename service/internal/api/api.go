@@ -170,6 +170,8 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("DELETE /v1/tenants/{tenantID}/grants/{grantID}", s.auth(s.handleRevokeGrant))
 	mux.Handle("GET /v1/tenants/{tenantID}/changes", s.auth(s.handleChanges))
 	mux.Handle("GET /v1/tenants/{tenantID}/quota", s.auth(s.handleQuota))
+	mux.Handle("GET /v1/tenants/{tenantID}/audit", s.auth(s.handleAudit))
+	mux.Handle("POST /v1/tenants/{tenantID}/recover", s.auth(s.handleRecoverTenant))
 	mux.Handle("POST /v1/tenants/{tenantID}/exports", s.auth(s.handleExport))
 
 	mux.Handle("PUT /v1/tenants/{tenantID}/bucket-cred", s.auth(s.handleSetBucketCred))

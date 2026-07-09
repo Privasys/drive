@@ -412,6 +412,77 @@ func (s *Store) TenantUsageBytes(ctx context.Context, tenantID string) (int64, e
 	return total, nil
 }
 
+// SetTenantEscrowWrap persists the escrow wrap of a tenant's MEK under
+// MEK_org (base64), used only in escrowed mode.
+func (s *Store) SetTenantEscrowWrap(ctx context.Context, tenantID, wrap string) error {
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE tenants SET escrow_wrap = ? WHERE id = ?`), wrap, tenantID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// TenantEscrowWrap returns the tenant's escrow wrap (base64), or "".
+func (s *Store) TenantEscrowWrap(ctx context.Context, tenantID string) (string, error) {
+	row := s.DB.QueryRowContext(ctx, s.q(
+		`SELECT COALESCE(escrow_wrap, '') FROM tenants WHERE id = ?`), tenantID)
+	var w string
+	if err := row.Scan(&w); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return w, nil
+}
+
+// AuditRow is one append-only security event for a tenant.
+type AuditRow struct {
+	Seq      int64
+	TenantID string
+	Event    string
+	Actor    string
+	Detail   string
+	At       time.Time
+}
+
+// AppendAudit records a security event (escrow-wrap, recovery) for a
+// tenant. Append-only; disclosed to the tenant.
+func (s *Store) AppendAudit(ctx context.Context, tenantID, event, actor, detail string) error {
+	_, err := s.DB.ExecContext(ctx, s.q(
+		`INSERT INTO audit(tenant_id, event, actor, detail) VALUES (?, ?, ?, ?)`),
+		tenantID, event, actor, detail)
+	return err
+}
+
+// ListAudit returns a tenant's audit events after sinceSeq (0 = all).
+func (s *Store) ListAudit(ctx context.Context, tenantID string, sinceSeq int64, limit int) ([]AuditRow, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.DB.QueryContext(ctx, s.q(
+		`SELECT seq, tenant_id, event, actor, detail, at FROM audit
+		 WHERE tenant_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`),
+		tenantID, sinceSeq, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditRow
+	for rows.Next() {
+		var a AuditRow
+		if err := rows.Scan(&a.Seq, &a.TenantID, &a.Event, &a.Actor, &a.Detail, &a.At); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // SetNodeACL sets (or clears, when roles is nil) a folder's ACL
 // override: the set of enterprise roles permitted at and below it,
 // narrowing the inherited tenant ACL (SharePoint-style). Only folders

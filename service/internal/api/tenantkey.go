@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/crypto"
 	"github.com/Privasys/drive/service/internal/store"
 	"github.com/Privasys/drive/service/internal/vaultmek"
@@ -185,6 +186,17 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	// Escrowed mode: every tenant MEK carries an escrow wrap under
+	// MEK_org so the audited recover_tenant path can reach it. Fail the
+	// provision if the wrap cannot be produced — an un-escrowed tenant
+	// would violate the escrowed contract.
+	if cfg := s.CurrentConfig(); cfg != nil && cfg.Mode == config.ModeEscrowed {
+		if err := s.escrowWrapTenant(r.Context(), t.ID, newMek, p.Sub); err != nil {
+			httpError(w, http.StatusBadGateway, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"status": "provisioned", "handle": ref.Handle, "rewrapped_nodes": rewrapped,

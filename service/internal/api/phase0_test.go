@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -608,6 +609,59 @@ func TestBackendSelection(t *testing.T) {
 	if _, err := srv.backendFor(ctx, tOwner.ID); err == nil ||
 		!strings.Contains(err.Error(), "unsupported bucket credential") {
 		t.Fatalf("unknown content type: %v (want unsupported)", err)
+	}
+}
+
+func TestEscrowedProvisionWrapsAndDiscloses(t *testing.T) {
+	holder := struct{ s *Server }{}
+	ts := newFullServer(t, func(s *Server) {
+		s.MEKs = &fakeMEKs{mek: make([]byte, 32)} // stands in for tenant MEK + MEK_org
+		holder.s = s
+	})
+
+	// Configure escrowed mode with a MEK_org ref + recovery policy.
+	orgRef := `{"handle":"apps.privasys.org/x/org/mek/v1","endpoints":["v:1"],"threshold":1}`
+	cfgBody := `{"mode":"escrowed","org_mek_ref":` + strconv.Quote(orgRef) +
+		`,"recovery":{"issuer":"https://acme.example","quorum":2,"approvers":["a","b","c"]}}`
+	resp, body := doJSON(t, "POST", ts.URL+"/configure", devAuth, cfgBody)
+	if resp.StatusCode != 200 {
+		t.Fatalf("configure escrowed: %d %s", resp.StatusCode, body)
+	}
+
+	_, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+
+	// Provisioning a tenant MEK in escrowed mode escrow-wraps it.
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth,
+		`{"grant":"g","handle":"h","constellation":{"endpoints":["v:1"],"mrenclave":"00","attestation_server":"as","threshold":1}}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("provision: %d %s", resp.StatusCode, body)
+	}
+	if w, err := holder.s.Store.TenantEscrowWrap(context.Background(), tenant.ID); err != nil || w == "" {
+		t.Fatalf("escrow wrap not stored: %q %v", w, err)
+	}
+
+	// The escrow is disclosed to the tenant via the audit log.
+	resp, body = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/audit", devAuth, "")
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "escrow_wrapped") {
+		t.Fatalf("audit disclosure: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestEscrowedConfigValidation(t *testing.T) {
+	ts := newFullServer(t, func(s *Server) { s.MEKs = &fakeMEKs{mek: make([]byte, 32)} })
+	// escrowed without org_mek_ref / recovery is rejected.
+	for _, c := range []string{
+		`{"mode":"escrowed"}`,
+		`{"mode":"escrowed","org_mek_ref":"{}"}`,
+		`{"mode":"escrowed","org_mek_ref":"{}","recovery":{"quorum":0}}`,
+		`{"mode":"escrowed","org_mek_ref":"{}","recovery":{"quorum":3,"approvers":["a"]}}`,
+	} {
+		resp, _ := doJSON(t, "POST", ts.URL+"/configure", devAuth, c)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for %s, got %d", c, resp.StatusCode)
+		}
 	}
 }
 

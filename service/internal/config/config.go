@@ -26,20 +26,64 @@ const (
 	ModeEscrowed Mode = "escrowed"
 )
 
+// RecoveryPolicy governs escrowed-mode recovery (recover_tenant). It is
+// part of the attested configuration, so an escrowed instance's users
+// can read exactly which policy governs unlocking their data.
+type RecoveryPolicy struct {
+	// Issuer is the OIDC issuer that authenticates approvers. Enterprises
+	// use their own IdP, so this is not necessarily privasys.id.
+	Issuer string `json:"issuer"`
+	// Quorum is k: how many distinct approvals a recovery needs.
+	Quorum int `json:"quorum"`
+	// Approvers are the permitted approver subjects. Empty means the
+	// approver *role* (<issuer>:app:<app-id>:approver) is used instead,
+	// resolved by the recovery gate.
+	Approvers []string `json:"approvers,omitempty"`
+	// Disclose records that every recovery is disclosed to the affected
+	// user. Forced true — it is the contract of escrowed mode.
+	Disclose bool `json:"disclose"`
+}
+
 // Config is the persisted instance configuration.
 type Config struct {
 	Mode              Mode  `json:"mode"`
 	QuotaDefaultBytes int64 `json:"quota_default_bytes,omitempty"`
+
+	// Escrowed-mode fields. OrgMEKRef is the vault reference (a
+	// vaultmek.Ref JSON) for MEK_org — the org's BYOK master key, a
+	// RawShare the attested build reconstructs in-enclave to escrow-wrap
+	// tenant MEKs. Recovery is the policy governing recover_tenant.
+	OrgMEKRef string          `json:"org_mek_ref,omitempty"`
+	Recovery  *RecoveryPolicy `json:"recovery,omitempty"`
 }
 
-// Validate rejects malformed or not-yet-supported configurations.
+// DefaultIssuer is used when a recovery policy omits its issuer.
+const DefaultIssuer = "https://privasys.id"
+
+// Validate rejects malformed configurations.
 func (c *Config) Validate() error {
 	switch c.Mode {
 	case ModeSovereign:
 		return nil
 	case ModeEscrowed:
-		// Escrowed needs the MEK_org ceremony + recovery policy (Phase 3).
-		return errors.New("escrowed mode requires the org master-key setup, which this build does not ship yet")
+		if c.OrgMEKRef == "" {
+			return errors.New("escrowed mode requires org_mek_ref (the MEK_org vault reference)")
+		}
+		if c.Recovery == nil {
+			return errors.New("escrowed mode requires a recovery policy")
+		}
+		if c.Recovery.Quorum < 1 {
+			return errors.New("recovery.quorum must be at least 1")
+		}
+		if len(c.Recovery.Approvers) > 0 && len(c.Recovery.Approvers) < c.Recovery.Quorum {
+			return fmt.Errorf("recovery lists %d approvers but needs a quorum of %d",
+				len(c.Recovery.Approvers), c.Recovery.Quorum)
+		}
+		if c.Recovery.Issuer == "" {
+			c.Recovery.Issuer = DefaultIssuer
+		}
+		c.Recovery.Disclose = true // the escrowed contract: recovery is always disclosed
+		return nil
 	case "":
 		return errors.New("mode required (sovereign|escrowed)")
 	default:

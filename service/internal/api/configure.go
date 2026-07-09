@@ -63,6 +63,10 @@ func (s *Server) handleStatusTool(w http.ResponseWriter, r *http.Request, _ *Pri
 type configureRequest struct {
 	Mode              config.Mode `json:"mode"`
 	QuotaDefaultBytes int64       `json:"quota_default_bytes"`
+	// Escrowed-mode setup (sent via the API/CLI, not the portal form):
+	// the MEK_org vault reference and the recovery policy.
+	OrgMEKRef string                 `json:"org_mek_ref"`
+	Recovery  *config.RecoveryPolicy `json:"recovery"`
 }
 
 // handleConfigure is the role:config manifest tool. The enclave-os
@@ -80,7 +84,10 @@ func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request, p *Prin
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	cfg := &config.Config{Mode: req.Mode, QuotaDefaultBytes: req.QuotaDefaultBytes}
+	cfg := &config.Config{
+		Mode: req.Mode, QuotaDefaultBytes: req.QuotaDefaultBytes,
+		OrgMEKRef: req.OrgMEKRef, Recovery: req.Recovery,
+	}
 	if err := cfg.Validate(); err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
