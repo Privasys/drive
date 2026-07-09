@@ -237,6 +237,93 @@
                 },
                 "required": ["tenant_id"]
             }
+        },
+        {
+            "name": "my_drive",
+            "title": "My drive",
+            "endpoint": "/tools/my_drive",
+            "description": "Get or create the caller's personal drive (User tenant). Idempotent: the first call creates it, later calls return the same tenant. Returns the tenant_id the other tools take.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "set_bucket_cred",
+            "title": "Set BYO bucket credential",
+            "endpoint": "/tools/set_bucket_cred",
+            "description": "Store (or rotate) the tenant's bring-your-own cloud bucket credential, sealed under a vault wrapped-secret key whose policy grants this app's enclave Unwrap only. The plaintext credential never appears here: the body carries the vault-sealed ciphertext plus the operator key reference. Once set, the tenant's chunks are stored in their own bucket (still opaque AEAD ciphertext). Owner/admin of the tenant only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant the credential belongs to."
+                    },
+                    "key_ref": {
+                        "type": "object",
+                        "description": "The wrapped-secret operator key reference: {handle, endpoints, mrenclave, attestation_server, attestation_token, threshold} as printed by 'privasys vault key create --kind wrapped-secret'.",
+                        "properties": {
+                            "handle": { "type": "string" },
+                            "endpoints": { "type": "array", "items": { "type": "string" } },
+                            "mrenclave": { "type": "string" },
+                            "attestation_server": { "type": "string" },
+                            "attestation_token": { "type": "string" },
+                            "threshold": { "type": "integer" }
+                        },
+                        "required": ["handle", "endpoints"]
+                    },
+                    "ciphertext_b64": {
+                        "type": "string",
+                        "description": "The sealed credential ciphertext (raw-url base64, no padding)."
+                    },
+                    "iv_b64": {
+                        "type": "string",
+                        "description": "The AES-GCM IV from the vault Wrap (raw-url base64, no padding)."
+                    },
+                    "content_type": {
+                        "type": "string",
+                        "description": "Credential kind: gcs-sa-json | s3-keypair | ovh-s3."
+                    },
+                    "bucket": {
+                        "type": "string",
+                        "description": "Target bucket name (plaintext metadata; the sealed blob holds only the credential material)."
+                    }
+                },
+                "required": ["tenant_id", "key_ref", "ciphertext_b64", "iv_b64", "content_type", "bucket"]
+            }
+        },
+        {
+            "name": "get_bucket_cred",
+            "title": "Get BYO bucket credential status",
+            "endpoint": "/tools/get_bucket_cred",
+            "description": "Report whether the tenant has a BYO bucket credential configured, plus its non-secret metadata (content type, bucket, key handle). Never returns the ciphertext or plaintext.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant to inspect."
+                    }
+                },
+                "required": ["tenant_id"]
+            }
+        },
+        {
+            "name": "delete_bucket_cred",
+            "title": "Remove BYO bucket credential",
+            "endpoint": "/tools/delete_bucket_cred",
+            "description": "Clear the tenant's BYO bucket credential; new chunks fall back to the platform-managed bucket. Owner/admin of the tenant only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant whose credential to remove."
+                    }
+                },
+                "required": ["tenant_id"]
+            }
         }
     ]
 }

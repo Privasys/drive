@@ -27,7 +27,79 @@ func (s *Server) Tools() http.Handler {
 	mux.Handle("POST /tools/read_file", s.auth(s.toolReadFile))
 	mux.Handle("POST /tools/delete_node", s.auth(s.toolDeleteNode))
 	mux.Handle("POST /tools/changes", s.auth(s.toolChanges))
+	mux.Handle("POST /tools/my_drive", s.auth(s.toolMyDrive))
+	mux.Handle("POST /tools/set_bucket_cred", s.auth(s.toolSetBucketCred))
+	mux.Handle("POST /tools/get_bucket_cred", s.auth(s.toolGetBucketCred))
+	mux.Handle("POST /tools/delete_bucket_cred", s.auth(s.toolDeleteBucketCred))
 	return mux
+}
+
+// toolMyDrive gets or creates the caller's personal tenant — the tool
+// form of POST /v1/me/tenant, so agents and the portal reach a drive
+// without the wallet's sealed-transport session.
+func (s *Server) toolMyDrive(w http.ResponseWriter, r *http.Request, p *Principal) {
+	t, created, status, err := s.ensurePersonalTenant(r.Context(), p)
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tenant_id": t.ID, "name": t.Name, "kind": t.Kind, "created": created,
+	})
+}
+
+// toolSetBucketCred stores or rotates a tenant's sealed BYO bucket
+// credential. The body carries only the vault-sealed ciphertext + the
+// operator key ref — never the plaintext credential.
+func (s *Server) toolSetBucketCred(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		TenantID string `json:"tenant_id"`
+		SealedBucketCred
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if status, err := s.setBucketCred(r.Context(), p, req.TenantID, req.SealedBucketCred); err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "stored", "content_type": req.ContentType})
+}
+
+// toolGetBucketCred reports whether a tenant has a BYO credential and
+// its non-secret metadata.
+func (s *Server) toolGetBucketCred(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		TenantID string `json:"tenant_id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	meta, status, err := s.bucketCredMeta(r.Context(), p, req.TenantID)
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, meta)
+}
+
+// toolDeleteBucketCred clears a tenant's BYO credential (falls back to
+// the platform-managed bucket).
+func (s *Server) toolDeleteBucketCred(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		TenantID string `json:"tenant_id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if status, err := s.clearBucketCred(r.Context(), p, req.TenantID); err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "cleared"})
 }
 
 func (s *Server) toolListRoot(w http.ResponseWriter, r *http.Request, p *Principal) {

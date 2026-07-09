@@ -70,33 +70,76 @@ func (s *Server) bucketCredential(ctx context.Context, tenantID string) ([]byte,
 
 var errBucketCredUnset = errors.New("tenant has no BYO bucket credential")
 
+// setBucketCred validates and stores (or swaps, for rotation) a
+// tenant's sealed bucket credential. Owner/admin only. Shared by the
+// REST handler and the manifest tool.
+func (s *Server) setBucketCred(ctx context.Context, p *Principal, tenantID string, c SealedBucketCred) (int, error) {
+	if !p.IsUser() || !s.canAdmin(ctx, tenantID, p.Sub) {
+		return http.StatusForbidden, errors.New("owner/admin only")
+	}
+	if c.CiphertextB64 == "" || c.IvB64 == "" || c.KeyRef.Handle == "" || len(c.KeyRef.Endpoints) == 0 {
+		return http.StatusBadRequest,
+			errors.New("ciphertext_b64, iv_b64, key_ref.handle and key_ref.endpoints are required")
+	}
+	blob, err := json.Marshal(c)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	if err := s.Store.SetTenantBucketCred(ctx, tenantID, string(blob)); err != nil {
+		return http.StatusInternalServerError, err
+	}
+	return http.StatusOK, nil
+}
+
+// bucketCredMeta reports whether a BYO credential is set plus its
+// non-secret metadata (never the ciphertext or plaintext). Any tenant
+// reader may ask. Shared by the REST handler and the manifest tool.
+func (s *Server) bucketCredMeta(ctx context.Context, p *Principal, tenantID string) (map[string]any, int, error) {
+	if !p.IsUser() || !s.canRead(ctx, tenantID, p.Sub) {
+		return nil, http.StatusForbidden, errors.New("forbidden")
+	}
+	raw, err := s.Store.TenantBucketCred(ctx, tenantID)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	if raw == "" {
+		return map[string]any{"configured": false}, http.StatusOK, nil
+	}
+	var c SealedBucketCred
+	_ = json.Unmarshal([]byte(raw), &c)
+	return map[string]any{
+		"configured":   true,
+		"content_type": c.ContentType,
+		"bucket":       c.Bucket,
+		"key_handle":   c.KeyRef.Handle,
+	}, http.StatusOK, nil
+}
+
+// clearBucketCred removes the BYO credential (falls back to the
+// platform-managed bucket). Owner/admin only.
+func (s *Server) clearBucketCred(ctx context.Context, p *Principal, tenantID string) (int, error) {
+	if !p.IsUser() || !s.canAdmin(ctx, tenantID, p.Sub) {
+		return http.StatusForbidden, errors.New("owner/admin only")
+	}
+	if err := s.Store.SetTenantBucketCred(ctx, tenantID, ""); err != nil {
+		return http.StatusInternalServerError, err
+	}
+	return http.StatusOK, nil
+}
+
 // handleSetBucketCred stores or swaps (rotation) the tenant's sealed
 // bucket credential. Owner-only. The body is a SealedBucketCred; the
 // plaintext credential is never sent here — only the vault-sealed
 // ciphertext + the operator key ref.
 func (s *Server) handleSetBucketCred(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
-	if !p.IsUser() || !s.canAdmin(r.Context(), tenantID, p.Sub) {
-		httpError(w, http.StatusForbidden, errors.New("owner/admin only"))
-		return
-	}
 	var c SealedBucketCred
 	if err := readJSON(r, &c); err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	if c.CiphertextB64 == "" || c.IvB64 == "" || c.KeyRef.Handle == "" || len(c.KeyRef.Endpoints) == 0 {
-		httpError(w, http.StatusBadRequest,
-			errors.New("ciphertext_b64, iv_b64, key_ref.handle and key_ref.endpoints are required"))
-		return
-	}
-	blob, err := json.Marshal(c)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if err := s.Store.SetTenantBucketCred(r.Context(), tenantID, string(blob)); err != nil {
-		writeStoreError(w, err)
+	if status, err := s.setBucketCred(r.Context(), p, tenantID, c); err != nil {
+		httpError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "stored", "content_type": c.ContentType})
@@ -105,39 +148,19 @@ func (s *Server) handleSetBucketCred(w http.ResponseWriter, r *http.Request, p *
 // handleGetBucketCred reports whether a BYO credential is set and its
 // metadata (never the ciphertext or plaintext).
 func (s *Server) handleGetBucketCred(w http.ResponseWriter, r *http.Request, p *Principal) {
-	tenantID := r.PathValue("tenantID")
-	if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) {
-		httpError(w, http.StatusForbidden, errors.New("forbidden"))
-		return
-	}
-	raw, err := s.Store.TenantBucketCred(r.Context(), tenantID)
+	meta, status, err := s.bucketCredMeta(r.Context(), p, r.PathValue("tenantID"))
 	if err != nil {
-		writeStoreError(w, err)
+		httpError(w, status, err)
 		return
 	}
-	if raw == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"configured": false})
-		return
-	}
-	var c SealedBucketCred
-	_ = json.Unmarshal([]byte(raw), &c)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"configured":   true,
-		"content_type": c.ContentType,
-		"key_handle":   c.KeyRef.Handle,
-	})
+	writeJSON(w, http.StatusOK, meta)
 }
 
 // handleDeleteBucketCred clears the BYO credential (falls back to the
 // platform-managed bucket).
 func (s *Server) handleDeleteBucketCred(w http.ResponseWriter, r *http.Request, p *Principal) {
-	tenantID := r.PathValue("tenantID")
-	if !p.IsUser() || !s.canAdmin(r.Context(), tenantID, p.Sub) {
-		httpError(w, http.StatusForbidden, errors.New("owner/admin only"))
-		return
-	}
-	if err := s.Store.SetTenantBucketCred(r.Context(), tenantID, ""); err != nil {
-		writeStoreError(w, err)
+	if status, err := s.clearBucketCred(r.Context(), p, r.PathValue("tenantID")); err != nil {
+		httpError(w, status, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

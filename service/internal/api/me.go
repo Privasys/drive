@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sync"
@@ -45,32 +46,40 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, p *Principal) 
 	})
 }
 
-// handleEnsurePersonalTenant gets or creates the caller's personal
-// (User-kind) tenant. Idempotent: the first call after login creates
-// it (201), every later call returns the same tenant (200).
-func (s *Server) handleEnsurePersonalTenant(w http.ResponseWriter, r *http.Request, p *Principal) {
+// ensurePersonalTenant gets or creates the caller's personal
+// (User-kind) tenant. Idempotent. Shared by the REST handler and the
+// my_drive manifest tool.
+func (s *Server) ensurePersonalTenant(ctx context.Context, p *Principal) (t *store.Tenant, created bool, status int, err error) {
 	if !p.IsUser() {
-		httpError(w, http.StatusForbidden, errors.New("user principals only"))
-		return
+		return nil, false, http.StatusForbidden, errors.New("user principals only")
 	}
 	personalMu.Lock()
 	defer personalMu.Unlock()
 
-	if t, err := s.Store.PersonalTenantOf(r.Context(), p.Sub); err == nil {
-		writeJSON(w, http.StatusOK, t)
-		return
+	if t, err := s.Store.PersonalTenantOf(ctx, p.Sub); err == nil {
+		return t, false, http.StatusOK, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
-		writeStoreError(w, err)
-		return
+		return nil, false, http.StatusInternalServerError, err
 	}
 	name := p.ID.Email
 	if name == "" {
 		name = p.Sub
 	}
-	t := &store.Tenant{Kind: store.TenantUser, Name: name}
-	if err := s.Store.CreateTenant(r.Context(), t, p.Sub); err != nil {
-		writeStoreError(w, err)
+	t = &store.Tenant{Kind: store.TenantUser, Name: name}
+	if err := s.Store.CreateTenant(ctx, t, p.Sub); err != nil {
+		return nil, false, http.StatusInternalServerError, err
+	}
+	return t, true, http.StatusCreated, nil
+}
+
+// handleEnsurePersonalTenant gets or creates the caller's personal
+// (User-kind) tenant. Idempotent: the first call after login creates
+// it (201), every later call returns the same tenant (200).
+func (s *Server) handleEnsurePersonalTenant(w http.ResponseWriter, r *http.Request, p *Principal) {
+	t, _, status, err := s.ensurePersonalTenant(r.Context(), p)
+	if err != nil {
+		httpError(w, status, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, t)
+	writeJSON(w, status, t)
 }
