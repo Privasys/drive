@@ -137,6 +137,14 @@ func (s *Store) q(query string) string {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
+	// The DDL is shared; only the byte type and the change-feed
+	// sequence differ per engine.
+	blob := "BLOB"
+	seq := "INTEGER PRIMARY KEY" // SQLite rowid autoincrement
+	if s.Dialect == DialectPostgres {
+		blob = "BYTEA"
+		seq = "BIGSERIAL PRIMARY KEY"
+	}
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS tenants (
 			id TEXT PRIMARY KEY,
@@ -156,18 +164,18 @@ func (s *Store) migrate(ctx context.Context) error {
 			parent_id TEXT,
 			kind TEXT NOT NULL,
 			name TEXT NOT NULL,
-			name_hmac BLOB NOT NULL,
+			name_hmac ` + blob + ` NOT NULL,
 			mime_hint TEXT NOT NULL DEFAULT '',
 			plain_size BIGINT NOT NULL DEFAULT 0,
-			wrapped_cek BLOB,
+			wrapped_cek ` + blob + `,
 			manifest_ref TEXT,
-			merkle_root BLOB,
-			acl_override BLOB,
+			merkle_root ` + blob + `,
+			acl_override ` + blob + `,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS nodes_unique_name
-			ON nodes(tenant_id, COALESCE(parent_id,''), name_hmac)`,
+			ON nodes(tenant_id, (COALESCE(parent_id,'')), name_hmac)`,
 		`CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(tenant_id, parent_id)`,
 		`CREATE TABLE IF NOT EXISTS grants (
 			id TEXT PRIMARY KEY,
@@ -185,7 +193,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS grants_lookup ON grants(tenant_id, node_id)`,
 		`CREATE INDEX IF NOT EXISTS grants_subject ON grants(tenant_id, subject)`,
 		`CREATE TABLE IF NOT EXISTS changes (
-			seq INTEGER PRIMARY KEY,
+			seq ` + seq + `,
 			tenant_id TEXT NOT NULL,
 			node_id TEXT NOT NULL,
 			op TEXT NOT NULL,
@@ -200,11 +208,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	// Additive columns on existing deployments (CREATE IF NOT EXISTS
-	// leaves them untouched); a duplicate-column error means it is
-	// already there.
-	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE tenants ADD COLUMN mek_ref TEXT`); err != nil &&
-		!strings.Contains(strings.ToLower(err.Error()), "duplicate") {
-		return fmt.Errorf("migrate: add tenants.mek_ref: %w", err)
+	// leaves them untouched); an already-exists error means the column
+	// is there (SQLite says "duplicate column", Postgres "already
+	// exists" — PG's ADD COLUMN IF NOT EXISTS is not in SQLite).
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE tenants ADD COLUMN mek_ref TEXT`); err != nil {
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "duplicate") && !strings.Contains(msg, "exists") {
+			return fmt.Errorf("migrate: add tenants.mek_ref: %w", err)
+		}
 	}
 	return nil
 }

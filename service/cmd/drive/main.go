@@ -27,9 +27,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
 	"github.com/Privasys/drive/service/internal/api"
@@ -114,13 +116,18 @@ func serve(args []string) error {
 
 	dataSource := *dsn
 	if dataSource == "" {
-		if *dev {
-			dataSource = ":memory:"
-		} else {
-			dataSource = filepath.Join(*state, "drive.db")
-		}
+		dataSource = os.Getenv("DRIVE_DB_DSN")
 	}
-	db, err := sql.Open("sqlite", dataSource)
+	driver, dialect := "sqlite", store.DialectSQLite
+	switch {
+	case strings.HasPrefix(dataSource, "postgres://") || strings.HasPrefix(dataSource, "postgresql://"):
+		driver, dialect = "pgx", store.DialectPostgres
+	case dataSource == "" && *dev:
+		dataSource = ":memory:"
+	case dataSource == "":
+		dataSource = filepath.Join(*state, "drive.db")
+	}
+	db, err := sql.Open(driver, dataSource)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
@@ -129,7 +136,7 @@ func serve(args []string) error {
 		return fmt.Errorf("ping db: %w", err)
 	}
 
-	st, err := store.New(db, store.DialectSQLite)
+	st, err := store.New(db, dialect)
 	if err != nil {
 		return err
 	}
@@ -141,7 +148,7 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	gr := grants.New(db, false)
+	gr := grants.New(db, dialect == store.DialectPostgres)
 
 	mek, err := loadMEK(*mekHex, *state, *dev)
 	if err != nil {

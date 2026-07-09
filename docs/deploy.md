@@ -30,7 +30,7 @@ The service follows the app-capabilities contract:
 
 - Listens on the manager-injected `$PORT` (never 8080, which is reserved).
 - `container_storage: true` gives it the sealed per-app `/data` LUKS
-  volume; the index DB (`/data/drive.db`), object store
+  volume; the index (embedded PostgreSQL at `/data/pgdata`), object store
   (`/data/objects/`) and instance config (`/data/config.json`) live
   there. The volume's DEK is vault-backed and measurement-gated; an
   enclave-os or image upgrade requires the app owner to stage + promote
@@ -70,7 +70,8 @@ role re-check would wrongly reject them).
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | (platform-injected) | Listen port. Local default `127.0.0.1:8443`. |
-| `DRIVE_STATE_DIR` | `/data` on platform, `data-dev` locally | Index DB + objects + config. |
+| `DRIVE_STATE_DIR` | `/data` on platform, `data-dev` locally | Objects + instance config (+ the SQLite file for local runs). |
+| `DRIVE_DB_DSN` | set by the image entrypoint to the embedded PostgreSQL (`/data/pgdata`, loopback only) | Index DSN; a `postgres://` value selects the Postgres dialect, anything else falls back to SQLite (local dev/tests). |
 | `OIDC_ISSUER` | `https://privasys.id` | JWKS verifier issuer (offline, in-enclave). |
 | `OIDC_AUDIENCE` | (unset) | Optional required `aud`. |
 | `OIDC_REVOKED_URL` | `<issuer>/sessions/revoked` | Revoked-session feed; `off` disables. |

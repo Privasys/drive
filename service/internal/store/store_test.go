@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
 	"testing"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
@@ -22,8 +24,36 @@ func newSQLiteStore(t *testing.T) *Store {
 	return s
 }
 
-func TestTenantAndMemberLifecycle(t *testing.T) {
-	s := newSQLiteStore(t)
+// forEachStore runs a test against SQLite and, when DRIVE_TEST_PG_DSN
+// is set (CI runs a postgres service), against Postgres with a fresh
+// schema per test.
+func forEachStore(t *testing.T, run func(t *testing.T, s *Store)) {
+	t.Helper()
+	t.Run("sqlite", func(t *testing.T) { run(t, newSQLiteStore(t)) })
+	dsn := os.Getenv("DRIVE_TEST_PG_DSN")
+	if dsn == "" {
+		return
+	}
+	t.Run("postgres", func(t *testing.T) {
+		db, err := sql.Open("pgx", dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		if _, err := db.Exec(`DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
+			t.Fatal(err)
+		}
+		s, err := New(db, DialectPostgres)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run(t, s)
+	})
+}
+
+func TestTenantAndMemberLifecycle(t *testing.T) { forEachStore(t, testtenantAndMemberLifecycle) }
+
+func testtenantAndMemberLifecycle(t *testing.T, s *Store) {
 	ctx := context.Background()
 
 	tt := &Tenant{Kind: TenantEnterprise, Name: "Acme"}
@@ -74,8 +104,9 @@ func TestTenantAndMemberLifecycle(t *testing.T) {
 	}
 }
 
-func TestNodeUniqueWithinParent(t *testing.T) {
-	s := newSQLiteStore(t)
+func TestNodeUniqueWithinParent(t *testing.T) { forEachStore(t, testnodeUniqueWithinParent) }
+
+func testnodeUniqueWithinParent(t *testing.T, s *Store) {
 	ctx := context.Background()
 	tt := &Tenant{Kind: TenantUser, Name: "u"}
 	_ = s.CreateTenant(ctx, tt, "u")
@@ -91,8 +122,9 @@ func TestNodeUniqueWithinParent(t *testing.T) {
 	}
 }
 
-func TestListChildrenAndChanges(t *testing.T) {
-	s := newSQLiteStore(t)
+func TestListChildrenAndChanges(t *testing.T) { forEachStore(t, testlistChildrenAndChanges) }
+
+func testlistChildrenAndChanges(t *testing.T, s *Store) {
 	ctx := context.Background()
 	tt := &Tenant{Kind: TenantUser, Name: "u"}
 	_ = s.CreateTenant(ctx, tt, "actor-sub")
@@ -140,8 +172,9 @@ func TestListChildrenAndChanges(t *testing.T) {
 	}
 }
 
-func TestDeleteNodeRecursive(t *testing.T) {
-	s := newSQLiteStore(t)
+func TestDeleteNodeRecursive(t *testing.T) { forEachStore(t, testdeleteNodeRecursive) }
+
+func testdeleteNodeRecursive(t *testing.T, s *Store) {
 	ctx := context.Background()
 	tt := &Tenant{Kind: TenantUser, Name: "u"}
 	_ = s.CreateTenant(ctx, tt, "u")
@@ -164,8 +197,9 @@ func TestDeleteNodeRecursive(t *testing.T) {
 	}
 }
 
-func TestIsDescendantOrSelf(t *testing.T) {
-	s := newSQLiteStore(t)
+func TestIsDescendantOrSelf(t *testing.T) { forEachStore(t, testisDescendantOrSelf) }
+
+func testisDescendantOrSelf(t *testing.T, s *Store) {
 	ctx := context.Background()
 	tt := &Tenant{Kind: TenantUser, Name: "u"}
 	_ = s.CreateTenant(ctx, tt, "u")

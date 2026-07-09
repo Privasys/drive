@@ -62,8 +62,13 @@ RUN sed -i \
         -o /drive \
         ./cmd/drive
 
-FROM debian:bookworm-slim
+# PostgreSQL rides in the image with its data directory on the sealed
+# /data volume (the chat-service pattern): the index is encrypted at
+# rest under the owner's key and Postgres listens on loopback only.
+FROM postgres:16-bookworm
 
+# The postgres base ships no CA bundle; the service's outbound HTTPS
+# (OIDC discovery/JWKS, vault attestation) needs a trust store.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -73,9 +78,9 @@ COPY --from=builder /drive /usr/local/bin/drive
 # by CI (the platform reads capabilities from the label; the file serves
 # GET /privasys.json for runtime introspection).
 COPY privasys.json /privasys.json
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-EXPOSE 8443
-
-# No --addr: the platform injects $PORT (the serve default binds 0.0.0.0:$PORT).
-ENTRYPOINT ["drive"]
-CMD ["serve"]
+# No fixed port: the platform injects $PORT (host networking makes
+# EXPOSE a no-op; the serve default binds 0.0.0.0:$PORT).
+ENTRYPOINT ["/entrypoint.sh"]

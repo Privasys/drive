@@ -30,6 +30,19 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: drive_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -43,8 +56,11 @@ jobs:
           git -C ../../platform/enclave-vaults-client checkout "$ENCLAVE_VAULTS_CLIENT_REF"
       - run: go mod download
       # Stock Go: the ratls-tagged code is stubbed; the production image
-      # builds with the forked toolchain in Docker.
+      # builds with the forked toolchain in Docker. The store tests run
+      # against SQLite and the postgres service.
       - run: go test ./... -count=1 -race
+        env:
+          DRIVE_TEST_PG_DSN: postgres://postgres@127.0.0.1:5432/drive_test?sslmode=disable
 
   build:
     name: Build binary

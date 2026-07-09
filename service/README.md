@@ -6,8 +6,9 @@ Go binary that:
   capabilities in [privasys.json](privasys.json) (baked into the image's
   `org.privasys.manifest` OCI label), instance config on the sealed
   `/data` volume with configure-then-freeze self-recovery on restart.
-- Stores per-tenant trees in a SQL index (SQLite on the sealed volume;
-  the DDL stays Postgres-portable via the Dialect layer).
+- Stores per-tenant trees in embedded PostgreSQL with its data
+  directory on the sealed volume (loopback only; SQLite remains for
+  local dev and unit tests via the Dialect layer).
 - Stores AEAD-sealed, content-addressed chunks via a pluggable
   [object backend](internal/objectstore/objectstore.go) (local-disk
   today; GCS/OVH/S3 in Phase 3).
