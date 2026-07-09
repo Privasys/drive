@@ -4,9 +4,19 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
+	"github.com/Privasys/drive/service/internal/crypto"
+	"github.com/Privasys/drive/service/internal/store"
 	"github.com/Privasys/drive/service/internal/vaultmek"
 )
+
+// MEKProvider is the vault-side of per-tenant keys (vaultmek.Client in
+// production; faked in tests).
+type MEKProvider interface {
+	Provision(ctx context.Context, b vaultmek.Bundle) (vaultmek.Ref, error)
+	Load(ctx context.Context, ref vaultmek.Ref) ([]byte, error)
+}
 
 // tenantMEK resolves the master key protecting a tenant's content: the
 // tenant's own vault-held MEK when provisioned, else the instance MEK
@@ -90,7 +100,7 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 		httpError(w, http.StatusBadRequest, errors.New("grant, handle and constellation.endpoints are required"))
 		return
 	}
-	ref, err := s.MEKs.Provision(r.Context(), vaultmek.Bundle{
+	bundle := vaultmek.Bundle{
 		Grant:        req.Grant,
 		Handle:       req.Handle,
 		Endpoints:    req.Constellation.Endpoints,
@@ -98,14 +108,68 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 		AttServer:    req.Constellation.AttestationServer,
 		AttToken:     req.AttestationToken,
 		Threshold:    req.Constellation.Threshold,
-	})
+	}
+	ref, err := s.MEKs.Provision(r.Context(), bundle)
+	if err != nil {
+		// A crash after share creation but before the index commit
+		// leaves the key on the vaults with no local ref; recover it by
+		// reading the shares back instead of failing forever.
+		if !strings.Contains(strings.ToLower(err.Error()), "exist") {
+			httpError(w, http.StatusBadGateway, err)
+			return
+		}
+		ref = vaultmek.Ref{
+			Handle: bundle.Handle, Endpoints: bundle.Endpoints,
+			MrenclaveHex: bundle.MrenclaveHex, AttServer: bundle.AttServer,
+			AttToken: bundle.AttToken, Threshold: bundle.Threshold,
+		}
+	}
+	newMek, err := s.MEKs.Load(r.Context(), ref)
 	if err != nil {
 		httpError(w, http.StatusBadGateway, err)
 		return
 	}
-	if err := s.Store.SetTenantMekRef(r.Context(), t.ID, vaultmek.RefJSON(ref)); err != nil {
-		writeStoreError(w, err)
+
+	// Migrate existing content: content stays sealed under its per-file
+	// CEKs, so switching MEK is a metadata sweep (re-wrap each file's
+	// CEK, recompute every node's name HMAC), committed atomically with
+	// the tenant's mek_ref.
+	oldDEK, err := crypto.DeriveDEK(s.MEK, t.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"status": "provisioned", "handle": ref.Handle})
+	newDEK, err := crypto.DeriveDEK(newMek, t.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	newHMAC, err := crypto.DeriveNameHMACKey(newMek, t.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	rewrapped, err := s.Store.SwitchTenantKeys(r.Context(), t.ID, vaultmek.RefJSON(ref), func(n *store.Node) error {
+		n.NameHMAC = crypto.NameHMAC(newHMAC, n.Name)
+		if len(n.WrappedCEK) == 0 {
+			return nil // folders carry no CEK
+		}
+		cek, uerr := crypto.UnwrapKey(oldDEK, n.WrappedCEK)
+		if uerr != nil {
+			return uerr
+		}
+		wrapped, werr := crypto.WrapKey(newDEK, cek)
+		if werr != nil {
+			return werr
+		}
+		n.WrappedCEK = wrapped
+		return nil
+	})
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status": "provisioned", "handle": ref.Handle, "rewrapped_nodes": rewrapped,
+	})
 }

@@ -30,7 +30,6 @@ import (
 	"github.com/Privasys/drive/service/internal/oidc"
 	"github.com/Privasys/drive/service/internal/platform"
 	"github.com/Privasys/drive/service/internal/store"
-	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
 // appGrantAudience is the aud an AppGrant envelope must carry.
@@ -51,7 +50,7 @@ type Server struct {
 	// MEKs provisions and loads per-tenant vault-held MEKs. Nil
 	// disables vault-held tenant keys (tenants stay on the instance
 	// MEK).
-	MEKs *vaultmek.Client
+	MEKs MEKProvider
 
 	// Platform is the enclave-manager environment (empty off-platform).
 	Platform platform.Env

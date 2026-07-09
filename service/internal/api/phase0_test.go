@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/platform"
+	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
 // newFullServer mounts the complete Handler (health/status/configure +
@@ -201,6 +204,66 @@ func TestPersonalTenantAutoProvision(t *testing.T) {
 	_ = json.Unmarshal(body, &otherT)
 	if otherT.ID == first.ID {
 		t.Fatal("personal tenants must not be shared across subs")
+	}
+}
+
+// fakeMEKs is a deterministic in-memory MEKProvider for tests.
+type fakeMEKs struct{ mek []byte }
+
+func (f *fakeMEKs) Provision(_ context.Context, b vaultmek.Bundle) (vaultmek.Ref, error) {
+	return vaultmek.Ref{Handle: b.Handle, Endpoints: b.Endpoints, Threshold: b.Threshold}, nil
+}
+func (f *fakeMEKs) Load(context.Context, vaultmek.Ref) ([]byte, error) { return f.mek, nil }
+
+func TestTenantKeySwitchRewrapsContent(t *testing.T) {
+	mek := sha256.Sum256([]byte("vault-held-tenant-mek"))
+	ts := newFullServer(t, func(s *Server) { s.MEKs = &fakeMEKs{mek: mek[:]} })
+
+	// Personal tenant + a file sealed under the instance MEK.
+	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	content := base64.StdEncoding.EncodeToString([]byte("pre-switch content"))
+	resp, body := doJSON(t, "POST", ts.URL+"/tools/write_file", devAuth,
+		fmt.Sprintf(`{"tenant_id":"%s","name":"old.txt","content_base64":"%s"}`, tenant.ID, content))
+	if resp.StatusCode != 200 {
+		t.Fatalf("pre-switch write: %d %s", resp.StatusCode, body)
+	}
+	var oldFile struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(body, &oldFile)
+
+	// Switch the tenant to the vault MEK; existing content is re-wrapped.
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth,
+		`{"grant":"g","handle":"apps.privasys.org/x/data/y/mek/v1","constellation":{"endpoints":["v1:1","v2:2"],"mrenclave":"00","attestation_server":"as","threshold":2}}`)
+	if resp.StatusCode != http.StatusCreated || !strings.Contains(string(body), `"rewrapped_nodes":1`) {
+		t.Fatalf("switch: %d %s", resp.StatusCode, body)
+	}
+
+	// The pre-switch file reads back under the new key.
+	resp, body = doJSON(t, "POST", ts.URL+"/tools/read_file", devAuth,
+		fmt.Sprintf(`{"tenant_id":"%s","file_id":"%s"}`, tenant.ID, oldFile.ID))
+	if resp.StatusCode != 200 {
+		t.Fatalf("post-switch read: %d %s", resp.StatusCode, body)
+	}
+	var out struct {
+		ContentBase64 string `json:"content_base64"`
+	}
+	_ = json.Unmarshal(body, &out)
+	if got, _ := base64.StdEncoding.DecodeString(out.ContentBase64); string(got) != "pre-switch content" {
+		t.Fatalf("post-switch content mismatch: %q", got)
+	}
+
+	// New writes work, and a repeat call re-arms instead of re-provisioning.
+	resp, _ = doJSON(t, "POST", ts.URL+"/tools/write_file", devAuth,
+		fmt.Sprintf(`{"tenant_id":"%s","name":"new.txt","content_base64":"%s"}`, tenant.ID, content))
+	if resp.StatusCode != 200 {
+		t.Fatalf("post-switch write: %d", resp.StatusCode)
+	}
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{}`)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"loaded"`) {
+		t.Fatalf("re-arm: %d %s", resp.StatusCode, body)
 	}
 }
 

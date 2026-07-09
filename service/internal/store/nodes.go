@@ -81,6 +81,60 @@ func (s *Store) AddMember(ctx context.Context, m *Member) error {
 	return err
 }
 
+// SwitchTenantKeys atomically migrates a tenant to a new master key:
+// rewrap mutates each node in place (re-wrapped CEK for files, fresh
+// name HMAC for every node), and the tenant's mek_ref is committed in
+// the same transaction, so a crash leaves the tenant fully on the old
+// key or fully on the new one. Returns the number of nodes updated.
+func (s *Store) SwitchTenantKeys(ctx context.Context, tenantID, mekRef string, rewrap func(*Node) error) (int, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, s.q(
+		`SELECT id, tenant_id, parent_id, kind, name, name_hmac, mime_hint, plain_size,
+		        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at
+		 FROM nodes WHERE tenant_id = ?`), tenantID)
+	if err != nil {
+		return 0, err
+	}
+	var nodes []*Node
+	for rows.Next() {
+		n, serr := scanNode(rows)
+		if serr != nil {
+			rows.Close()
+			return 0, serr
+		}
+		nodes = append(nodes, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	for _, n := range nodes {
+		if err := rewrap(n); err != nil {
+			return 0, fmt.Errorf("rewrap node %s: %w", n.ID, err)
+		}
+		if _, err := tx.ExecContext(ctx, s.q(
+			`UPDATE nodes SET wrapped_cek = ?, name_hmac = ? WHERE tenant_id = ? AND id = ?`),
+			nullableBytes(n.WrappedCEK), n.NameHMAC, tenantID, n.ID); err != nil {
+			return 0, err
+		}
+	}
+	res, err := tx.ExecContext(ctx, s.q(
+		`UPDATE tenants SET mek_ref = ? WHERE id = ?`), mekRef, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return 0, ErrNotFound
+	}
+	return len(nodes), tx.Commit()
+}
+
 // SetTenantMekRef persists the tenant's vault MEK reference (JSON).
 func (s *Store) SetTenantMekRef(ctx context.Context, tenantID, ref string) error {
 	res, err := s.DB.ExecContext(ctx, s.q(
