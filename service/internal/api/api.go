@@ -66,16 +66,34 @@ type Server struct {
 	cfg   *config.Config
 }
 
-// Principal is an authenticated caller: a platform user (OIDC bearer)
-// or a third-party app presenting an AppGrant token.
+// authVia records how a principal authenticated.
+type authVia string
+
+const (
+	viaBearer   authVia = "bearer"   // platform OIDC at+jwt
+	viaAppGrant authVia = "appgrant" // Ed25519 AppGrant token
+	viaSealed   authVia = "sealed"   // session-relay sealed transport (X-Privasys-Sub)
+)
+
+// relaySubHeader is the relay-asserted subject. The enclave-os
+// session-relay middleware strips any inbound value and sets it only
+// from an authenticated sealed session, so a present value is
+// trustworthy for data-plane attribution (it carries no roles, which
+// is why it is never accepted for configure).
+const relaySubHeader = "X-Privasys-Sub"
+
+// Principal is an authenticated caller: a platform user (OIDC bearer or
+// sealed-transport session) or a third-party app presenting an
+// AppGrant token.
 type Principal struct {
 	Sub   string
+	Via   authVia
 	ID    *oidc.Identity   // non-nil for users
 	Grant *grants.Grant    // non-nil for app principals
 	Env   *grants.Envelope // non-nil for app principals
 }
 
-// IsUser reports whether p is an OIDC-authenticated user.
+// IsUser reports whether p is a user (OIDC bearer or sealed session).
 func (p *Principal) IsUser() bool { return p.ID != nil }
 
 // SetConfig installs (and persists) the instance configuration.
@@ -153,7 +171,12 @@ func (s *Server) Routes() http.Handler {
 }
 
 // auth authenticates the caller: `Bearer <oidc token>` for users,
-// `AppGrant <envelope>.<sig>` for third-party apps holding a grant.
+// `AppGrant <envelope>.<sig>` for third-party apps holding a grant, or
+// the relay-asserted `X-Privasys-Sub` for a session-relay sealed
+// session (browser / wallet). The sealed identity is trustworthy
+// because the enclave-os middleware in front of the app strips any
+// inbound value and sets it only from an authenticated session; it
+// carries no roles, so it is a data-plane identity (never configure).
 func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := r.Header.Get("Authorization")
@@ -168,7 +191,7 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 				http.Error(w, "credential revoked", http.StatusUnauthorized)
 				return
 			}
-			next(w, r, &Principal{Sub: id.Sub, ID: id})
+			next(w, r, &Principal{Sub: id.Sub, Via: viaBearer, ID: id})
 		case strings.HasPrefix(h, "AppGrant "):
 			p, err := s.verifyAppGrant(r.Context(), strings.TrimSpace(strings.TrimPrefix(h, "AppGrant ")))
 			if err != nil {
@@ -176,6 +199,9 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 				return
 			}
 			next(w, r, p)
+		case r.Header.Get(relaySubHeader) != "":
+			sub := r.Header.Get(relaySubHeader)
+			next(w, r, &Principal{Sub: sub, Via: viaSealed, ID: &oidc.Identity{Sub: sub, Issuer: "session-relay"}})
 		default:
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
 			return
@@ -223,7 +249,7 @@ func (s *Server) verifyAppGrant(ctx context.Context, tok string) (*Principal, er
 	if err != nil || !bytes.Equal(bound, presented) {
 		return nil, errors.New("signing key does not match the grant binding")
 	}
-	return &Principal{Sub: g.Subject, Grant: g, Env: env}, nil
+	return &Principal{Sub: g.Subject, Via: viaAppGrant, Grant: g, Env: env}, nil
 }
 
 // decodePubkey accepts raw-std or std base64 (wallets vary).

@@ -107,5 +107,11 @@ func (s *Server) configureAllowed(p *Principal) error {
 	if !p.IsUser() {
 		return errors.New("app grants cannot configure the instance")
 	}
+	// Sealed-transport identity carries no roles, so it can never be an
+	// owner/admin — reject it here as belt-and-braces (the enclave-os
+	// runtime already withholds X-Privasys-Sub from configure).
+	if p.Via == viaSealed {
+		return errors.New("sealed-transport sessions cannot configure the instance")
+	}
 	return nil
 }

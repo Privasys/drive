@@ -267,6 +267,66 @@ func TestTenantKeySwitchRewrapsContent(t *testing.T) {
 	}
 }
 
+func TestSealedTransportDataPlane(t *testing.T) {
+	ts := newFullServer(t, nil)
+	const sub = "wallet-user-9"
+	sealed := func(method, path, body string) (*http.Response, []byte) {
+		var r io.Reader
+		if body != "" {
+			r = strings.NewReader(body)
+		}
+		req, _ := http.NewRequest(method, ts.URL+path, r)
+		req.Header.Set("X-Privasys-Sub", sub)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, b
+	}
+
+	// A sealed session provisions its personal tenant and uses the data
+	// plane with no bearer, attributed to the relay-asserted sub.
+	resp, body := sealed("POST", "/v1/me/tenant", "")
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("sealed ensure tenant: %d %s", resp.StatusCode, body)
+	}
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+
+	content := base64.StdEncoding.EncodeToString([]byte("sealed content"))
+	resp, body = sealed("POST", "/tools/write_file",
+		fmt.Sprintf(`{"tenant_id":"%s","name":"s.txt","content_base64":"%s"}`, tenant.ID, content))
+	if resp.StatusCode != 200 {
+		t.Fatalf("sealed write: %d %s", resp.StatusCode, body)
+	}
+	resp, body = sealed("POST", "/tools/changes", fmt.Sprintf(`{"tenant_id":"%s"}`, tenant.ID))
+	if resp.StatusCode != 200 || !strings.Contains(string(body), sub) {
+		t.Fatalf("sealed changes (attribution): %d %s", resp.StatusCode, body)
+	}
+
+	// Another sealed sub cannot see the first tenant's drive.
+	req, _ := http.NewRequest("POST", ts.URL+"/tools/list_root",
+		strings.NewReader(fmt.Sprintf(`{"tenant_id":"%s"}`, tenant.ID)))
+	req.Header.Set("X-Privasys-Sub", "someone-else")
+	req.Header.Set("Content-Type", "application/json")
+	resp2, _ := http.DefaultClient.Do(req)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-sub sealed access: %d", resp2.StatusCode)
+	}
+
+	// Sealed transport is refused for configure (no roles).
+	resp, _ = sealed("POST", "/configure", `{"mode":"sovereign"}`)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("sealed configure must be forbidden: %d", resp.StatusCode)
+	}
+}
+
 func TestTenantKeyGuards(t *testing.T) {
 	ts := newFullServer(t, nil)
 

@@ -18,7 +18,12 @@ Go binary that:
 - Verifies `privasys.id` bearer tokens in-enclave (offline JWKS) with
   revoked-session polling. The configure-authz owner/admin role is
   enforced by the enclave-os runtime in front of the app; in-app,
-  configure requires an authenticated user and rejects app grants.
+  configure requires an authenticated bearer user and rejects app
+  grants and sealed sessions.
+- Accepts three data-plane identities: platform OIDC bearers, AppGrant
+  tokens, and session-relay sealed sessions (the relay-asserted
+  `X-Privasys-Sub`, how the wallet and browsers reach the enclave).
+  Sealed identity carries no roles, so it is data-plane only.
 - Mints + verifies Ed25519-signed AppGrant tokens that let third-party
   platform apps act on the tenant's behalf with a scoped, time-bounded,
   revocable grant, confined to the granted node's subtree.
