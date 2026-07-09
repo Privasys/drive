@@ -91,9 +91,23 @@ state dir (protected by the platform's vault-backed volume DEK).
 
 ## 6. Object backend
 
-The v1 backend is the sealed local volume (`/data/objects`). Cloud
-backends (GCS first: bucket pattern `privasys-drive-<env>-<region>`,
-per-tenant prefixes `t/<tenant_prefix>/...`) land in Phase 3.
+Keys are per-tenant-prefixed (`t/<tenant_prefix>/...`) so one bucket
+hosts many tenants; a backend only ever sees opaque AEAD ciphertext.
+
+The **instance** backend is selected by `DRIVE_OBJECT_BACKEND`:
+
+| Value | Env | Notes |
+|---|---|---|
+| (unset) / `local` | `DRIVE_STATE_DIR` | Local disk under `<state>/objects` (dev default). |
+| `gcs` | `DRIVE_GCS_BUCKET`, `DRIVE_GCS_KEY_FILE` (or ADC) | Google Cloud Storage. |
+| `s3` | `DRIVE_S3_BUCKET`, `DRIVE_S3_REGION`, `DRIVE_S3_ENDPOINT` (empty for AWS), `DRIVE_S3_ACCESS_KEY`, `DRIVE_S3_SECRET_KEY` | AWS S3 / MinIO / R2 (any S3 API). |
+| `ovh` | same `DRIVE_S3_*` with OVH's S3 endpoint (e.g. `https://s3.gra.io.cloud.ovh.net`) | OVH Object Storage via its S3-compatible API. |
+
+A **tenant** can BYO its own bucket: it seals a cloud credential
+(`gcs-sa-json`, `s3-keypair`, or `ovh-s3`) via the vault wrapped-secret
+flow and sets it with `PUT /v1/tenants/{id}/bucket-cred`. Drive unwraps
+it in-enclave and stores that tenant's chunks in their bucket, falling
+back to the instance backend when unset.
 
 ## 7. Smoke test
 

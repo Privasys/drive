@@ -578,23 +578,36 @@ func TestBackendSelection(t *testing.T) {
 		t.Fatalf("no-cred backend: %v (want instance default)", err)
 	}
 
-	// A BYO credential routes into the BYO branch. An unsupported
-	// content type surfaces a clear error (proving selection, without
-	// needing a live cloud client).
-	cred := SealedBucketCred{
-		KeyRef:        vaultmek.Ref{Handle: "h", Endpoints: []string{"v:1"}},
-		CiphertextB64: base64.RawURLEncoding.EncodeToString([]byte("x")),
-		IvB64:         base64.RawURLEncoding.EncodeToString([]byte("iv")),
-		ContentType:   "s3-keypair", // not yet supported
-		Bucket:        "b",
+	setCred := func(contentType string) {
+		cred := SealedBucketCred{
+			KeyRef:        vaultmek.Ref{Handle: "h", Endpoints: []string{"v:1"}},
+			CiphertextB64: base64.RawURLEncoding.EncodeToString([]byte("x")),
+			IvB64:         base64.RawURLEncoding.EncodeToString([]byte("iv")),
+			ContentType:   contentType,
+			Bucket:        "b",
+		}
+		blob, _ := json.Marshal(cred)
+		if err := srv.Store.SetTenantBucketCred(ctx, tOwner.ID, string(blob)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	blob, _ := json.Marshal(cred)
-	if err := srv.Store.SetTenantBucketCred(ctx, tOwner.ID, string(blob)); err != nil {
-		t.Fatal(err)
+
+	// A supported content type routes into its provider branch (the
+	// fake unwrap yields non-JSON, so S3/OVH creds fail to parse — which
+	// proves the branch was taken, without a live cloud client).
+	for _, ct := range []string{"s3-keypair", "ovh-s3"} {
+		setCred(ct)
+		if _, err := srv.backendFor(ctx, tOwner.ID); err == nil ||
+			!strings.Contains(err.Error(), "credential") {
+			t.Fatalf("%s selection: %v (want the s3/ovh branch)", ct, err)
+		}
 	}
+
+	// An unknown content type surfaces a clear unsupported error.
+	setCred("unknown-provider")
 	if _, err := srv.backendFor(ctx, tOwner.ID); err == nil ||
 		!strings.Contains(err.Error(), "unsupported bucket credential") {
-		t.Fatalf("BYO-cred backend selection: %v (want unsupported-content-type)", err)
+		t.Fatalf("unknown content type: %v (want unsupported)", err)
 	}
 }
 

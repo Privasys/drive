@@ -243,6 +243,18 @@ func openBackend(ctx context.Context, state string) (objectstore.Backend, error)
 			creds = b
 		}
 		return objectstore.NewGCS(ctx, objectstore.GCSConfig{Bucket: bucket, CredentialsJSON: creds})
+	case "s3", "ovh":
+		cfg := objectstore.S3Config{
+			Bucket:    os.Getenv("DRIVE_S3_BUCKET"),
+			Region:    os.Getenv("DRIVE_S3_REGION"),
+			Endpoint:  os.Getenv("DRIVE_S3_ENDPOINT"),
+			AccessKey: os.Getenv("DRIVE_S3_ACCESS_KEY"),
+			SecretKey: os.Getenv("DRIVE_S3_SECRET_KEY"),
+		}
+		if strings.ToLower(os.Getenv("DRIVE_OBJECT_BACKEND")) == "ovh" {
+			return objectstore.NewOVH(ctx, cfg)
+		}
+		return objectstore.NewS3(ctx, cfg)
 	default:
 		objectsDir := filepath.Join(state, "objects")
 		if err := os.MkdirAll(objectsDir, 0o700); err != nil {
