@@ -156,6 +156,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/me", s.auth(s.handleMe))
 	mux.Handle("POST /v1/me/tenant", s.auth(s.handleEnsurePersonalTenant))
 	mux.Handle("POST /v1/me/tenant/key", s.auth(s.handleTenantKey))
+	mux.Handle("GET /v1/shared", s.auth(s.handleSharedWithMe))
 	mux.Handle("POST /v1/tenants", s.auth(s.handleCreateTenant))
 	mux.Handle("POST /v1/tenants/{tenantID}/members", s.auth(s.handleAddMember))
 	mux.Handle("POST /v1/tenants/{tenantID}/folders", s.auth(s.handleCreateFolder))
@@ -796,7 +797,14 @@ func (s *Server) canAdmin(ctx context.Context, tenantID, sub string) bool {
 func (s *Server) allowNode(ctx context.Context, p *Principal, tenantID, nodeID string, need grants.Scope) bool {
 	if p.IsUser() {
 		if need == grants.ScopeRead {
-			return s.canRead(ctx, tenantID, p.Sub) && s.aclAllows(ctx, tenantID, nodeID, p.Sub)
+			if s.canRead(ctx, tenantID, p.Sub) && s.aclAllows(ctx, tenantID, nodeID, p.Sub) {
+				return true
+			}
+			// A user-to-user share grants the recipient read access to the
+			// shared node (or its subtree), independent of tenant
+			// membership and folder ACLs — the owner's explicit share is
+			// the authorisation.
+			return s.hasReadShare(ctx, tenantID, nodeID, p.Sub)
 		}
 		return s.canWrite(ctx, tenantID, p.Sub) && s.aclAllows(ctx, tenantID, nodeID, p.Sub)
 	}

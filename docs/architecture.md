@@ -69,7 +69,15 @@ Drive itself never calls a model.
   Merkle root over the chunk ciphertext hashes. The manifest itself
   is sealed under the per-file CEK and persisted next to the chunks.
 - **Grant**: three-audience share:
-  - `subject:<sub>` user-to-user (wallet re-wraps the CEK)
+  - `subject:<sub>` user-to-user. The owner mints a read (or write)
+    grant on a node with `POST /v1/tenants/{id}/nodes/{node}/grants`;
+    the recipient then reads it through the normal file endpoints and
+    the enclave decrypts server-side with the owner's tenant MEK, over
+    the attested channel. Recipients discover their inbound shares via
+    `GET /v1/shared`. A share on a folder covers its subtree, and
+    revocation (`DELETE .../grants/{grantID}`) removes access
+    immediately. Client-side re-wrap to the recipient (the `wrapped_cek`
+    field, so the operator never sees plaintext) is a later hardening.
   - `link` anonymous static link with URL fragment-secret
   - `app:<mrtd>` third-party platform app authenticated by an
     Ed25519-signed AppGrant token bound to the wallet pubkey

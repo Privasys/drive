@@ -141,6 +141,58 @@ func (r *Repo) Revoke(ctx context.Context, tenantID, id string) error {
 	return err
 }
 
+// ActiveForSubjectOnNode returns the active grant that shares nodeID
+// (in tenantID) with a given recipient subject, or (nil, nil) when none
+// exists. Used to authorise a recipient's read of a shared node.
+func (r *Repo) ActiveForSubjectOnNode(ctx context.Context, tenantID, nodeID, subject string) (*Grant, error) {
+	rows, err := r.DB.QueryContext(ctx, r.q(
+		`SELECT id, tenant_id, node_id, subject, scope, created_by, created_at,
+		        expires_at, revoked_at, binding_pubkey, meta
+		 FROM grants WHERE tenant_id = ? AND node_id = ? AND subject = ? AND revoked_at IS NULL`),
+		tenantID, nodeID, SubjectUser+subject)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	now := r.NowFn()
+	for rows.Next() {
+		g, serr := scanGrant(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		if g.IsActive(now) {
+			return g, nil
+		}
+	}
+	return nil, rows.Err()
+}
+
+// ListForSubject returns the active grants shared with a recipient
+// subject across all tenants (the recipient's inbound share inbox).
+func (r *Repo) ListForSubject(ctx context.Context, subject string) ([]*Grant, error) {
+	rows, err := r.DB.QueryContext(ctx, r.q(
+		`SELECT id, tenant_id, node_id, subject, scope, created_by, created_at,
+		        expires_at, revoked_at, binding_pubkey, meta
+		 FROM grants WHERE subject = ? AND revoked_at IS NULL ORDER BY created_at DESC`),
+		SubjectUser+subject)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	now := r.NowFn()
+	var out []*Grant
+	for rows.Next() {
+		g, serr := scanGrant(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		if g.IsActive(now) {
+			out = append(out, g)
+		}
+	}
+	return out, rows.Err()
+}
+
 // ListForNode returns the active grants for a node.
 func (r *Repo) ListForNode(ctx context.Context, tenantID, nodeID string) ([]*Grant, error) {
 	rows, err := r.DB.QueryContext(ctx, r.q(
