@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,8 +42,12 @@ func newMgmtRefresher(base string, m identityMinter, hc *http.Client) TokenRefre
 	}
 	url := strings.TrimRight(base, "/") + "/api/v1/keyvaults/operated"
 	return func(ctx context.Context) (string, int64, error) {
+		// The control plane's freshness contract: the first 8 bytes of
+		// the challenge are big-endian unix seconds (trustworthy once the
+		// quote binds the challenge), the rest anti-replay randomness.
 		challenge := make([]byte, 16)
-		if _, err := rand.Read(challenge); err != nil {
+		binary.BigEndian.PutUint64(challenge[:8], uint64(time.Now().Unix()))
+		if _, err := rand.Read(challenge[8:]); err != nil {
 			return "", 0, err
 		}
 		cert, err := m.mint(ctx, challenge)

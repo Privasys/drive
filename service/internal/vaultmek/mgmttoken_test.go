@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/binary"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +83,11 @@ func TestMgmtRefresher_FetchesToken(t *testing.T) {
 	}
 	if string(ch) != string(fm.challenge) {
 		t.Fatal("challenge header does not match the minted binding")
+	}
+	// Freshness contract: challenge[:8] = big-endian unix seconds ~now.
+	tsec := int64(binary.BigEndian.Uint64(ch[:8]))
+	if d := time.Since(time.Unix(tsec, 0)); d < -time.Minute || d > time.Minute {
+		t.Fatalf("challenge timestamp prefix off by %s", d)
 	}
 	if _, err := base64.StdEncoding.DecodeString(gotIdentity); err != nil {
 		t.Fatalf("identity header is not base64: %v", err)
