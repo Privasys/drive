@@ -163,6 +163,39 @@ func (s *Store) TenantMekRef(ctx context.Context, tenantID string) (string, erro
 	return ref, nil
 }
 
+// SetTenantBucketCred persists (or swaps, on rotation) the tenant's
+// sealed BYO bucket credential (JSON). Empty clears it.
+func (s *Store) SetTenantBucketCred(ctx context.Context, tenantID, cred string) error {
+	var v any
+	if cred != "" {
+		v = cred
+	}
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE tenants SET bucket_cred = ? WHERE id = ?`), v, tenantID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// TenantBucketCred returns the tenant's sealed bucket credential (JSON),
+// or "" when none is set.
+func (s *Store) TenantBucketCred(ctx context.Context, tenantID string) (string, error) {
+	row := s.DB.QueryRowContext(ctx, s.q(
+		`SELECT COALESCE(bucket_cred, '') FROM tenants WHERE id = ?`), tenantID)
+	var cred string
+	if err := row.Scan(&cred); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return cred, nil
+}
+
 // TenantMembership pairs a tenant with the member's role in it.
 type TenantMembership struct {
 	Tenant Tenant

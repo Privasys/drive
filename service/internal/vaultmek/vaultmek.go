@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	ratls "enclave-os-mini/clients/go/ratls"
@@ -166,6 +167,35 @@ func (c *Client) Provision(ctx context.Context, b Bundle) (Ref, error) {
 	c.meks[b.Handle] = mek
 	c.mu.Unlock()
 	return ref, nil
+}
+
+// Unwrap decrypts a payload sealed under a vault Aes256GcmKey (a
+// "wrapped-secret" operator key: the app TEE holds Unwrap only). Used
+// for BYO bucket credentials — the tenant/owner sealed the credential
+// with an in-enclave Wrap RPC; Drive unwraps it in-enclave per session
+// and never persists the plaintext. The key lives on a single vault
+// (AES keys are not Shamir-split), so the first endpoint that holds it
+// answers.
+func (c *Client) Unwrap(ctx context.Context, ref Ref, ciphertext, iv []byte) ([]byte, error) {
+	var lastErr error
+	for _, ep := range ref.Endpoints {
+		vc, derr := c.dial(ctx, ep, ref.MrenclaveHex, ref.AttServer, ref.AttToken)
+		if derr != nil {
+			lastErr = derr
+			continue
+		}
+		pt, uerr := vc.Unwrap(ctx, ref.Handle, ciphertext, iv, nil)
+		vc.Close()
+		if uerr != nil {
+			if strings.Contains(uerr.Error(), "not found") {
+				continue
+			}
+			lastErr = uerr
+			continue
+		}
+		return pt, nil
+	}
+	return nil, fmt.Errorf("vaultmek: unwrap %s: %v", ref.Handle, lastErr)
 }
 
 // Load returns the MEK for a persisted Ref, reading shares back from

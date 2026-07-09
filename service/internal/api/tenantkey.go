@@ -11,11 +11,12 @@ import (
 	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
-// MEKProvider is the vault-side of per-tenant keys (vaultmek.Client in
-// production; faked in tests).
+// MEKProvider is the vault-side of per-tenant keys and sealed
+// credentials (vaultmek.Client in production; faked in tests).
 type MEKProvider interface {
 	Provision(ctx context.Context, b vaultmek.Bundle) (vaultmek.Ref, error)
 	Load(ctx context.Context, ref vaultmek.Ref) ([]byte, error)
+	Unwrap(ctx context.Context, ref vaultmek.Ref, ciphertext, iv []byte) ([]byte, error)
 }
 
 // tenantMEK resolves the master key protecting a tenant's content: the

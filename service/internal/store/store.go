@@ -211,10 +211,15 @@ func (s *Store) migrate(ctx context.Context) error {
 	// leaves them untouched); an already-exists error means the column
 	// is there (SQLite says "duplicate column", Postgres "already
 	// exists" — PG's ADD COLUMN IF NOT EXISTS is not in SQLite).
-	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE tenants ADD COLUMN mek_ref TEXT`); err != nil {
-		msg := strings.ToLower(err.Error())
-		if !strings.Contains(msg, "duplicate") && !strings.Contains(msg, "exists") {
-			return fmt.Errorf("migrate: add tenants.mek_ref: %w", err)
+	for _, col := range []string{
+		`ALTER TABLE tenants ADD COLUMN mek_ref TEXT`,
+		`ALTER TABLE tenants ADD COLUMN bucket_cred TEXT`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, col); err != nil {
+			msg := strings.ToLower(err.Error())
+			if !strings.Contains(msg, "duplicate") && !strings.Contains(msg, "exists") {
+				return fmt.Errorf("migrate: %q: %w", col, err)
+			}
 		}
 	}
 	return nil

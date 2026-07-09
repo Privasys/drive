@@ -215,6 +215,16 @@ func (f *fakeMEKs) Provision(_ context.Context, b vaultmek.Bundle) (vaultmek.Ref
 }
 func (f *fakeMEKs) Load(context.Context, vaultmek.Ref) ([]byte, error) { return f.mek, nil }
 
+// Unwrap fakes the vault by XORing with a fixed pad (deterministic,
+// reversible) so a sealed round-trip is testable without a vault.
+func (f *fakeMEKs) Unwrap(_ context.Context, _ vaultmek.Ref, ciphertext, _ []byte) ([]byte, error) {
+	out := make([]byte, len(ciphertext))
+	for i, b := range ciphertext {
+		out[i] = b ^ 0x5a
+	}
+	return out, nil
+}
+
 func TestTenantKeySwitchRewrapsContent(t *testing.T) {
 	mek := sha256.Sum256([]byte("vault-held-tenant-mek"))
 	ts := newFullServer(t, func(s *Server) { s.MEKs = &fakeMEKs{mek: mek[:]} })
@@ -330,6 +340,77 @@ func TestQuotaEnforcement(t *testing.T) {
 		fmt.Sprintf(`{"tenant_id":"%s","node_id":"%s"}`, tenant.ID, bID))
 	if s := write("d.txt", "12345"); s != 200 {
 		t.Fatalf("write after freeing quota: %d", s)
+	}
+}
+
+func TestBucketCredStoreAndUnwrap(t *testing.T) {
+	pad := func(b []byte) []byte { // mirror the fake's XOR seal
+		out := make([]byte, len(b))
+		for i, x := range b {
+			out[i] = x ^ 0x5a
+		}
+		return out
+	}
+	srvHolder := struct{ s *Server }{}
+	ts := newFullServer(t, func(s *Server) {
+		s.MEKs = &fakeMEKs{mek: make([]byte, 32)}
+		srvHolder.s = s
+	})
+	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+
+	// Before setting: not configured.
+	resp, body := doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/bucket-cred", devAuth, "")
+	if resp.StatusCode != 200 || !strings.Contains(string(body), `"configured":false`) {
+		t.Fatalf("pre-set bucket-cred: %d %s", resp.StatusCode, body)
+	}
+
+	// Store a sealed credential (the "ciphertext" is the fake's XOR seal
+	// of the plaintext, so unwrap recovers it).
+	plaintext := []byte(`{"type":"service_account","project":"x"}`)
+	ctB64 := base64.RawURLEncoding.EncodeToString(pad(plaintext))
+	resp, body = doJSON(t, "PUT", ts.URL+"/v1/tenants/"+tenant.ID+"/bucket-cred", devAuth,
+		fmt.Sprintf(`{"key_ref":{"handle":"apps.privasys.org/x/data/y/bucket/v1","endpoints":["v:1"]},"ciphertext_b64":"%s","iv_b64":"%s","content_type":"gcs-sa-json"}`,
+			ctB64, base64.RawURLEncoding.EncodeToString([]byte("iv0"))))
+	if resp.StatusCode != 200 {
+		t.Fatalf("set bucket-cred: %d %s", resp.StatusCode, body)
+	}
+
+	// Metadata visible; plaintext never returned.
+	resp, body = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/bucket-cred", devAuth, "")
+	if !strings.Contains(string(body), `"configured":true`) ||
+		!strings.Contains(string(body), "gcs-sa-json") ||
+		strings.Contains(string(body), "service_account") {
+		t.Fatalf("bucket-cred metadata leaked or wrong: %s", body)
+	}
+
+	// In-enclave unwrap recovers the plaintext.
+	got, ct, err := srvHolder.s.bucketCredential(context.Background(), tenant.ID)
+	if err != nil {
+		t.Fatalf("bucketCredential: %v", err)
+	}
+	if string(got) != string(plaintext) || ct != "gcs-sa-json" {
+		t.Fatalf("unwrap mismatch: %q (%s)", got, ct)
+	}
+
+	// Rotation swaps the blob.
+	newPlain := []byte(`{"type":"service_account","project":"rotated"}`)
+	resp, _ = doJSON(t, "PUT", ts.URL+"/v1/tenants/"+tenant.ID+"/bucket-cred", devAuth,
+		fmt.Sprintf(`{"key_ref":{"handle":"apps.privasys.org/x/data/y/bucket/v2","endpoints":["v:1"]},"ciphertext_b64":"%s","iv_b64":"aXY","content_type":"gcs-sa-json"}`,
+			base64.RawURLEncoding.EncodeToString(pad(newPlain))))
+	if resp.StatusCode != 200 {
+		t.Fatalf("rotate: %d", resp.StatusCode)
+	}
+	got, _, _ = srvHolder.s.bucketCredential(context.Background(), tenant.ID)
+	if string(got) != string(newPlain) {
+		t.Fatalf("post-rotation unwrap: %q", got)
+	}
+
+	// Delete clears it.
+	resp, _ = doJSON(t, "DELETE", ts.URL+"/v1/tenants/"+tenant.ID+"/bucket-cred", devAuth, "")
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete bucket-cred: %d", resp.StatusCode)
 	}
 }
 

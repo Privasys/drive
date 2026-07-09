@@ -168,6 +168,10 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/quota", s.auth(s.handleQuota))
 	mux.Handle("POST /v1/tenants/{tenantID}/exports", s.auth(s.handleExport))
 
+	mux.Handle("PUT /v1/tenants/{tenantID}/bucket-cred", s.auth(s.handleSetBucketCred))
+	mux.Handle("GET /v1/tenants/{tenantID}/bucket-cred", s.auth(s.handleGetBucketCred))
+	mux.Handle("DELETE /v1/tenants/{tenantID}/bucket-cred", s.auth(s.handleDeleteBucketCred))
+
 	return mux
 }
 
