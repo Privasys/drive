@@ -54,6 +54,7 @@ of the attested configuration.
 | `mode` | `sovereign` | Only tenants can unlock their data; the operator holds no key and no unlock path. The Privasys public instance runs this. |
 | | `escrowed` | Tenant keys carry an escrow wrap under the org master key (`MEK_org`); every escrow is disclosed to the tenant via the audit log. Escrowed setup needs `org_mek_ref` (the `MEK_org` vault reference, a RawShare the org created) + `recovery` (`{issuer, quorum, approvers?, disclose}`), sent via the API/CLI (not the portal form). Escrow-wrap and disclosure are active; the audited `recover_tenant` enforcement gate ships next (`POST /v1/tenants/{id}/recover` returns 501 until then). |
 | `quota_default_bytes` | integer | Per-tenant storage ceiling in bytes, enforced on upload (0 = unlimited). `GET /v1/tenants/{id}/quota` reports usage. |
+| `mgmt_base_url` | URL | Control-plane API base (e.g. `https://api.developer.privasys.org`). When set, the instance refreshes stale vault attestation tokens itself: it mints a challenge-bound app identity via the in-TD manager and asks the control plane's app-identity gate for a fresh token, so file operations self-heal after idle instead of returning `409 vault_key_stale` until the owner (or the `rearm_tenant_key` tool) re-arms. Mutable. |
 
 Configure via the portal Configure tab, or over RA-TLS:
 `privasys apps configure privasys-drive --set mode=sovereign`.

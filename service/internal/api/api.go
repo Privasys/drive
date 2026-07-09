@@ -30,6 +30,7 @@ import (
 	"github.com/Privasys/drive/service/internal/oidc"
 	"github.com/Privasys/drive/service/internal/platform"
 	"github.com/Privasys/drive/service/internal/store"
+	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
 // appGrantAudience is the aud an AppGrant envelope must carry.
@@ -107,6 +108,7 @@ func (s *Server) SetConfig(c *config.Config) error {
 	s.cfgMu.Lock()
 	s.cfg = c
 	s.cfgMu.Unlock()
+	s.applyConfigSideEffects(c)
 	return nil
 }
 
@@ -116,6 +118,21 @@ func (s *Server) InstallConfig(c *config.Config) {
 	s.cfgMu.Lock()
 	s.cfg = c
 	s.cfgMu.Unlock()
+	s.applyConfigSideEffects(c)
+}
+
+// applyConfigSideEffects wires config-driven runtime behaviour. With a
+// control-plane base URL configured, the vault client self-heals stale
+// attestation tokens via the app's manager-minted identity.
+func (s *Server) applyConfigSideEffects(c *config.Config) {
+	if c == nil || c.MgmtBaseURL == "" {
+		return
+	}
+	if v, ok := s.MEKs.(*vaultmek.Client); ok && v != nil {
+		if r := v.MgmtTokenRefresher(c.MgmtBaseURL); r != nil {
+			v.SetTokenRefresher(r)
+		}
+	}
 }
 
 // CurrentConfig returns the active config, or nil before configure.

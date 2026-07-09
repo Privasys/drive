@@ -63,6 +63,9 @@ func (s *Server) handleStatusTool(w http.ResponseWriter, r *http.Request, _ *Pri
 type configureRequest struct {
 	Mode              config.Mode `json:"mode"`
 	QuotaDefaultBytes int64       `json:"quota_default_bytes"`
+	// MgmtBaseURL enables self-healing of stale vault attestation
+	// tokens via the control plane (see config.Config).
+	MgmtBaseURL string `json:"mgmt_base_url"`
 	// Escrowed-mode setup (sent via the API/CLI, not the portal form):
 	// the MEK_org vault reference and the recovery policy.
 	OrgMEKRef string                 `json:"org_mek_ref"`
@@ -86,7 +89,8 @@ func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request, p *Prin
 	}
 	cfg := &config.Config{
 		Mode: req.Mode, QuotaDefaultBytes: req.QuotaDefaultBytes,
-		OrgMEKRef: req.OrgMEKRef, Recovery: req.Recovery,
+		MgmtBaseURL: req.MgmtBaseURL,
+		OrgMEKRef:   req.OrgMEKRef, Recovery: req.Recovery,
 	}
 	if err := cfg.Validate(); err != nil {
 		httpError(w, http.StatusBadRequest, err)

@@ -35,6 +35,13 @@
                     "x-privasys": {
                         "label": "Default tenant quota (bytes)"
                     }
+                },
+                "mgmt_base_url": {
+                    "type": "string",
+                    "description": "Control-plane API base URL (e.g. https://api.developer.privasys.org). When set, the instance refreshes stale vault attestation tokens itself via its manager-minted app identity, so file operations self-heal after idle instead of returning 409 vault_key_stale until the owner re-arms. Mutable.",
+                    "x-privasys": {
+                        "label": "Control-plane URL (token self-heal)"
+                    }
                 }
             },
             "required": ["mode"]
@@ -65,6 +72,13 @@
                         "default": 0,
                         "x-privasys": {
                             "label": "Default tenant quota (bytes)"
+                        }
+                    },
+                    "mgmt_base_url": {
+                        "type": "string",
+                        "description": "Control-plane API base URL. When set, the instance refreshes stale vault attestation tokens itself via its manager-minted app identity (self-heal for 409 vault_key_stale). Mutable.",
+                        "x-privasys": {
+                            "label": "Control-plane URL (token self-heal)"
                         }
                     }
                 },

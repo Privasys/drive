@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Mode is the instance operating mode. It says one thing: whether anyone
@@ -49,6 +50,13 @@ type Config struct {
 	Mode              Mode  `json:"mode"`
 	QuotaDefaultBytes int64 `json:"quota_default_bytes,omitempty"`
 
+	// MgmtBaseURL is the control-plane API base (e.g.
+	// https://api-test.developer.privasys.org). When set, the instance
+	// refreshes stale vault attestation tokens itself via its
+	// manager-minted app identity instead of waiting for an owner
+	// re-arm. Mutable (an ops setting, not part of the trust contract).
+	MgmtBaseURL string `json:"mgmt_base_url,omitempty"`
+
 	// Escrowed-mode fields. OrgMEKRef is the vault reference (a
 	// vaultmek.Ref JSON) for MEK_org — the org's BYOK master key, a
 	// RawShare the attested build reconstructs in-enclave to escrow-wrap
@@ -62,6 +70,10 @@ const DefaultIssuer = "https://privasys.id"
 
 // Validate rejects malformed configurations.
 func (c *Config) Validate() error {
+	if c.MgmtBaseURL != "" &&
+		!strings.HasPrefix(c.MgmtBaseURL, "https://") && !strings.HasPrefix(c.MgmtBaseURL, "http://") {
+		return errors.New("mgmt_base_url must be an http(s) URL")
+	}
 	switch c.Mode {
 	case ModeSovereign:
 		return nil

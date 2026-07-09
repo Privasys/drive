@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	ratls "enclave-os-mini/clients/go/ratls"
 	vsdk "github.com/Privasys/enclave-vaults-client/go/vault"
@@ -59,6 +60,11 @@ func ParseRef(s string) (Ref, error) {
 	return r, nil
 }
 
+// TokenRefresher returns a fresh aud=attestation-server token (and its
+// unix expiry) the client uses to verify the vaults' quotes when a
+// stored Ref's token has gone stale. See MgmtTokenRefresher.
+type TokenRefresher func(ctx context.Context) (token string, expiresAt int64, err error)
+
 // Client provisions and loads tenant MEKs. minter is the fork-only
 // manager identity source (nil off-platform, where operations fail).
 type Client struct {
@@ -66,6 +72,11 @@ type Client struct {
 
 	mu   sync.RWMutex
 	meks map[string][]byte // handle -> MEK, in-memory only
+
+	tokMu    sync.Mutex
+	refresh  TokenRefresher
+	freshTok string
+	freshExp int64
 }
 
 // New builds a client. managerMintURL is the in-TD manager's
@@ -76,6 +87,45 @@ func New(managerMintURL, token string) *Client {
 		c.minter = NewManagerMinter(managerMintURL, token)
 	}
 	return c
+}
+
+// SetTokenRefresher enables self-healing of stale attestation tokens:
+// when an operation fails with the Ref's stored token, the client
+// fetches a fresh token and retries once. Idempotent.
+func (c *Client) SetTokenRefresher(r TokenRefresher) {
+	c.tokMu.Lock()
+	c.refresh = r
+	c.tokMu.Unlock()
+}
+
+// cachedFreshToken returns a previously fetched token that is still
+// comfortably within its validity, or "".
+func (c *Client) cachedFreshToken(now int64) string {
+	c.tokMu.Lock()
+	defer c.tokMu.Unlock()
+	if c.freshTok != "" && (c.freshExp == 0 || now+60 < c.freshExp) {
+		return c.freshTok
+	}
+	return ""
+}
+
+// refreshToken fetches (and caches) a fresh attestation token, or
+// returns "" when no refresher is configured or it fails.
+func (c *Client) refreshToken(ctx context.Context) string {
+	c.tokMu.Lock()
+	r := c.refresh
+	c.tokMu.Unlock()
+	if r == nil {
+		return ""
+	}
+	tok, exp, err := r(ctx)
+	if err != nil || tok == "" {
+		return ""
+	}
+	c.tokMu.Lock()
+	c.freshTok, c.freshExp = tok, exp
+	c.tokMu.Unlock()
+	return tok
 }
 
 func (c *Client) policy(mrenclaveHex, attServer, attToken string, nonce []byte) (*ratls.VerificationPolicy, error) {
@@ -177,9 +227,25 @@ func (c *Client) Provision(ctx context.Context, b Bundle) (Ref, error) {
 // (AES keys are not Shamir-split), so the first endpoint that holds it
 // answers.
 func (c *Client) Unwrap(ctx context.Context, ref Ref, ciphertext, iv []byte) ([]byte, error) {
+	tok := ref.AttToken
+	if ft := c.cachedFreshToken(time.Now().Unix()); ft != "" {
+		tok = ft
+	}
+	pt, err := c.unwrapOnce(ctx, ref, tok, ciphertext, iv)
+	if err != nil {
+		// The stored token may simply have expired; fetch a fresh one and
+		// retry once (self-heal, no owner round-trip).
+		if ft := c.refreshToken(ctx); ft != "" && ft != tok {
+			return c.unwrapOnce(ctx, ref, ft, ciphertext, iv)
+		}
+	}
+	return pt, err
+}
+
+func (c *Client) unwrapOnce(ctx context.Context, ref Ref, attToken string, ciphertext, iv []byte) ([]byte, error) {
 	var lastErr error
 	for _, ep := range ref.Endpoints {
-		vc, derr := c.dial(ctx, ep, ref.MrenclaveHex, ref.AttServer, ref.AttToken)
+		vc, derr := c.dial(ctx, ep, ref.MrenclaveHex, ref.AttServer, attToken)
 		if derr != nil {
 			lastErr = derr
 			continue
@@ -209,6 +275,29 @@ func (c *Client) Load(ctx context.Context, ref Ref) ([]byte, error) {
 	}
 	c.mu.RUnlock()
 
+	tok := ref.AttToken
+	if ft := c.cachedFreshToken(time.Now().Unix()); ft != "" {
+		tok = ft
+	}
+	mek, err := c.loadOnce(ctx, ref, tok)
+	if err != nil {
+		// The stored token expires ~15 min after the last re-arm; with a
+		// refresher configured the client self-heals instead of failing
+		// until the owner comes back.
+		if ft := c.refreshToken(ctx); ft != "" && ft != tok {
+			mek, err = c.loadOnce(ctx, ref, ft)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.meks[ref.Handle] = mek
+	c.mu.Unlock()
+	return mek, nil
+}
+
+func (c *Client) loadOnce(ctx context.Context, ref Ref, attToken string) ([]byte, error) {
 	threshold := ref.Threshold
 	if threshold <= 0 {
 		threshold = (len(ref.Endpoints) + 1) / 2
@@ -219,7 +308,7 @@ func (c *Client) Load(ctx context.Context, ref Ref) ([]byte, error) {
 		if len(shares) >= threshold {
 			break
 		}
-		vc, derr := c.dial(ctx, ep, ref.MrenclaveHex, ref.AttServer, ref.AttToken)
+		vc, derr := c.dial(ctx, ep, ref.MrenclaveHex, ref.AttServer, attToken)
 		if derr != nil {
 			lastErr = derr
 			continue
@@ -244,8 +333,5 @@ func (c *Client) Load(ctx context.Context, ref Ref) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vaultmek: reconstruct: %w", err)
 	}
-	c.mu.Lock()
-	c.meks[ref.Handle] = mek
-	c.mu.Unlock()
 	return mek, nil
 }
