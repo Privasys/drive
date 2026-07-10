@@ -89,8 +89,8 @@ func TestConfigureLifecycle(t *testing.T) {
 		t.Fatalf("unauthenticated configure: %d", resp.StatusCode)
 	}
 
-	// Escrowed is not shippable yet: fail closed.
-	resp, _ = doJSON(t, "POST", ts.URL+"/configure", devAuth, `{"mode":"escrowed"}`)
+	// Escrowed with the ref but no recovery policy: fail closed.
+	resp, _ = doJSON(t, "POST", ts.URL+"/configure", devAuth, `{"mode":"escrowed","org_mek_ref":"{}"}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("escrowed configure: %d", resp.StatusCode)
 	}
@@ -651,12 +651,13 @@ func TestEscrowedProvisionWrapsAndDiscloses(t *testing.T) {
 
 func TestEscrowedConfigValidation(t *testing.T) {
 	ts := newFullServer(t, func(s *Server) { s.MEKs = &fakeMEKs{mek: make([]byte, 32)} })
-	// escrowed without org_mek_ref / recovery is rejected.
+	// escrowed with a half-complete escrow setup is rejected (a bare
+	// {"mode":"escrowed"} IS valid: the two-step pending-setup state).
 	for _, c := range []string{
-		`{"mode":"escrowed"}`,
 		`{"mode":"escrowed","org_mek_ref":"{}"}`,
 		`{"mode":"escrowed","org_mek_ref":"{}","recovery":{"quorum":0}}`,
 		`{"mode":"escrowed","org_mek_ref":"{}","recovery":{"quorum":3,"approvers":["a"]}}`,
+		`{"mode":"escrowed","org_mek_ref":"{}","recovery":{"quorum":1}}`,
 	} {
 		resp, _ := doJSON(t, "POST", ts.URL+"/configure", devAuth, c)
 		if resp.StatusCode != http.StatusBadRequest {

@@ -122,6 +122,14 @@ func (c *Config) Validate() error {
 	case ModeSovereign:
 		return nil
 	case ModeEscrowed:
+		if c.OrgMEKRef == "" && c.Recovery == nil {
+			// Two-step setup: the configure-then-freeze gate blocks the
+			// provision_org_mek tool until the first configure, so an
+			// escrowed instance may configure with the escrow PENDING.
+			// It is fail-closed meanwhile: tenant provisioning refuses
+			// until the wrap can be produced, and recovery is unavailable.
+			return nil
+		}
 		if c.OrgMEKRef == "" {
 			return errors.New("escrowed mode requires org_mek_ref (the MEK_org vault reference)")
 		}
