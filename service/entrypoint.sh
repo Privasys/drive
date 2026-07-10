@@ -45,8 +45,10 @@ if ! su postgres -c "psql -h '$PGSOCK' -tAc \"SELECT 1 FROM pg_database WHERE da
   su postgres -c "psql -h '$PGSOCK' -c 'CREATE DATABASE drive'" || echo "entrypoint: create database failed"
 fi
 
-# pgx reads the socket directory from the host= query parameter.
-export DRIVE_DB_DSN="${DRIVE_DB_DSN:-postgres:///drive?host=$PGSOCK&sslmode=disable}"
+# pgx reads the socket directory from the host= query parameter; the
+# user must be explicit (postgres), else pgx defaults to the OS user
+# (root), which has no Postgres role.
+export DRIVE_DB_DSN="${DRIVE_DB_DSN:-postgres://postgres@/drive?host=$PGSOCK&sslmode=disable}"
 
 : "${PORT:?PORT environment variable is required}"
 echo "entrypoint: starting drive on :$PORT…"
