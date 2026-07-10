@@ -72,7 +72,7 @@ role re-check would wrongly reject them).
 |---|---|---|
 | `PORT` | (platform-injected) | Listen port. Local default `127.0.0.1:8443`. |
 | `DRIVE_STATE_DIR` | `/data` on platform, `data-dev` locally | Objects + instance config (+ the SQLite file for local runs). |
-| `DRIVE_DB_DSN` | set by the image entrypoint to the embedded PostgreSQL (`/data/pgdata`, loopback only) | Index DSN; a `postgres://` value selects the Postgres dialect, anything else falls back to SQLite (local dev/tests). |
+| `DRIVE_DB_DSN` | set by the image entrypoint to the embedded PostgreSQL over a **Unix socket** on `/data` (`postgres:///drive?host=/data/pgsock`) — no TCP listener | Index DSN; a `postgres://` value selects the Postgres dialect, anything else falls back to SQLite (local dev/tests). The socket lives on the per-app LUKS volume, so a co-located app sharing the host network namespace cannot reach the index (a TCP loopback listener would be shared). |
 | `OIDC_ISSUER` | `https://privasys.id` | JWKS verifier issuer (offline, in-enclave). |
 | `OIDC_AUDIENCE` | (unset) | Optional required `aud`. |
 | `OIDC_REVOKED_URL` | `<issuer>/sessions/revoked` | Revoked-session feed; `off` disables. |
