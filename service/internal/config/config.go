@@ -37,12 +37,56 @@ type RecoveryPolicy struct {
 	// Quorum is k: how many distinct approvals a recovery needs.
 	Quorum int `json:"quorum"`
 	// Approvers are the permitted approver subjects. Empty means the
-	// approver *role* (<issuer>:app:<app-id>:approver) is used instead,
-	// resolved by the recovery gate.
+	// ApproverRole is used instead.
 	Approvers []string `json:"approvers,omitempty"`
+	// ApproverRole is a role string checked against the token's roles
+	// claim when Approvers is empty (the org's IdP mints its own roles).
+	ApproverRole string `json:"approver_role,omitempty"`
+	// Requesters / RequesterRole govern who may FILE a recovery request
+	// (requesting never counts toward the quorum). When both are empty,
+	// any approver may request.
+	Requesters    []string `json:"requesters,omitempty"`
+	RequesterRole string   `json:"requester_role,omitempty"`
 	// Disclose records that every recovery is disclosed to the affected
 	// user. Forced true — it is the contract of escrowed mode.
 	Disclose bool `json:"disclose"`
+}
+
+// subjectIn reports whether sub is in list.
+func subjectIn(sub string, list []string) bool {
+	for _, s := range list {
+		if s == sub {
+			return true
+		}
+	}
+	return false
+}
+
+// ApproverAllowed reports whether (sub, roles) may approve a recovery.
+func (p *RecoveryPolicy) ApproverAllowed(sub string, roles []string) bool {
+	if len(p.Approvers) > 0 {
+		return subjectIn(sub, p.Approvers)
+	}
+	if p.ApproverRole != "" {
+		return subjectIn(p.ApproverRole, roles)
+	}
+	return false
+}
+
+// RequesterAllowed reports whether (sub, roles) may file a recovery
+// request. Falls back to the approver set when no requester rule is
+// configured.
+func (p *RecoveryPolicy) RequesterAllowed(sub string, roles []string) bool {
+	if len(p.Requesters) > 0 && subjectIn(sub, p.Requesters) {
+		return true
+	}
+	if p.RequesterRole != "" && subjectIn(p.RequesterRole, roles) {
+		return true
+	}
+	if len(p.Requesters) == 0 && p.RequesterRole == "" {
+		return p.ApproverAllowed(sub, roles)
+	}
+	return false
 }
 
 // Config is the persisted instance configuration.
@@ -86,6 +130,9 @@ func (c *Config) Validate() error {
 		}
 		if c.Recovery.Quorum < 1 {
 			return errors.New("recovery.quorum must be at least 1")
+		}
+		if len(c.Recovery.Approvers) == 0 && c.Recovery.ApproverRole == "" {
+			return errors.New("recovery needs approvers (a subject list) or approver_role")
 		}
 		if len(c.Recovery.Approvers) > 0 && len(c.Recovery.Approvers) < c.Recovery.Quorum {
 			return fmt.Errorf("recovery lists %d approvers but needs a quorum of %d",

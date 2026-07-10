@@ -90,6 +90,16 @@ func New(managerMintURL, token string) *Client {
 	return c
 }
 
+// Seed installs an already-recovered MEK in the in-memory cache (e.g.
+// an escrowed recovery unwrapped it from the escrow wrap), so content
+// reads work even when the key's own vault path is unavailable — the
+// escrow is the disaster-recovery path. In-memory only.
+func (c *Client) Seed(handle string, mek []byte) {
+	c.mu.Lock()
+	c.meks[handle] = mek
+	c.mu.Unlock()
+}
+
 // SetTokenRefresher enables self-healing of stale attestation tokens:
 // when an operation fails with the Ref's stored token, the client
 // fetches a fresh token and retries once. Idempotent.

@@ -10,21 +10,29 @@ import (
 
 // hasReadShare reports whether sub holds an active read (or write, which
 // implies read) user-to-user share on nodeID or any ancestor folder in
-// tenantID. A share is an explicit grant by the owner, so it authorises
-// the recipient independently of the tenant's membership ACL.
+// tenantID — including a tenant-root grant (node_id "", e.g. minted by
+// an escrowed recovery), which covers everything. A share is an explicit
+// grant by the owner (or the recovery gate), so it authorises the
+// recipient independently of the tenant's membership ACL.
 func (s *Server) hasReadShare(ctx context.Context, tenantID, nodeID, sub string) bool {
+	readGrant := func(nid string) bool {
+		g, err := s.Grants.ActiveForSubjectOnNode(ctx, tenantID, nid, sub)
+		return err == nil && g != nil && (g.HasScope(grants.ScopeRead) || g.HasScope(grants.ScopeWrite))
+	}
 	if nodeID == "" {
-		return false
+		return readGrant("")
 	}
 	cur := nodeID
 	for depth := 0; cur != "" && depth < 4096; depth++ {
-		g, err := s.Grants.ActiveForSubjectOnNode(ctx, tenantID, cur, sub)
-		if err == nil && g != nil && (g.HasScope(grants.ScopeRead) || g.HasScope(grants.ScopeWrite)) {
+		if readGrant(cur) {
 			return true
 		}
 		n, err := s.Store.GetNode(ctx, tenantID, cur)
-		if err != nil || !n.ParentID.Valid {
+		if err != nil {
 			return false
+		}
+		if !n.ParentID.Valid {
+			return readGrant("") // reached the root: a tenant-wide grant covers it
 		}
 		cur = n.ParentID.String
 	}

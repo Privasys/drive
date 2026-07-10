@@ -25,6 +25,10 @@ type Identity struct {
 	// SID is the IdP session the token is bound to (the revocation
 	// handle for long-lived API keys). Empty for session-less tokens.
 	SID string
+	// Claims is the full verified payload, for callers that need
+	// non-standard claims (e.g. the recovery gate reads amr, vault_op,
+	// nonce, jti, iat). Nil from the dev verifier.
+	Claims map[string]any
 }
 
 // HasRole reports whether the token carried the given role.

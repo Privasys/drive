@@ -62,22 +62,60 @@ func (s *Server) escrowWrapTenant(ctx context.Context, tenantID string, tenantME
 	return nil
 }
 
-// handleRecoverTenant is the escrowed-mode recovery action. The
-// non-sensitive scaffold (escrowed config, escrow-wrap at provision,
-// disclosure audit) is in place; the enforcement gate — the k-of-n
-// approver-quorum verification, WebAuthn step-up, MEK_org unwrap, and
-// the time-bounded read grant — is built deliberately as a paired,
-// reviewed step, so this returns 501 until then.
+// handleRecoverTenant files an escrowed-mode recovery request (the
+// enforcement gate lives in recovery.go: policy-checked requester,
+// k-of-n approver quorum, hybrid approval verification, MEK_org unwrap
+// and a time-bounded tenant-wide read grant, all audited + disclosed).
 func (s *Server) handleRecoverTenant(w http.ResponseWriter, r *http.Request, p *Principal) {
-	cfg := s.CurrentConfig()
-	if cfg == nil || cfg.Mode != config.ModeEscrowed {
-		httpError(w, http.StatusBadRequest, errors.New("recovery is available only on an escrowed instance"))
+	var req struct {
+		Reason     string `json:"reason"`
+		GranteeSub string `json:"grantee_sub"`
+		TTLSeconds int64  `json:"ttl_seconds"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusNotImplemented, map[string]any{
-		"error": "the recover_tenant enforcement gate (approver quorum + step-up + unwrap + grant) is not yet enabled",
-		"code":  "recovery_gate_pending",
+	rec, status, err := s.requestRecovery(r.Context(), p, r.PathValue("tenantID"), req.Reason, req.GranteeSub, req.TTLSeconds)
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, status, map[string]any{
+		"recovery_id":     rec.ID,
+		"status":          rec.Status,
+		"ceremony_handle": s.ceremonyHandle(rec.ID),
+		"digest_hex":      recoveryDigest(rec.ID, rec.TenantID, rec.GranteeSub, rec.Reason),
+		"expires_at":      rec.ExpiresAt,
 	})
+}
+
+// handleApproveRecovery records one approval (the approval token is the
+// authority) and executes at quorum.
+func (s *Server) handleApproveRecovery(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		ApprovalToken string `json:"approval_token"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, status, err := s.approveRecovery(r.Context(), p, r.PathValue("tenantID"), r.PathValue("recoveryID"), req.ApprovalToken)
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, status, out)
+}
+
+// handleRecoveryStatus reports a recovery's progress.
+func (s *Server) handleRecoveryStatus(w http.ResponseWriter, r *http.Request, p *Principal) {
+	out, status, err := s.recoveryStatus(r.Context(), p, r.PathValue("tenantID"), r.PathValue("recoveryID"))
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, status, out)
 }
 
 // handleAudit returns the tenant's append-only security audit (escrow,

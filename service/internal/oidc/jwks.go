@@ -102,7 +102,7 @@ func (v *JWKSVerifier) Verify(ctx context.Context, token string) (*Identity, err
 		}
 	}
 
-	id := &Identity{Issuer: v.issuer, Audience: v.audience, Roles: rolesClaim(claims)}
+	id := &Identity{Issuer: v.issuer, Audience: v.audience, Roles: rolesClaim(claims), Claims: claims}
 	id.Sub, _ = claims["sub"].(string)
 	id.Email, _ = claims["email"].(string)
 	id.SID, _ = claims["sid"].(string)

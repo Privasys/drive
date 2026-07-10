@@ -244,6 +244,38 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate audit: %w", err)
 		}
 	}
+	// Escrowed-mode recovery requests + their approvals. Approvals are
+	// unique per (recovery, approver) and per presented token (jti), so
+	// one approver or one captured token can never satisfy the quorum.
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS recoveries (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			grantee_sub TEXT NOT NULL,
+			ttl_seconds INTEGER NOT NULL,
+			nonce TEXT NOT NULL,
+			requested_by TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			grant_id TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			expires_at TIMESTAMP NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS recoveries_tenant ON recoveries(tenant_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS recovery_approvals (
+			recovery_id TEXT NOT NULL,
+			approver_sub TEXT NOT NULL,
+			jti TEXT NOT NULL DEFAULT '',
+			at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (recovery_id, approver_sub)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS recovery_approvals_jti
+			ON recovery_approvals(jti) WHERE jti != ''`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migrate recoveries: %w", err)
+		}
+	}
 	return nil
 }
 

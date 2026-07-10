@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+
+	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
 // toolMaxBytes caps JSON-carried file content (both directions). Larger
@@ -32,7 +34,105 @@ func (s *Server) Tools() http.Handler {
 	mux.Handle("POST /tools/set_bucket_cred", s.auth(s.toolSetBucketCred))
 	mux.Handle("POST /tools/get_bucket_cred", s.auth(s.toolGetBucketCred))
 	mux.Handle("POST /tools/delete_bucket_cred", s.auth(s.toolDeleteBucketCred))
+	mux.Handle("POST /tools/provision_org_mek", s.auth(s.toolProvisionOrgMEK))
+	mux.Handle("POST /tools/request_recovery", s.auth(s.toolRequestRecovery))
+	mux.Handle("POST /tools/approve_recovery", s.auth(s.toolApproveRecovery))
+	mux.Handle("POST /tools/recovery_status", s.auth(s.toolRecoveryStatus))
 	return mux
+}
+
+// toolProvisionOrgMEK creates MEK_org for an escrowed instance from a
+// key-creation grant bundle the org admin fetched from the control
+// plane. The grant itself is the authorisation (IdP-signed, app-bound,
+// owner = the org admin); the enclave generates the key, Shamir-splits
+// it to the constellation and returns the ref JSON to put in the
+// configure org_mek_ref field.
+func (s *Server) toolProvisionOrgMEK(w http.ResponseWriter, r *http.Request, p *Principal) {
+	if !p.IsUser() || p.Via != viaBearer {
+		httpError(w, http.StatusForbidden, errors.New("a full bearer identity is required"))
+		return
+	}
+	if s.MEKs == nil {
+		httpError(w, http.StatusNotImplemented, errors.New("vault-held keys are not available on this instance"))
+		return
+	}
+	var b vaultmek.Bundle
+	if err := readJSON(r, &b); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	ref, err := s.MEKs.Provision(r.Context(), b)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"org_mek_ref": vaultmek.RefJSON(ref),
+		"handle":      ref.Handle,
+	})
+}
+
+// toolRequestRecovery files an escrowed-mode recovery request.
+func (s *Server) toolRequestRecovery(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		TenantID   string `json:"tenant_id"`
+		Reason     string `json:"reason"`
+		GranteeSub string `json:"grantee_sub"`
+		TTLSeconds int64  `json:"ttl_seconds"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	rec, status, err := s.requestRecovery(r.Context(), p, req.TenantID, req.Reason, req.GranteeSub, req.TTLSeconds)
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"recovery_id":     rec.ID,
+		"status":          rec.Status,
+		"ceremony_handle": s.ceremonyHandle(rec.ID),
+		"digest_hex":      recoveryDigest(rec.ID, rec.TenantID, rec.GranteeSub, rec.Reason),
+		"expires_at":      rec.ExpiresAt,
+	})
+}
+
+// toolApproveRecovery delivers one approval token; executes at quorum.
+func (s *Server) toolApproveRecovery(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		TenantID      string `json:"tenant_id"`
+		RecoveryID    string `json:"recovery_id"`
+		ApprovalToken string `json:"approval_token"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, status, err := s.approveRecovery(r.Context(), p, req.TenantID, req.RecoveryID, req.ApprovalToken)
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, status, out)
+}
+
+// toolRecoveryStatus reports a recovery's progress.
+func (s *Server) toolRecoveryStatus(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		TenantID   string `json:"tenant_id"`
+		RecoveryID string `json:"recovery_id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, status, err := s.recoveryStatus(r.Context(), p, req.TenantID, req.RecoveryID)
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, status, out)
 }
 
 // toolMyDrive gets or creates the caller's personal tenant — the tool

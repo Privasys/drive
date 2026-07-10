@@ -340,6 +340,70 @@
             }
         },
         {
+            "name": "provision_org_mek",
+            "title": "Provision the org master key (escrowed mode)",
+            "endpoint": "/tools/provision_org_mek",
+            "description": "Create MEK_org for an escrowed instance from a key-creation grant bundle fetched from the control plane. The grant is the authorisation (IdP-signed, bound to this app, owned by the org admin); the enclave generates the key and Shamir-splits it across the vault constellation. Returns the org_mek_ref JSON to set via the configure tool. The key material never leaves confidential hardware.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "grant": { "type": "string", "description": "The IdP-signed key-creation grant." },
+                    "handle": { "type": "string", "description": "The key handle from the grant response (handle_hint)." },
+                    "endpoints": { "type": "array", "items": { "type": "string" }, "description": "Constellation vault endpoints." },
+                    "mrenclave": { "type": "string", "description": "Expected vault MRENCLAVE (hex)." },
+                    "attestation_server": { "type": "string", "description": "Attestation server verify endpoint." },
+                    "attestation_token": { "type": "string", "description": "aud=attestation-server bearer for quote verification." },
+                    "threshold": { "type": "integer", "description": "Shamir threshold (k)." }
+                },
+                "required": ["grant", "handle", "endpoints"]
+            }
+        },
+        {
+            "name": "request_recovery",
+            "title": "Request tenant recovery (escrowed mode)",
+            "endpoint": "/tools/request_recovery",
+            "description": "File an escrowed-mode recovery request for a tenant. Only a policy-permitted requester may file one; it grants nothing by itself. The configured approver quorum must then approve (approve_recovery); at quorum the enclave unwraps the tenant key from its escrow wrap under MEK_org and mints a TIME-BOUNDED tenant-wide read grant for the grantee. Every step is audited and disclosed to the affected tenant.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "The tenant to recover." },
+                    "reason": { "type": "string", "description": "Why this recovery is needed (audited, disclosed to the tenant)." },
+                    "grantee_sub": { "type": "string", "description": "The subject who receives the time-bounded read grant." },
+                    "ttl_seconds": { "type": "integer", "description": "Read-grant lifetime in seconds (default 86400, max 7 days)." }
+                },
+                "required": ["tenant_id", "reason", "grantee_sub"]
+            }
+        },
+        {
+            "name": "approve_recovery",
+            "title": "Approve a pending recovery",
+            "endpoint": "/tools/approve_recovery",
+            "description": "Deliver one approver's approval for a pending recovery. On privasys.id the token must come from the operation-bound WebAuthn ceremony (the approver's wallet signs the recovery digest); on an org IdP a fresh bearer from the configured issuer is accepted. One approval per approver, single-use tokens. Executes automatically when the quorum is reached.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "The tenant under recovery." },
+                    "recovery_id": { "type": "string", "description": "The pending recovery id." },
+                    "approval_token": { "type": "string", "description": "The approver's token (ceremony token on privasys.id; fresh issuer bearer otherwise)." }
+                },
+                "required": ["tenant_id", "recovery_id", "approval_token"]
+            }
+        },
+        {
+            "name": "recovery_status",
+            "title": "Recovery status",
+            "endpoint": "/tools/recovery_status",
+            "description": "Report a recovery's progress: status, approvals vs quorum, and the ceremony parameters (handle + digest) an approver needs to run the WebAuthn approval.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "The tenant under recovery." },
+                    "recovery_id": { "type": "string", "description": "The recovery id." }
+                },
+                "required": ["tenant_id", "recovery_id"]
+            }
+        },
+        {
             "name": "delete_bucket_cred",
             "title": "Remove BYO bucket credential",
             "endpoint": "/tools/delete_bucket_cred",

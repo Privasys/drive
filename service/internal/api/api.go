@@ -68,6 +68,10 @@ type Server struct {
 
 	backendsOnce sync.Once
 	backends     *tenantBackends
+
+	// recVer caches per-issuer JWKS verifiers for recovery approvals.
+	recVerMu sync.Mutex
+	recVer   map[string]oidc.Verifier
 }
 
 // authVia records how a principal authenticated.
@@ -190,6 +194,8 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/quota", s.auth(s.handleQuota))
 	mux.Handle("GET /v1/tenants/{tenantID}/audit", s.auth(s.handleAudit))
 	mux.Handle("POST /v1/tenants/{tenantID}/recover", s.auth(s.handleRecoverTenant))
+	mux.Handle("POST /v1/tenants/{tenantID}/recover/{recoveryID}/approve", s.auth(s.handleApproveRecovery))
+	mux.Handle("GET /v1/tenants/{tenantID}/recover/{recoveryID}", s.auth(s.handleRecoveryStatus))
 	mux.Handle("POST /v1/tenants/{tenantID}/exports", s.auth(s.handleExport))
 
 	mux.Handle("PUT /v1/tenants/{tenantID}/bucket-cred", s.auth(s.handleSetBucketCred))
