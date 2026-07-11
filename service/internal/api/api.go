@@ -191,6 +191,15 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/permissions", s.auth(s.handleNodePermissions))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/grants/{grantID}", s.auth(s.handleRevokeGrant))
+	// Share links: owner mints/lists on a node (revoke reuses the grant
+	// route above, since a link is a grant); the recipient resolves and
+	// redeems by link id after signing in.
+	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/links", s.auth(s.handleCreateLink))
+	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/links", s.auth(s.handleListLinks))
+	mux.Handle("POST /v1/links/{linkID}/resolve", s.auth(s.handleResolveLink))
+	mux.Handle("POST /v1/links/{linkID}/redeem", s.auth(s.handleRedeemLink))
+	mux.Handle("GET /v1/tenants/{tenantID}/link-requests", s.auth(s.handleListLinkRequests))
+	mux.Handle("POST /v1/tenants/{tenantID}/link-requests/{reqID}/{decision}", s.auth(s.handleDecideLinkRequest))
 	mux.Handle("GET /v1/tenants/{tenantID}/changes", s.auth(s.handleChanges))
 	mux.Handle("GET /v1/tenants/{tenantID}/quota", s.auth(s.handleQuota))
 	mux.Handle("GET /v1/tenants/{tenantID}/audit", s.auth(s.handleAudit))

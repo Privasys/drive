@@ -301,6 +301,33 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate recoveries: %w", err)
 		}
 	}
+	// Restricted-link access requests. A visitor who redeems a
+	// "restricted" share link lands here (status 'pending') with the
+	// attributes they presented; the owner approves or denies. Approval
+	// mints a per-recipient grant. Node-scoped, cascades with the link.
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS link_requests (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+			link_id TEXT NOT NULL,
+			node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+			requester_sub TEXT NOT NULL,
+			attributes TEXT NOT NULL DEFAULT '',
+			scope TEXT NOT NULL DEFAULT 'read',
+			status TEXT NOT NULL DEFAULT 'pending',
+			grant_id TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			decided_at TIMESTAMP,
+			decided_by TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS link_requests_tenant ON link_requests(tenant_id, status, created_at)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS link_requests_pending
+			ON link_requests(link_id, requester_sub) WHERE status = 'pending'`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migrate link_requests: %w", err)
+		}
+	}
 	return nil
 }
 
