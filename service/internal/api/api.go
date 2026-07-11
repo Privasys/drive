@@ -186,6 +186,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/tenants/{tenantID}/files", s.auth(s.handleUploadFile))
 	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}", s.auth(s.handleDownloadFile))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}", s.auth(s.handleDeleteNode))
+	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/move", s.auth(s.handleMoveNode))
 
 	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/acl", s.auth(s.handleSetNodeACL))
 	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/permissions", s.auth(s.handleNodePermissions))

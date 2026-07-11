@@ -399,6 +399,59 @@ func (s *Store) DeleteNode(ctx context.Context, tenantID, id, actor string) erro
 	return tx.Commit()
 }
 
+// MoveNode reparents a node under newParentID ("" = the tenant root). The
+// name HMAC is over the name only, so the per-parent unique-name index
+// enforces name collisions in the destination (returned as ErrConflict); a
+// folder cannot be moved into itself or one of its own descendants. actor
+// is recorded on the change feed.
+func (s *Store) MoveNode(ctx context.Context, tenantID, id, newParentID, actor string) error {
+	n, err := s.GetNode(ctx, tenantID, id)
+	if err != nil {
+		return err
+	}
+	cur := ""
+	if n.ParentID.Valid {
+		cur = n.ParentID.String
+	}
+	if cur == newParentID {
+		return nil // already there
+	}
+	if newParentID != "" {
+		parent, err := s.GetNode(ctx, tenantID, newParentID)
+		if err != nil {
+			return err
+		}
+		if parent.Kind != NodeFolder {
+			return fmt.Errorf("%w: target is not a folder", ErrInvalidInput)
+		}
+		if n.Kind == NodeFolder {
+			inside, derr := s.IsDescendantOrSelf(ctx, tenantID, id, newParentID)
+			if derr != nil {
+				return derr
+			}
+			if inside {
+				return fmt.Errorf("%w: cannot move a folder into itself", ErrInvalidInput)
+			}
+		}
+	}
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE nodes SET parent_id = ?, updated_at = ? WHERE tenant_id = ? AND id = ?`),
+		nullableString(newParentID), Now(), tenantID, id)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrConflict
+		}
+		return err
+	}
+	if aff, _ := res.RowsAffected(); aff == 0 {
+		return ErrNotFound
+	}
+	_, _ = s.DB.ExecContext(ctx, s.q(
+		`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'move', ?)`),
+		tenantID, id, actor)
+	return nil
+}
+
 // TenantUsageBytes returns the total plaintext bytes stored by a tenant
 // (the sum of file sizes; folders are 0). Used for quota enforcement.
 func (s *Store) TenantUsageBytes(ctx context.Context, tenantID string) (int64, error) {
