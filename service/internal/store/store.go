@@ -48,10 +48,10 @@ const (
 
 // Tenant is a Drive tenant — User OR Enterprise.
 type Tenant struct {
-	ID        string
-	Kind      TenantKind
-	Name      string
-	CreatedAt time.Time
+	ID        string     `json:"id"`
+	Kind      TenantKind `json:"kind"`
+	Name      string     `json:"name"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 // Member is a member of an Enterprise tenant.
