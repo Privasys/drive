@@ -12,7 +12,7 @@ import (
 
 func newSQLiteStore(t *testing.T) *Store {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sql.Open("sqlite", "file::memory:?_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -108,7 +108,7 @@ func (r *Repo) Create(ctx context.Context, g *Grant) error {
 		`INSERT INTO grants(id, tenant_id, node_id, subject, scope, created_by,
 		                    created_at, expires_at, revoked_at, binding_pubkey, meta)
 		 VALUES (?,?,?,?,?,?,?,?,NULL,?,?)`),
-		g.ID, g.TenantID, g.NodeID, g.Subject, scope, g.CreatedBy,
+		g.ID, g.TenantID, nullableString(g.NodeID), g.Subject, scope, g.CreatedBy,
 		g.CreatedAt, exp, nullableString(g.BindingPubkey), nullableString(g.Meta))
 	return err
 }
@@ -143,13 +143,21 @@ func (r *Repo) Revoke(ctx context.Context, tenantID, id string) error {
 
 // ActiveForSubjectOnNode returns the active grant that shares nodeID
 // (in tenantID) with a given recipient subject, or (nil, nil) when none
-// exists. Used to authorise a recipient's read of a shared node.
+// exists. Used to authorise a recipient's read of a shared node. An
+// empty nodeID means the tenant-wide grant (stored as NULL node_id,
+// e.g. an escrowed recovery), matched with IS NULL.
 func (r *Repo) ActiveForSubjectOnNode(ctx context.Context, tenantID, nodeID, subject string) (*Grant, error) {
+	nodeClause := "node_id = ?"
+	args := []any{tenantID, nodeID, SubjectUser + subject}
+	if nodeID == "" {
+		nodeClause = "node_id IS NULL"
+		args = []any{tenantID, SubjectUser + subject}
+	}
 	rows, err := r.DB.QueryContext(ctx, r.q(
 		`SELECT id, tenant_id, node_id, subject, scope, created_by, created_at,
 		        expires_at, revoked_at, binding_pubkey, meta
-		 FROM grants WHERE tenant_id = ? AND node_id = ? AND subject = ? AND revoked_at IS NULL`),
-		tenantID, nodeID, SubjectUser+subject)
+		 FROM grants WHERE tenant_id = ? AND `+nodeClause+` AND subject = ? AND revoked_at IS NULL`),
+		args...)
 	if err != nil {
 		return nil, err
 	}
@@ -218,16 +226,18 @@ func (r *Repo) ListForNode(ctx context.Context, tenantID, nodeID string) ([]*Gra
 func scanGrant(rows *sql.Rows) (*Grant, error) {
 	var (
 		g          Grant
+		nodeID     sql.NullString // NULL for tenant-wide grants
 		scope      string
 		expires    sql.NullTime
 		revoked    sql.NullTime
 		bindingKey sql.NullString
 		meta       sql.NullString
 	)
-	if err := rows.Scan(&g.ID, &g.TenantID, &g.NodeID, &g.Subject, &scope, &g.CreatedBy,
+	if err := rows.Scan(&g.ID, &g.TenantID, &nodeID, &g.Subject, &scope, &g.CreatedBy,
 		&g.CreatedAt, &expires, &revoked, &bindingKey, &meta); err != nil {
 		return nil, err
 	}
+	g.NodeID = nodeID.String // "" when NULL (tenant-wide)
 	g.Scope = splitScopes(scope)
 	if expires.Valid {
 		t := expires.Time

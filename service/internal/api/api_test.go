@@ -22,7 +22,7 @@ import (
 
 func newTestServer(t *testing.T) (*httptest.Server, *Server) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sql.Open("sqlite", "file::memory:?_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}

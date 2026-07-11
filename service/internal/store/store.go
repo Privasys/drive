@@ -177,14 +177,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS nodes_unique_name
 			ON nodes(tenant_id, (COALESCE(parent_id,'')), name_hmac)`,
 		`CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(tenant_id, parent_id)`,
-		// node_id is NOT foreign-keyed to nodes: a recovery mints a
-		// tenant-wide grant with node_id "" (no node), and a grant may
-		// outlive its node. Validity is enforced in the API layer
-		// (hasReadShare walks node→root), not by the FK.
+		// node_id is nullable and foreign-keyed to nodes: a node-scoped
+		// share references a real node (FK-enforced, cascades on node
+		// delete), and a tenant-wide grant (e.g. an escrowed recovery)
+		// stores NULL, which satisfies the FK.
 		`CREATE TABLE IF NOT EXISTS grants (
 			id TEXT PRIMARY KEY,
 			tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-			node_id TEXT NOT NULL,
+			node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
 			subject TEXT NOT NULL,
 			scope TEXT NOT NULL,
 			created_by TEXT NOT NULL,
@@ -248,14 +248,25 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate audit: %w", err)
 		}
 	}
-	// Drop the legacy node_id foreign key on existing Postgres
-	// deployments so tenant-wide recovery grants (node_id "") are
-	// allowed. Postgres-only (SQLite never enforced it and has no
-	// DROP CONSTRAINT).
+	// Reconcile the grants.node_id foreign key on existing Postgres
+	// deployments: make it nullable, normalise the legacy tenant-wide
+	// sentinel ("") to NULL, and (re-)assert the FK so node-scoped
+	// shares stay referentially intact. SQLite never enforced FKs and
+	// has no ALTER for constraints, so this is Postgres-only; a fresh
+	// SQLite/Postgres DB gets the correct shape from CREATE above.
 	if s.Dialect == DialectPostgres {
-		if _, err := s.DB.ExecContext(ctx,
-			`ALTER TABLE grants DROP CONSTRAINT IF EXISTS grants_node_id_fkey`); err != nil {
-			return fmt.Errorf("migrate grants fk: %w", err)
+		stmts := []string{
+			`ALTER TABLE grants ALTER COLUMN node_id DROP NOT NULL`,
+			`UPDATE grants SET node_id = NULL WHERE node_id = ''`,
+			// Idempotent re-add: drop any prior FK, then add the current one.
+			`ALTER TABLE grants DROP CONSTRAINT IF EXISTS grants_node_id_fkey`,
+			`ALTER TABLE grants ADD CONSTRAINT grants_node_id_fkey
+			   FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE`,
+		}
+		for _, stmt := range stmts {
+			if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("migrate grants fk: %w (stmt: %s)", err, stmt)
+			}
 		}
 	}
 	// Escrowed-mode recovery requests + their approvals. Approvals are
