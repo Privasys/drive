@@ -399,6 +399,42 @@ func (s *Store) DeleteNode(ctx context.Context, tenantID, id, actor string) erro
 	return tx.Commit()
 }
 
+// ListTenantFiles returns every file node of a tenant (id + wrapped CEK),
+// for bulk chunk cleanup during a tenant purge.
+func (s *Store) ListTenantFiles(ctx context.Context, tenantID string) ([]*Node, error) {
+	rows, err := s.DB.QueryContext(ctx, s.q(
+		`SELECT id, tenant_id, parent_id, kind, name, name_hmac, mime_hint, plain_size,
+		        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at
+		 FROM nodes WHERE tenant_id = ? AND kind = 'file'`), tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// DeleteTenant removes a tenant row; nodes, members, grants and link
+// requests cascade via their foreign keys. Audit rows are append-only
+// and deliberately survive (the purge itself is audited).
+func (s *Store) DeleteTenant(ctx context.Context, tenantID string) error {
+	res, err := s.DB.ExecContext(ctx, s.q(`DELETE FROM tenants WHERE id = ?`), tenantID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // MoveNode reparents a node under newParentID ("" = the tenant root). The
 // name HMAC is over the name only, so the per-parent unique-name index
 // enforces name collisions in the destination (returned as ErrConflict); a

@@ -38,6 +38,7 @@ func (s *Server) Tools() http.Handler {
 	mux.Handle("POST /tools/request_recovery", s.auth(s.toolRequestRecovery))
 	mux.Handle("POST /tools/approve_recovery", s.auth(s.toolApproveRecovery))
 	mux.Handle("POST /tools/recovery_status", s.auth(s.toolRecoveryStatus))
+	mux.Handle("POST /tools/purge_tenant", s.auth(s.toolPurgeTenant))
 	return mux
 }
 

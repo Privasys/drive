@@ -418,6 +418,27 @@
                 },
                 "required": ["tenant_id"]
             }
+        },
+        {
+            "name": "purge_tenant",
+            "role": "config",
+            "title": "Purge an unreachable tenant",
+            "endpoint": "/tools/purge_tenant",
+            "description": "Permanently remove a tenant: sealed chunks (best effort), then the index (folders, files, members, grants and pending link requests). For tenants nobody can unlock any more, typically after an identity rotation on a sovereign instance, or for offboarding. Instance operator (app owner/admin) only; the purge is recorded in the append-only audit log, which survives the tenant. Irreversible.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant to purge."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why the tenant is being purged (audited)."
+                    }
+                },
+                "required": ["tenant_id", "reason"]
+            }
         }
     ]
 }
