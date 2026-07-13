@@ -36,10 +36,16 @@ import (
 // existing download path to serve the file.
 
 type linkMeta struct {
-	SecretHash string   `json:"secret_hash"`         // hex(SHA-256(secret bytes))
-	Mode       string   `json:"mode"`                // open | restricted
-	Attrs      []string `json:"attrs,omitempty"`     // restricted: required attributes
-	Label      string   `json:"label,omitempty"`     // owner's note
+	SecretHash string `json:"secret_hash"` // hex(SHA-256(secret bytes)), constant-time verified
+	// Secret keeps the raw-url-b64 fragment secret so the OWNER can re-copy
+	// the full link later ("Active links"). The index already lives in
+	// plaintext inside the enclave on the sealed volume, so this adds no
+	// exposure beyond what node names have; it is only ever returned on the
+	// owner-gated list endpoint. Absent on links minted before it existed.
+	Secret string   `json:"secret,omitempty"`
+	Mode   string   `json:"mode"`            // open | restricted
+	Attrs  []string `json:"attrs,omitempty"` // restricted: required attributes
+	Label  string   `json:"label,omitempty"` // owner's note
 }
 
 const (
@@ -104,7 +110,7 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Pri
 	}
 	secret := base64.RawURLEncoding.EncodeToString(secretBytes)
 	sum := sha256.Sum256(secretBytes)
-	meta := linkMeta{SecretHash: hex.EncodeToString(sum[:]), Mode: mode, Label: req.Label}
+	meta := linkMeta{SecretHash: hex.EncodeToString(sum[:]), Secret: secret, Mode: mode, Label: req.Label}
 	if mode == linkModeRestricted {
 		meta.Attrs = req.RequiredAttributes
 	}
@@ -154,6 +160,9 @@ type linkView struct {
 	CreatedAt          string   `json:"created_at"`
 	ExpiresAt          *string  `json:"expires_at,omitempty"`
 	Revoked            bool     `json:"revoked"`
+	// Secret lets the owner re-copy the full link; empty for links minted
+	// before secrets were kept. This endpoint is canShare-gated.
+	Secret string `json:"secret,omitempty"`
 }
 
 func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -180,6 +189,7 @@ func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request, p *Prin
 			Label: meta.Label, RequiredAttributes: meta.Attrs,
 			CreatedAt: g.CreatedAt.UTC().Format(time.RFC3339),
 			Revoked:   g.RevokedAt != nil,
+			Secret:    meta.Secret,
 		}
 		if g.ExpiresAt != nil {
 			iso := g.ExpiresAt.UTC().Format(time.RFC3339)
@@ -312,6 +322,22 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 		}
 		writeJSON(w, http.StatusOK, redeemResult("granted", g, n, ""))
 	case linkModeRestricted:
+		// Every required attribute must be presented, else no request is
+		// filed: a half-empty request would push an undecidable card at
+		// the owner. The front tells the visitor what is missing.
+		var missing []string
+		for _, k := range meta.Attrs {
+			if strings.TrimSpace(req.Attributes[k]) == "" {
+				missing = append(missing, k)
+			}
+		}
+		if len(missing) > 0 {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error":              "missing required attributes: " + strings.Join(missing, ", "),
+				"missing_attributes": missing,
+			})
+			return
+		}
 		attrJSON, _ := json.Marshal(req.Attributes)
 		lr := &store.LinkRequest{
 			TenantID: g.TenantID, LinkID: g.ID, NodeID: g.NodeID,

@@ -168,6 +168,32 @@ func TestRestrictedLinkShare(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Redeeming WITHOUT the required attribute files nothing.
+	code, b = doReq(t, bearerReq(t, "POST",
+		fmt.Sprintf("%s/v1/links/%s/redeem", ts.URL, link.ID), recipient,
+		`{"secret":"`+link.Secret+`"}`))
+	if code != http.StatusForbidden {
+		t.Fatalf("redeem without attrs: want 403, got %d %s", code, b)
+	}
+
+	// The owner can re-copy the link: the list returns the secret.
+	code, b = doReq(t, bearerReq(t, "GET",
+		fmt.Sprintf("%s/v1/tenants/%s/nodes/%s/links", ts.URL, tenantID, nodeID), owner, ""))
+	if code != 200 {
+		t.Fatalf("list links: %d %s", code, b)
+	}
+	var ll struct {
+		Links []struct {
+			Secret string `json:"secret"`
+		} `json:"links"`
+	}
+	if err := json.Unmarshal(b, &ll); err != nil {
+		t.Fatal(err)
+	}
+	if len(ll.Links) != 1 || ll.Links[0].Secret != link.Secret {
+		t.Fatalf("list did not return the secret: %s", b)
+	}
+
 	// Recipient redeems with attributes -> pending, no access yet.
 	code, b = doReq(t, bearerReq(t, "POST",
 		fmt.Sprintf("%s/v1/links/%s/redeem", ts.URL, link.ID), recipient,
