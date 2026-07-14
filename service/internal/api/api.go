@@ -66,6 +66,10 @@ type Server struct {
 	cfgMu sync.RWMutex
 	cfg   *config.Config
 
+	// uploads holds in-flight chunked upload sessions (large files
+	// arrive as sequential sealed parts staged on /data).
+	uploads uploadRegistry
+
 	backendsOnce sync.Once
 	backends     *tenantBackends
 
@@ -180,10 +184,19 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/shared", s.auth(s.handleSharedWithMe))
 	mux.Handle("POST /v1/tenants", s.auth(s.handleCreateTenant))
 	mux.Handle("POST /v1/tenants/{tenantID}/members", s.auth(s.handleAddMember))
+	mux.Handle("GET /v1/tenants/{tenantID}/members", s.auth(s.handleListMembers))
+	mux.Handle("PATCH /v1/tenants/{tenantID}/members/{sub}", s.auth(s.handleSetMemberRole))
+	mux.Handle("DELETE /v1/tenants/{tenantID}/members/{sub}", s.auth(s.handleRemoveMember))
 	mux.Handle("POST /v1/tenants/{tenantID}/folders", s.auth(s.handleCreateFolder))
 	mux.Handle("GET /v1/tenants/{tenantID}/folders/{folderID}", s.auth(s.handleListFolder))
 	mux.Handle("GET /v1/tenants/{tenantID}/root", s.auth(s.handleListRoot))
 	mux.Handle("POST /v1/tenants/{tenantID}/files", s.auth(s.handleUploadFile))
+	// Chunked uploads: large files arrive as an upload session with
+	// sequential parts, finalized through the same seal path.
+	mux.Handle("POST /v1/tenants/{tenantID}/uploads", s.auth(s.handleCreateUpload))
+	mux.Handle("PUT /v1/tenants/{tenantID}/uploads/{uploadID}/chunks/{index}", s.auth(s.handleUploadPart))
+	mux.Handle("POST /v1/tenants/{tenantID}/uploads/{uploadID}/finalize", s.auth(s.handleFinalizeUpload))
+	mux.Handle("DELETE /v1/tenants/{tenantID}/uploads/{uploadID}", s.auth(s.handleAbortUpload))
 	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}", s.auth(s.handleDownloadFile))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}", s.auth(s.handleDeleteNode))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/move", s.auth(s.handleMoveNode))

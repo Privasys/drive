@@ -82,6 +82,51 @@ func (s *Store) AddMember(ctx context.Context, m *Member) error {
 	return err
 }
 
+// ListMembers returns a tenant's members with their roles.
+func (s *Store) ListMembers(ctx context.Context, tenantID string) ([]*Member, error) {
+	rows, err := s.DB.QueryContext(ctx, s.q(
+		`SELECT tenant_id, user_sub, role FROM members WHERE tenant_id = ? ORDER BY user_sub`),
+		tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Member
+	for rows.Next() {
+		var m Member
+		var role string
+		if err := rows.Scan(&m.TenantID, &m.UserSub, &role); err != nil {
+			return nil, err
+		}
+		m.Role = MemberRole(role)
+		out = append(out, &m)
+	}
+	return out, rows.Err()
+}
+
+// RemoveMember drops a member from a tenant.
+func (s *Store) RemoveMember(ctx context.Context, tenantID, userSub string) error {
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`DELETE FROM members WHERE tenant_id = ? AND user_sub = ?`), tenantID, userSub)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// CountOwners returns how many members hold the owner role — the guard
+// against removing or demoting a tenant's last owner.
+func (s *Store) CountOwners(ctx context.Context, tenantID string) (int, error) {
+	var n int
+	err := s.DB.QueryRowContext(ctx, s.q(
+		`SELECT COUNT(*) FROM members WHERE tenant_id = ? AND role = ?`),
+		tenantID, string(RoleOwner)).Scan(&n)
+	return n, err
+}
+
 // SwitchTenantKeys atomically migrates a tenant to a new master key:
 // rewrap mutates each node in place (re-wrapped CEK for files, fresh
 // name HMAC for every node), and the tenant's mek_ref is committed in
