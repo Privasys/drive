@@ -623,7 +623,7 @@
             "name": "search_semantic",
             "title": "Semantic search (agentic RAG)",
             "endpoint": "/tools/search_semantic",
-            "description": "Search a tenant's drive semantically over the in-enclave embeddings index and get scored snippets with node back-pointers; follow up with read_file on a hit to retrieve the source. Files are indexed by default at upload (owners can exclude folders or individual files), so the drive doubles as a permissioned RAG store for agents.",
+            "description": "Search a tenant's drive semantically over the in-enclave embeddings index. Every hit carries provenance: node_id, section_id, section_path (title chain) and char range, so a consumer can cite which files and which parts of them an answer used. Follow up with get_doc_tree to see a file's structure, read_section for a whole section, or read_file for the full content.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -643,6 +643,57 @@
                 "required": [
                     "tenant_id",
                     "query"
+                ]
+            }
+        },
+        {
+            "name": "get_doc_tree",
+            "title": "Document structure (table of contents)",
+            "endpoint": "/tools/get_doc_tree",
+            "description": "Return a file's section tree: titles, depth, char (and page, when known) ranges, and section summaries when present. The agent's table of contents for hierarchical retrieval: navigate the tree, then call read_section on the relevant entries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant the file belongs to."
+                    },
+                    "file_id": {
+                        "type": "string",
+                        "description": "The file node id."
+                    }
+                },
+                "required": [
+                    "tenant_id",
+                    "file_id"
+                ]
+            }
+        },
+        {
+            "name": "read_section",
+            "title": "Read one document section",
+            "endpoint": "/tools/read_section",
+            "description": "Return one whole section's text with provenance (title, char and page range). Whole sections beat fragments as answer context; use after get_doc_tree or a search_semantic hit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant the file belongs to."
+                    },
+                    "file_id": {
+                        "type": "string",
+                        "description": "The file node id."
+                    },
+                    "section_id": {
+                        "type": "integer",
+                        "description": "The section id from get_doc_tree or a search hit."
+                    }
+                },
+                "required": [
+                    "tenant_id",
+                    "file_id",
+                    "section_id"
                 ]
             }
         }

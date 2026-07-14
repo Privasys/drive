@@ -45,16 +45,81 @@ func TestChunkCoversAndOverlaps(t *testing.T) {
 	if !strings.Contains(chunks[len(chunks)-1], "delta") {
 		t.Fatalf("tail lost")
 	}
-	if Chunk("") != nil {
+	if len(Chunk("")) != 0 {
 		t.Fatalf("empty text should yield no chunks")
+	}
+}
+
+func TestChunkRangeAnchors(t *testing.T) {
+	text := "prefix. " + strings.Repeat("body words here. ", 200) + "suffix."
+	spans := ChunkRange(text, 8, int64(len(text)))
+	if len(spans) < 2 {
+		t.Fatalf("want multiple spans, got %d", len(spans))
+	}
+	for _, sp := range spans {
+		if sp.Start < 8 || sp.End > int64(len(text)) || sp.Start >= sp.End {
+			t.Fatalf("bad anchors: %d..%d", sp.Start, sp.End)
+		}
+		// The anchored slice must contain the span text (the span is a
+		// trimmed cut of it).
+		if !strings.Contains(text[sp.Start:sp.End], strings.Fields(sp.Text)[0]) {
+			t.Fatalf("anchor mismatch")
+		}
+	}
+}
+
+func TestBuildSectionsMarkdown(t *testing.T) {
+	md := "intro line\n\n# One\nalpha\n\n## One-A\nbeta\n\n# Two\ngamma\n"
+	secs := BuildSections("doc.md", md)
+	// root + One + One-A + Two
+	if len(secs) != 4 {
+		t.Fatalf("want 4 sections, got %d: %+v", len(secs), secs)
+	}
+	if secs[0].ParentIdx != -1 || secs[0].Title != "doc" {
+		t.Fatalf("root: %+v", secs[0])
+	}
+	one, oneA, two := secs[1], secs[2], secs[3]
+	if one.Title != "One" || one.ParentIdx != 0 {
+		t.Fatalf("one: %+v", one)
+	}
+	if oneA.Title != "One-A" || oneA.ParentIdx != 1 {
+		t.Fatalf("one-a: %+v", oneA)
+	}
+	if two.Title != "Two" || two.ParentIdx != 0 {
+		t.Fatalf("two: %+v", two)
+	}
+	// "One" runs from its heading to the start of "Two".
+	if !strings.Contains(md[one.CharStart:one.CharEnd], "beta") ||
+		strings.Contains(md[one.CharStart:one.CharEnd], "gamma") {
+		t.Fatalf("one range wrong: %q", md[one.CharStart:one.CharEnd])
+	}
+	// Fenced code heading is not a section.
+	fenced := "# Real\n```\n# not a heading\n```\n"
+	if got := BuildSections("f.md", fenced); len(got) != 2 {
+		t.Fatalf("fenced: want 2, got %d", len(got))
+	}
+}
+
+func TestBuildSectionsFallback(t *testing.T) {
+	long := strings.Repeat("paragraph text here.\n\n", 800) // ~17k chars
+	secs := BuildSections("notes.txt", long)
+	if len(secs) < 3 { // root + >=2 parts
+		t.Fatalf("want size-based parts, got %d", len(secs))
+	}
+	if secs[1].Title != "Part 1" || secs[1].ParentIdx != 0 {
+		t.Fatalf("part: %+v", secs[1])
+	}
+	// Small file: single root section.
+	if got := BuildSections("s.txt", "tiny"); len(got) != 1 {
+		t.Fatalf("small: want 1, got %d", len(got))
 	}
 }
 
 func TestLocalEmbedderDeterministicAndDiscriminative(t *testing.T) {
 	e := LocalEmbedder{}
-	v1, _ := e.Embed(context.Background(), []string{"the quarterly finance report for acme"})
-	v2, _ := e.Embed(context.Background(), []string{"the quarterly finance report for acme"})
-	v3, _ := e.Embed(context.Background(), []string{"holiday photos from the beach trip"})
+	v1, _ := e.Embed(context.Background(), []string{"the quarterly finance report for acme"}, Document)
+	v2, _ := e.Embed(context.Background(), []string{"the quarterly finance report for acme"}, Document)
+	v3, _ := e.Embed(context.Background(), []string{"holiday photos from the beach trip"}, Document)
 	if len(v1[0]) != Dim {
 		t.Fatalf("dim %d", len(v1[0]))
 	}
@@ -67,7 +132,7 @@ func TestLocalEmbedderDeterministicAndDiscriminative(t *testing.T) {
 		t.Fatalf("unrelated texts not discriminated: same=%f diff=%f", same, diff)
 	}
 	// A related query should land closer than an unrelated one.
-	q, _ := e.Embed(context.Background(), []string{"finance report"})
+	q, _ := e.Embed(context.Background(), []string{"finance report"}, Query)
 	if cosine(q[0], v1[0]) <= cosine(q[0], v3[0]) {
 		t.Fatalf("related query not closer")
 	}
@@ -85,7 +150,9 @@ func cosine(a, b []float32) float64 {
 
 type fakeOps struct {
 	status   map[string]string
+	secs     map[string][]SectionSpec
 	rows     map[string][]EmbeddingRowInput
+	space    map[string]string
 	excluded map[string]bool
 }
 
@@ -98,19 +165,37 @@ func (f *fakeOps) HasNoIndexAncestor(_ context.Context, _, nodeID string) (bool,
 	return f.excluded[nodeID], nil
 }
 
-func (f *fakeOps) ReplaceEmbeddings(_ context.Context, _, nodeID string, rows []EmbeddingRowInput) error {
+func (f *fakeOps) ReplaceSections(_ context.Context, _, nodeID string, secs []SectionSpec) ([]int64, error) {
+	f.secs[nodeID] = secs
+	ids := make([]int64, len(secs))
+	for i := range ids {
+		ids[i] = int64(i + 1)
+	}
+	return ids, nil
+}
+
+func (f *fakeOps) ReplaceEmbeddings(_ context.Context, _, nodeID, space string, rows []EmbeddingRowInput) error {
 	f.rows[nodeID] = rows
+	f.space[nodeID] = space
 	return nil
 }
 
+func (f *fakeOps) ListPendingIndex(_ context.Context, _ int) ([][3]string, error) {
+	return nil, nil
+}
+
 func newFakeOps() *fakeOps {
-	return &fakeOps{status: map[string]string{}, rows: map[string][]EmbeddingRowInput{}, excluded: map[string]bool{}}
+	return &fakeOps{
+		status: map[string]string{}, secs: map[string][]SectionSpec{},
+		rows: map[string][]EmbeddingRowInput{}, space: map[string]string{},
+		excluded: map[string]bool{},
+	}
 }
 
 func TestIndexerLifecycle(t *testing.T) {
 	ops := newFakeOps()
 	content := map[string]string{
-		"n-text":  "the quarterly finance report shows revenue growth across regions",
+		"n-text":  "# Report\nthe quarterly finance report shows revenue growth\n\n# Annex\nregional numbers",
 		"n-empty": "",
 	}
 	ix := &Indexer{
@@ -118,14 +203,25 @@ func TestIndexerLifecycle(t *testing.T) {
 		Content: func(_ context.Context, _, nodeID string) (io.ReadCloser, error) {
 			return io.NopCloser(strings.NewReader(content[nodeID])), nil
 		},
-		Embedder: LocalEmbedder{},
+		Embedder: func() Embedder { return LocalEmbedder{} },
 		Sync:     true,
 	}
 
-	// Plain text: indexed with rows.
+	// Markdown: sections built + indexed with anchored rows.
 	ix.Enqueue("t1", "n-text", "report.md", "text/markdown")
 	if ops.status["n-text"] != "indexed" || len(ops.rows["n-text"]) == 0 {
 		t.Fatalf("text: status=%q rows=%d", ops.status["n-text"], len(ops.rows["n-text"]))
+	}
+	if len(ops.secs["n-text"]) != 3 { // root + Report + Annex
+		t.Fatalf("sections: %d", len(ops.secs["n-text"]))
+	}
+	if ops.space["n-text"] != (LocalEmbedder{}).Space() {
+		t.Fatalf("space: %q", ops.space["n-text"])
+	}
+	for _, r := range ops.rows["n-text"] {
+		if r.SectionID == nil || r.CharEnd <= r.CharStart {
+			t.Fatalf("row missing provenance: %+v", r)
+		}
 	}
 
 	// Video: skipped, no rows.
@@ -152,4 +248,32 @@ func TestIndexerLifecycle(t *testing.T) {
 	if ops.status["n-empty"] != "indexed" || len(ops.rows["n-empty"]) != 0 {
 		t.Fatalf("empty: status=%q rows=%d", ops.status["n-empty"], len(ops.rows["n-empty"]))
 	}
+}
+
+// TestIndexerParksPendingOnEmbedFailure: a failing embedder (fleet
+// down) must park the file pending, never write rows.
+func TestIndexerParksPendingOnEmbedFailure(t *testing.T) {
+	ops := newFakeOps()
+	ix := &Indexer{
+		Ops: ops,
+		Content: func(_ context.Context, _, _ string) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader("some indexable text")), nil
+		},
+		Embedder: func() Embedder { return failingEmbedder{} },
+		Sync:     true,
+	}
+	ix.Enqueue("t1", "n-fleetdown", "doc.txt", "text/plain")
+	if ops.status["n-fleetdown"] != "pending" {
+		t.Fatalf("want pending, got %q", ops.status["n-fleetdown"])
+	}
+	if len(ops.rows["n-fleetdown"]) != 0 {
+		t.Fatalf("rows written despite failure")
+	}
+}
+
+type failingEmbedder struct{}
+
+func (failingEmbedder) Space() string { return "fleet-test/1024/doc-noinstr/v1" }
+func (failingEmbedder) Embed(context.Context, []string, Mode) ([][]float32, error) {
+	return nil, io.ErrUnexpectedEOF
 }

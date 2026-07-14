@@ -8,20 +8,21 @@ import (
 	"unicode"
 )
 
-// LocalEmbedder is the CPU fallback used when the confidential-AI fleet
-// is unreachable or unconfigured. It is an INTERIM lexical embedder: a
-// deterministic random-projection ("hashing trick") of token and bigram
-// counts into Dim dimensions, L2-normalised. Cosine similarity then
-// approximates weighted term overlap — real recall for keyword-ish
-// queries, none of a neural model's paraphrase understanding. It exists
-// so the pipeline is complete and honest (green means searchable) until
-// a proper small embedding model is bundled; both sides of a query must
-// have been embedded by the same embedder for scores to be meaningful.
+// LocalEmbedder is the lexical space used ONLY while no fleet model is
+// configured (drive plan §8.4: once a real model exists, fleet failures
+// park files pending — the fallback never writes into a configured
+// deployment). It is a deterministic random-projection ("hashing
+// trick") of token and bigram counts into Dim dimensions,
+// L2-normalised: real recall for keyword-ish queries, none of a neural
+// model's paraphrase understanding. Its rows live in their own
+// embed_space and never mix with a model's.
 type LocalEmbedder struct{}
 
-func (LocalEmbedder) Name() string { return "local-lexical" }
+func (LocalEmbedder) Space() string { return "local-lexical/1024/v1" }
 
-func (LocalEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+// Embed ignores the mode: the lexical projection is symmetric (no
+// instruction asymmetry to honour).
+func (LocalEmbedder) Embed(_ context.Context, texts []string, _ Mode) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i, t := range texts {
 		out[i] = lexicalVector(t)

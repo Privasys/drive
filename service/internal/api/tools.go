@@ -40,6 +40,8 @@ func (s *Server) Tools() http.Handler {
 	mux.Handle("POST /tools/recovery_status", s.auth(s.toolRecoveryStatus))
 	mux.Handle("POST /tools/purge_tenant", s.auth(s.toolPurgeTenant))
 	mux.Handle("POST /tools/search_semantic", s.auth(s.toolSearchSemantic))
+	mux.Handle("POST /tools/get_doc_tree", s.auth(s.toolDocTree))
+	mux.Handle("POST /tools/read_section", s.auth(s.toolReadSection))
 	return mux
 }
 

@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/Privasys/drive/service/internal/crypto"
-	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/manifest"
 	"github.com/Privasys/drive/service/internal/search"
 	"github.com/Privasys/drive/service/internal/store"
@@ -19,7 +18,8 @@ import (
 // default; a folder marked non-searchable excludes its subtree, an
 // explicit index=false at upload excludes one file, and non-text types
 // skip. The indexer runs in-process; embeddings go to pgvector rows in
-// the same DB as the node index.
+// the same DB as the node index, anchored to a deterministic section
+// tree for provenance.
 
 var (
 	indexerOnce sync.Once
@@ -27,17 +27,34 @@ var (
 )
 
 // indexer lazily builds the singleton background indexer. The embedder
-// chain resolves the CURRENT config on every call, so configure changes
+// resolves from the CURRENT config on every run, so configure changes
 // (fleet endpoint) apply without a restart.
 func (s *Server) indexer() *search.Indexer {
 	indexerOnce.Do(func() {
 		indexerRef = &search.Indexer{
 			Ops:      indexOps{s.Store},
 			Content:  s.indexContent,
-			Embedder: &dynamicEmbedder{s: s},
+			Embedder: s.activeEmbedder,
 		}
 	})
 	return indexerRef
+}
+
+// activeEmbedder resolves the embedding backend per §8.4: the
+// configured fleet model when one exists (its failures park files
+// pending — the lexical space never pollutes a configured deployment),
+// the lexical space only until then.
+func (s *Server) activeEmbedder() search.Embedder {
+	if cfg := s.CurrentConfig(); cfg != nil && cfg.EmbeddingsBaseURL != "" {
+		model := cfg.EmbeddingsModel
+		if model == "" {
+			model = "qwen3-embedding-0.6b"
+		}
+		return &search.FleetEmbedder{
+			BaseURL: cfg.EmbeddingsBaseURL, Model: model, APIKey: cfg.EmbeddingsAPIKey,
+		}
+	}
+	return search.LocalEmbedder{}
 }
 
 // indexOps adapts the store to the search.Ops interface.
@@ -51,12 +68,30 @@ func (o indexOps) HasNoIndexAncestor(ctx context.Context, tenantID, nodeID strin
 	return o.st.HasNoIndexAncestor(ctx, tenantID, nodeID)
 }
 
-func (o indexOps) ReplaceEmbeddings(ctx context.Context, tenantID, nodeID string, rows []search.EmbeddingRowInput) error {
+func (o indexOps) ReplaceSections(ctx context.Context, tenantID, nodeID string, secs []search.SectionSpec) ([]int64, error) {
+	converted := make([]store.SectionInput, len(secs))
+	for i, sec := range secs {
+		converted[i] = store.SectionInput{
+			ParentIdx: sec.ParentIdx, Title: sec.Title, Depth: sec.Depth,
+			CharStart: sec.CharStart, CharEnd: sec.CharEnd,
+		}
+	}
+	return o.st.ReplaceSections(ctx, tenantID, nodeID, converted)
+}
+
+func (o indexOps) ReplaceEmbeddings(ctx context.Context, tenantID, nodeID, space string, rows []search.EmbeddingRowInput) error {
 	converted := make([]store.EmbeddingRow, len(rows))
 	for i, r := range rows {
-		converted[i] = store.EmbeddingRow{ChunkIndex: r.ChunkIndex, Content: r.Content, Vector: r.Vector}
+		converted[i] = store.EmbeddingRow{
+			SectionID: r.SectionID, ChunkIndex: r.ChunkIndex, Content: r.Content,
+			CharStart: r.CharStart, CharEnd: r.CharEnd, Vector: r.Vector,
+		}
 	}
-	return o.st.ReplaceEmbeddings(ctx, tenantID, nodeID, converted)
+	return o.st.ReplaceEmbeddings(ctx, tenantID, nodeID, space, converted)
+}
+
+func (o indexOps) ListPendingIndex(ctx context.Context, limit int) ([][3]string, error) {
+	return o.st.ListPendingIndex(ctx, limit)
 }
 
 // indexContent is the indexer's internal plaintext reader (same
@@ -84,27 +119,6 @@ func (s *Server) indexContent(ctx context.Context, tenantID, nodeID string) (io.
 	}
 	_, rc, err := manifest.Read(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
 	return rc, err
-}
-
-// dynamicEmbedder resolves the fleet-first / local-fallback chain from
-// the live config at call time.
-type dynamicEmbedder struct{ s *Server }
-
-func (d *dynamicEmbedder) Name() string { return "dynamic" }
-
-func (d *dynamicEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	chain := &search.Chain{}
-	if cfg := d.s.CurrentConfig(); cfg != nil && cfg.EmbeddingsBaseURL != "" {
-		model := cfg.EmbeddingsModel
-		if model == "" {
-			model = "nomic-embed-text"
-		}
-		chain.Embedders = append(chain.Embedders, &search.FleetEmbedder{
-			BaseURL: cfg.EmbeddingsBaseURL, Model: model, APIKey: cfg.EmbeddingsAPIKey,
-		})
-	}
-	chain.Embedders = append(chain.Embedders, search.LocalEmbedder{})
-	return chain.Embed(ctx, texts)
 }
 
 // scheduleIndexing sets the initial status and enqueues a fresh file.
@@ -161,7 +175,7 @@ func (s *Server) handleSetIndexing(w http.ResponseWriter, r *http.Request, p *Pr
 		} else {
 			_ = s.Store.SetIndexStatus(r.Context(), tenantID, nodeID, store.IndexSkipped)
 			if s.Store.VectorOK {
-				_ = s.Store.ReplaceEmbeddings(r.Context(), tenantID, nodeID, nil)
+				_ = s.Store.ReplaceEmbeddings(r.Context(), tenantID, nodeID, s.activeEmbedder().Space(), nil)
 			}
 		}
 	}
@@ -194,42 +208,202 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request, p *Princip
 	writeJSON(w, http.StatusOK, map[string]any{"hits": hits})
 }
 
+// searchHitJSON is the provenance contract of every retrieval result
+// (§8.3): enough for a citation chip that deep-links into the file.
 type searchHitJSON struct {
-	NodeID     string  `json:"node_id"`
-	Name       string  `json:"name"`
-	MimeHint   string  `json:"mime_hint,omitempty"`
-	ChunkIndex int     `json:"chunk_index"`
-	Snippet    string  `json:"snippet"`
-	Score      float64 `json:"score"`
+	NodeID      string   `json:"node_id"`
+	Name        string   `json:"name"`
+	MimeHint    string   `json:"mime_hint,omitempty"`
+	SectionID   *int64   `json:"section_id,omitempty"`
+	SectionPath []string `json:"section_path,omitempty"`
+	ChunkIndex  int      `json:"chunk_index"`
+	CharStart   int64    `json:"char_start"`
+	CharEnd     int64    `json:"char_end"`
+	Snippet     string   `json:"snippet"`
+	Score       float64  `json:"score"`
 }
 
 func (s *Server) semanticSearch(ctx context.Context, tenantID, q string, topK int) ([]searchHitJSON, int, error) {
-	emb := &dynamicEmbedder{s: s}
-	vecs, err := emb.Embed(ctx, []string{q})
+	emb := s.activeEmbedder()
+	vecs, err := emb.Embed(ctx, []string{q}, search.Query)
 	if err != nil {
 		return nil, http.StatusBadGateway, err
 	}
-	hits, err := s.Store.SearchEmbeddings(ctx, tenantID, vecs[0], topK)
+	hits, err := s.Store.SearchEmbeddings(ctx, tenantID, emb.Space(), vecs[0], topK)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
+	// Resolve section paths, one ListSections per distinct node.
+	paths := map[string]map[int64][]string{}
 	out := make([]searchHitJSON, 0, len(hits))
 	for _, h := range hits {
-		snippet := h.Content
-		if len(snippet) > 400 {
-			snippet = snippet[:400] + "…"
-		}
-		out = append(out, searchHitJSON{
+		hit := searchHitJSON{
 			NodeID: h.NodeID, Name: h.Name, MimeHint: h.MimeHint,
-			ChunkIndex: h.ChunkIndex, Snippet: snippet, Score: h.Score,
-		})
+			SectionID: h.SectionID, ChunkIndex: h.ChunkIndex,
+			CharStart: h.CharStart, CharEnd: h.CharEnd, Score: h.Score,
+		}
+		if len(h.Content) > 400 {
+			hit.Snippet = h.Content[:400] + "…"
+		} else {
+			hit.Snippet = h.Content
+		}
+		if h.SectionID != nil {
+			byNode, ok := paths[h.NodeID]
+			if !ok {
+				byNode = sectionPaths(ctx, s.Store, tenantID, h.NodeID)
+				paths[h.NodeID] = byNode
+			}
+			hit.SectionPath = byNode[*h.SectionID]
+		}
+		out = append(out, hit)
 	}
 	return out, http.StatusOK, nil
 }
 
+// sectionPaths builds sectionID -> ["Root", "Title", …] for a file.
+func sectionPaths(ctx context.Context, st *store.Store, tenantID, nodeID string) map[int64][]string {
+	secs, err := st.ListSections(ctx, tenantID, nodeID)
+	if err != nil {
+		return map[int64][]string{}
+	}
+	byID := make(map[int64]*store.Section, len(secs))
+	for _, sec := range secs {
+		byID[sec.ID] = sec
+	}
+	out := make(map[int64][]string, len(secs))
+	for _, sec := range secs {
+		var path []string
+		for cur := sec; cur != nil; {
+			path = append([]string{cur.Title}, path...)
+			if cur.ParentID == nil {
+				break
+			}
+			cur = byID[*cur.ParentID]
+		}
+		out[sec.ID] = path
+	}
+	return out
+}
+
+// --- Doc tree + section retrieval (agentic RAG legs, §8.5) --------------
+
+type sectionJSON struct {
+	ID        int64  `json:"id"`
+	ParentID  *int64 `json:"parent_id,omitempty"`
+	Title     string `json:"title"`
+	Depth     int    `json:"depth"`
+	CharStart int64  `json:"char_start"`
+	CharEnd   int64  `json:"char_end"`
+	PageStart *int   `json:"page_start,omitempty"`
+	PageEnd   *int   `json:"page_end,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+}
+
+// handleDocTree returns a file's section tree (titles + anchors +
+// summaries when present): the agent's table of contents.
+func (s *Server) handleDocTree(w http.ResponseWriter, r *http.Request, p *Principal) {
+	tenantID := r.PathValue("tenantID")
+	fileID := r.PathValue("fileID")
+	if !s.allowNodeRead(r.Context(), p, tenantID, fileID) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
+		return
+	}
+	n, err := s.Store.GetNode(r.Context(), tenantID, fileID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	secs, err := s.Store.ListSections(r.Context(), tenantID, fileID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]sectionJSON, 0, len(secs))
+	for _, sec := range secs {
+		out = append(out, sectionJSON{
+			ID: sec.ID, ParentID: sec.ParentID, Title: sec.Title, Depth: sec.Depth,
+			CharStart: sec.CharStart, CharEnd: sec.CharEnd,
+			PageStart: sec.PageStart, PageEnd: sec.PageEnd, Summary: sec.Summary,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_id": n.ID, "name": n.Name, "sections": out,
+	})
+}
+
+// handleReadSection returns one whole section's text with provenance —
+// the retrieval leg after tree navigation.
+func (s *Server) handleReadSection(w http.ResponseWriter, r *http.Request, p *Principal) {
+	tenantID := r.PathValue("tenantID")
+	fileID := r.PathValue("fileID")
+	sectionID, err := strconv.ParseInt(r.PathValue("sectionID"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, errors.New("bad section id"))
+		return
+	}
+	if !s.allowNodeRead(r.Context(), p, tenantID, fileID) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
+		return
+	}
+	sec, err := s.Store.GetSection(r.Context(), tenantID, sectionID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if sec.NodeID != fileID {
+		httpError(w, http.StatusNotFound, errors.New("section does not belong to this file"))
+		return
+	}
+	rc, err := s.indexContent(r.Context(), tenantID, fileID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(rc, 8<<20))
+	rc.Close()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	start, end := sec.CharStart, sec.CharEnd
+	if start < 0 {
+		start = 0
+	}
+	if end > int64(len(raw)) {
+		end = int64(len(raw))
+	}
+	if start > end {
+		start = end
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_id":    fileID,
+		"section_id": sec.ID,
+		"title":      sec.Title,
+		"char_start": start,
+		"char_end":   end,
+		"page_start": sec.PageStart,
+		"page_end":   sec.PageEnd,
+		"text":       string(raw[start:end]),
+	})
+}
+
+// allowNodeRead is the shared read authorisation (tenant member or
+// grant-holder via the share cascade).
+func (s *Server) allowNodeRead(ctx context.Context, p *Principal, tenantID, nodeID string) bool {
+	if !p.IsUser() {
+		return false
+	}
+	if s.canRead(ctx, tenantID, p.Sub) && s.aclAllows(ctx, tenantID, nodeID, p.Sub) {
+		return true
+	}
+	return s.hasReadShare(ctx, tenantID, nodeID, p.Sub)
+}
+
+// --- Manifest tools -------------------------------------------------------
+
 // toolSearchSemantic is the agentic-RAG entry point: a chat session (or
 // any grant/bearer-authenticated agent) searches the drive semantically
-// and follows up with read_file on the hits.
+// and follows up with get_doc_tree / read_section / read_file.
 func (s *Server) toolSearchSemantic(w http.ResponseWriter, r *http.Request, p *Principal) {
 	var req struct {
 		TenantID string `json:"tenant_id"`
@@ -260,4 +434,36 @@ func (s *Server) toolSearchSemantic(w http.ResponseWriter, r *http.Request, p *P
 	writeJSON(w, http.StatusOK, map[string]any{"hits": hits})
 }
 
-var _ = grants.ScopeRead
+// toolDocTree is get_doc_tree for agents.
+func (s *Server) toolDocTree(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		TenantID string `json:"tenant_id"`
+		FileID   string `json:"file_id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	r2 := r.Clone(r.Context())
+	r2.SetPathValue("tenantID", req.TenantID)
+	r2.SetPathValue("fileID", req.FileID)
+	s.handleDocTree(w, r2, p)
+}
+
+// toolReadSection is read_section for agents.
+func (s *Server) toolReadSection(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		TenantID  string `json:"tenant_id"`
+		FileID    string `json:"file_id"`
+		SectionID int64  `json:"section_id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	r2 := r.Clone(r.Context())
+	r2.SetPathValue("tenantID", req.TenantID)
+	r2.SetPathValue("fileID", req.FileID)
+	r2.SetPathValue("sectionID", strconv.FormatInt(req.SectionID, 10))
+	s.handleReadSection(w, r2, p)
+}

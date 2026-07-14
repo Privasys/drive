@@ -201,9 +201,12 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}", s.auth(s.handleDeleteNode))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/move", s.auth(s.handleMoveNode))
 
-	// Semantic index: per-tenant search + node searchability toggle.
+	// Semantic index: per-tenant search + node searchability toggle +
+	// the agentic retrieval legs (doc tree, whole-section reads).
 	mux.Handle("GET /v1/tenants/{tenantID}/search", s.auth(s.handleSearch))
 	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/indexing", s.auth(s.handleSetIndexing))
+	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}/tree", s.auth(s.handleDocTree))
+	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}/sections/{sectionID}", s.auth(s.handleReadSection))
 	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/acl", s.auth(s.handleSetNodeACL))
 	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/permissions", s.auth(s.handleNodePermissions))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))

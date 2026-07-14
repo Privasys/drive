@@ -342,24 +342,82 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate link_requests: %w", err)
 		}
 	}
+	// Section tree: deterministic document structure (headings, page
+	// provenance) built at index time. Both dialects — sections need no
+	// pgvector, and the doc tree exists even where embeddings do not.
+	sectionsSeq := "INTEGER PRIMARY KEY"
+	if s.Dialect == DialectPostgres {
+		sectionsSeq = "BIGSERIAL PRIMARY KEY"
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS sections (
+			id ` + sectionsSeq + `,
+			tenant_id TEXT NOT NULL,
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			parent_id BIGINT,
+			ord INT NOT NULL DEFAULT 0,
+			title TEXT NOT NULL DEFAULT '',
+			depth INT NOT NULL DEFAULT 0,
+			char_start BIGINT NOT NULL DEFAULT 0,
+			char_end BIGINT NOT NULL DEFAULT 0,
+			page_start INT,
+			page_end INT,
+			summary TEXT NOT NULL DEFAULT '',
+			summary_model TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS sections_node ON sections(node_id, ord)`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migrate sections: %w", err)
+		}
+	}
 	// Semantic index (pgvector). Postgres-only, and tolerant of a server
 	// without the extension (e.g. the CI service container): semantic
 	// search simply reports unavailable there. The real image bundles
 	// postgresql-16-pgvector.
+	//
+	// v2 schema (2026-07-15, per the drive plan §8.3/§8.4): 1024-dim
+	// vectors (Qwen3-Embedding full width), an `embed_space` stamp so
+	// vector spaces never mix, and section anchors for provenance. The
+	// v1 768-dim table held only throwaway lexical-fallback data, so
+	// the migration is drop-and-recreate, resetting indexed files to
+	// pending for a clean re-index.
 	if s.Dialect == DialectPostgres {
 		if _, err := s.DB.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err == nil {
+			// Detect + drop the v1 shape (768-dim, no embed_space).
+			var hasSpace bool
+			_ = s.DB.QueryRowContext(ctx,
+				`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+				 WHERE table_name = 'embeddings' AND column_name = 'embed_space')`).Scan(&hasSpace)
+			var hasTable bool
+			_ = s.DB.QueryRowContext(ctx,
+				`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+				 WHERE table_name = 'embeddings')`).Scan(&hasTable)
+			if hasTable && !hasSpace {
+				if _, err := s.DB.ExecContext(ctx, `DROP TABLE embeddings`); err != nil {
+					return fmt.Errorf("migrate embeddings v1 drop: %w", err)
+				}
+				if _, err := s.DB.ExecContext(ctx,
+					`UPDATE nodes SET index_status = 'pending' WHERE index_status IN ('indexed','failed')`); err != nil {
+					return fmt.Errorf("migrate embeddings v1 reset: %w", err)
+				}
+			}
 			for _, stmt := range []string{
 				`CREATE TABLE IF NOT EXISTS embeddings (
 					id BIGSERIAL PRIMARY KEY,
 					tenant_id TEXT NOT NULL,
 					node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+					section_id BIGINT REFERENCES sections(id) ON DELETE CASCADE,
 					chunk_index INT NOT NULL,
 					content TEXT NOT NULL,
-					embedding vector(768) NOT NULL,
+					char_start BIGINT NOT NULL DEFAULT 0,
+					char_end BIGINT NOT NULL DEFAULT 0,
+					embed_space TEXT NOT NULL,
+					embedding vector(1024) NOT NULL,
 					created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 				)`,
 				`CREATE INDEX IF NOT EXISTS embeddings_node ON embeddings(node_id)`,
-				`CREATE INDEX IF NOT EXISTS embeddings_tenant ON embeddings(tenant_id)`,
+				`CREATE INDEX IF NOT EXISTS embeddings_tenant_space ON embeddings(tenant_id, embed_space)`,
 			} {
 				if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
 					return fmt.Errorf("migrate embeddings: %w", err)
