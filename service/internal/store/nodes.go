@@ -333,11 +333,11 @@ func (s *Store) CreateNode(ctx context.Context, n *Node, actor string) error {
 		`INSERT INTO nodes(
 			id, tenant_id, parent_id, kind, name, name_hmac, mime_hint,
 			plain_size, wrapped_cek, manifest_ref, merkle_root, acl_override,
-			created_at, updated_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+			created_at, updated_at, created_by
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 		n.ID, n.TenantID, parent, string(n.Kind), n.Name, n.NameHMAC, n.MimeHint,
 		n.PlainSize, nullableBytes(n.WrappedCEK), nullableString(n.ManifestRef), nullableBytes(n.MerkleRoot), nullableBytes(n.ACLOverride),
-		n.CreatedAt, n.UpdatedAt,
+		n.CreatedAt, n.UpdatedAt, actor,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {

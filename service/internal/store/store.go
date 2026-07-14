@@ -230,6 +230,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		// whole subtree is non-searchable (checked up the parent chain).
 		`ALTER TABLE nodes ADD COLUMN index_status TEXT DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN no_index BOOLEAN DEFAULT FALSE`,
+		// Who created the node (the change-feed actor), for the Owner
+		// column in listings. '' on nodes that predate the column.
+		`ALTER TABLE nodes ADD COLUMN created_by TEXT DEFAULT ''`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, col); err != nil {
 			msg := strings.ToLower(err.Error())

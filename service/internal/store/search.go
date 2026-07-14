@@ -91,12 +91,18 @@ func (s *Store) HasNoIndexAncestor(ctx context.Context, tenantID, nodeID string)
 	return false, nil
 }
 
-// ListIndexStatus returns nodeID -> index_status for a set of nodes
-// (one batched query per folder listing, for the UI indicator). A node
-// explicitly marked no_index reports "excluded" — how a non-searchable
-// folder surfaces its state to the UI toggle.
-func (s *Store) ListIndexStatus(ctx context.Context, tenantID string, nodeIDs []string) (map[string]string, error) {
-	out := make(map[string]string, len(nodeIDs))
+// NodeListMeta carries the per-node listing extras fetched in one
+// batched query: the semantic-index state and the creator.
+type NodeListMeta struct {
+	IndexStatus string // '' | pending | processing | indexed | skipped | failed | excluded
+	CreatedBy   string
+}
+
+// ListNodeMeta returns nodeID -> listing meta for a set of nodes. A
+// node explicitly marked no_index reports index status "excluded" —
+// how a non-searchable folder surfaces its state to the UI toggle.
+func (s *Store) ListNodeMeta(ctx context.Context, tenantID string, nodeIDs []string) (map[string]NodeListMeta, error) {
+	out := make(map[string]NodeListMeta, len(nodeIDs))
 	if len(nodeIDs) == 0 {
 		return out, nil
 	}
@@ -108,7 +114,7 @@ func (s *Store) ListIndexStatus(ctx context.Context, tenantID string, nodeIDs []
 		args = append(args, id)
 	}
 	rows, err := s.DB.QueryContext(ctx, s.q(
-		`SELECT id, index_status, no_index FROM nodes WHERE tenant_id = ? AND id IN (`+strings.Join(ph, ",")+`)`),
+		`SELECT id, index_status, no_index, created_by FROM nodes WHERE tenant_id = ? AND id IN (`+strings.Join(ph, ",")+`)`),
 		args...)
 	if err != nil {
 		return nil, err
@@ -116,17 +122,22 @@ func (s *Store) ListIndexStatus(ctx context.Context, tenantID string, nodeIDs []
 	defer rows.Close()
 	for rows.Next() {
 		var id string
-		var status *string
+		var status, createdBy *string
 		var noIndex *bool
-		if err := rows.Scan(&id, &status, &noIndex); err != nil {
+		if err := rows.Scan(&id, &status, &noIndex, &createdBy); err != nil {
 			return nil, err
 		}
+		var m NodeListMeta
 		switch {
 		case noIndex != nil && *noIndex:
-			out[id] = "excluded"
+			m.IndexStatus = "excluded"
 		case status != nil && *status != "":
-			out[id] = *status
+			m.IndexStatus = *status
 		}
+		if createdBy != nil {
+			m.CreatedBy = *createdBy
+		}
+		out[id] = m
 	}
 	return out, rows.Err()
 }

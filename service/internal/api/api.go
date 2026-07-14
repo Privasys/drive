@@ -442,22 +442,24 @@ func (s *Server) handleListFolder(w http.ResponseWriter, r *http.Request, p *Pri
 	writeJSON(w, http.StatusOK, s.mapNodesWithIndex(r.Context(), tenantID, kids))
 }
 
-// mapNodesWithIndex attaches each node's semantic-index state to the
-// listing (one batched query): file statuses feed the searchable
-// indicator, and explicitly excluded nodes (folders included) report
-// "excluded" so the toggle shows its real state.
+// mapNodesWithIndex attaches each node's listing extras (one batched
+// query): the semantic-index state for the searchable indicator
+// ("excluded" for no_index nodes, folders included, so the toggle
+// shows its real state) and the creator for the Owner column.
 func (s *Server) mapNodesWithIndex(ctx context.Context, tenantID string, ns []*store.Node) []nodeJSON {
 	out := mapNodes(ns)
 	ids := make([]string, 0, len(ns))
 	for _, n := range ns {
 		ids = append(ids, n.ID)
 	}
-	statuses, err := s.Store.ListIndexStatus(ctx, tenantID, ids)
+	meta, err := s.Store.ListNodeMeta(ctx, tenantID, ids)
 	if err != nil {
 		return out
 	}
 	for i := range out {
-		out[i].IndexStatus = statuses[out[i].ID]
+		m := meta[out[i].ID]
+		out[i].IndexStatus = m.IndexStatus
+		out[i].CreatedBy = m.CreatedBy
 	}
 	return out
 }
@@ -969,8 +971,12 @@ type nodeJSON struct {
 	MerkleRoot  string `json:"merkle_root_hex,omitempty"`
 	ManifestRef string `json:"manifest_ref,omitempty"`
 	// IndexStatus: '' | pending | processing | indexed | skipped |
-	// failed — drives the searchable indicator in listings.
+	// failed | excluded — drives the searchable indicator in listings.
 	IndexStatus string `json:"index_status,omitempty"`
+	// CreatedBy is the creator's sub (the Owner column); UpdatedAt is
+	// RFC3339 (the Modified column).
+	CreatedBy string `json:"created_by,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
 func nodeView(n *store.Node) nodeJSON {
@@ -978,6 +984,9 @@ func nodeView(n *store.Node) nodeJSON {
 		ID: n.ID, TenantID: n.TenantID, Kind: string(n.Kind),
 		Name: n.Name, MimeHint: n.MimeHint, PlainSize: n.PlainSize,
 		ManifestRef: n.ManifestRef,
+	}
+	if !n.UpdatedAt.IsZero() {
+		v.UpdatedAt = n.UpdatedAt.UTC().Format(time.RFC3339)
 	}
 	if n.ParentID.Valid {
 		v.ParentID = n.ParentID.String
