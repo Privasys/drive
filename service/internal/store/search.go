@@ -92,7 +92,9 @@ func (s *Store) HasNoIndexAncestor(ctx context.Context, tenantID, nodeID string)
 }
 
 // ListIndexStatus returns nodeID -> index_status for a set of nodes
-// (one batched query per folder listing, for the UI indicator).
+// (one batched query per folder listing, for the UI indicator). A node
+// explicitly marked no_index reports "excluded" — how a non-searchable
+// folder surfaces its state to the UI toggle.
 func (s *Store) ListIndexStatus(ctx context.Context, tenantID string, nodeIDs []string) (map[string]string, error) {
 	out := make(map[string]string, len(nodeIDs))
 	if len(nodeIDs) == 0 {
@@ -106,7 +108,7 @@ func (s *Store) ListIndexStatus(ctx context.Context, tenantID string, nodeIDs []
 		args = append(args, id)
 	}
 	rows, err := s.DB.QueryContext(ctx, s.q(
-		`SELECT id, index_status FROM nodes WHERE tenant_id = ? AND id IN (`+strings.Join(ph, ",")+`)`),
+		`SELECT id, index_status, no_index FROM nodes WHERE tenant_id = ? AND id IN (`+strings.Join(ph, ",")+`)`),
 		args...)
 	if err != nil {
 		return nil, err
@@ -115,10 +117,14 @@ func (s *Store) ListIndexStatus(ctx context.Context, tenantID string, nodeIDs []
 	for rows.Next() {
 		var id string
 		var status *string
-		if err := rows.Scan(&id, &status); err != nil {
+		var noIndex *bool
+		if err := rows.Scan(&id, &status, &noIndex); err != nil {
 			return nil, err
 		}
-		if status != nil && *status != "" {
+		switch {
+		case noIndex != nil && *noIndex:
+			out[id] = "excluded"
+		case status != nil && *status != "":
 			out[id] = *status
 		}
 	}

@@ -442,15 +442,15 @@ func (s *Server) handleListFolder(w http.ResponseWriter, r *http.Request, p *Pri
 	writeJSON(w, http.StatusOK, s.mapNodesWithIndex(r.Context(), tenantID, kids))
 }
 
-// mapNodesWithIndex attaches each file's semantic-index status to the
-// listing (one batched query), feeding the UI's searchable indicator.
+// mapNodesWithIndex attaches each node's semantic-index state to the
+// listing (one batched query): file statuses feed the searchable
+// indicator, and explicitly excluded nodes (folders included) report
+// "excluded" so the toggle shows its real state.
 func (s *Server) mapNodesWithIndex(ctx context.Context, tenantID string, ns []*store.Node) []nodeJSON {
 	out := mapNodes(ns)
 	ids := make([]string, 0, len(ns))
 	for _, n := range ns {
-		if n.Kind == store.NodeFile {
-			ids = append(ids, n.ID)
-		}
+		ids = append(ids, n.ID)
 	}
 	statuses, err := s.Store.ListIndexStatus(ctx, tenantID, ids)
 	if err != nil {
