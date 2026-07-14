@@ -39,6 +39,7 @@ func (s *Server) Tools() http.Handler {
 	mux.Handle("POST /tools/approve_recovery", s.auth(s.toolApproveRecovery))
 	mux.Handle("POST /tools/recovery_status", s.auth(s.toolRecoveryStatus))
 	mux.Handle("POST /tools/purge_tenant", s.auth(s.toolPurgeTenant))
+	mux.Handle("POST /tools/search_semantic", s.auth(s.toolSearchSemantic))
 	return mux
 }
 
@@ -304,6 +305,7 @@ func (s *Server) toolWriteFile(w http.ResponseWriter, r *http.Request, p *Princi
 		Name          string `json:"name"`
 		Mime          string `json:"mime"`
 		ContentBase64 string `json:"content_base64"`
+		Index         *bool  `json:"index,omitempty"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		httpError(w, http.StatusBadRequest, err)
@@ -319,7 +321,7 @@ func (s *Server) toolWriteFile(w http.ResponseWriter, r *http.Request, p *Princi
 			errors.New("content exceeds the 8 MiB tool cap; use the streaming REST upload"))
 		return
 	}
-	n, status, err := s.uploadFile(r.Context(), p, req.TenantID, req.ParentID, req.Name, req.Mime, bytes.NewReader(content))
+	n, status, err := s.uploadFile(r.Context(), p, req.TenantID, req.ParentID, req.Name, req.Mime, bytes.NewReader(content), req.Index != nil && !*req.Index)
 	if err != nil {
 		httpError(w, status, err)
 		return

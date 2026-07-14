@@ -21,7 +21,10 @@
             "properties": {
                 "mode": {
                     "type": "string",
-                    "enum": ["sovereign", "escrowed"],
+                    "enum": [
+                        "sovereign",
+                        "escrowed"
+                    ],
                     "description": "Operating mode, immutable once set. sovereign: tenant keys have the tenant as the only owner; no operator unlock path exists. escrowed: every tenant key additionally carries an escrow wrap under the org master key (MEK_org), and every escrow is disclosed to the tenant via the audit log. Escrowed setup (org_mek_ref + recovery policy) is sent via the API/CLI, not this form. The audited recover_tenant enforcement gate ships next; escrow-wrap and disclosure are active now.",
                     "x-privasys": {
                         "label": "Operating mode",
@@ -42,9 +45,33 @@
                     "x-privasys": {
                         "label": "Control-plane URL (token self-heal)"
                     }
+                },
+                "embeddings_base_url": {
+                    "type": "string",
+                    "description": "OpenAI-compatible embeddings endpoint base URL on the confidential-AI fleet, tried first for semantic indexing; the local CPU embedder is the fallback. Mutable.",
+                    "x-privasys": {
+                        "label": "Embeddings endpoint (confidential-AI)"
+                    }
+                },
+                "embeddings_model": {
+                    "type": "string",
+                    "description": "Embedding model name on the endpoint (must produce 768-dimensional vectors).",
+                    "x-privasys": {
+                        "label": "Embeddings model"
+                    }
+                },
+                "embeddings_api_key": {
+                    "type": "string",
+                    "description": "Bearer for the embeddings endpoint.",
+                    "x-privasys": {
+                        "label": "Embeddings API key",
+                        "secret": true
+                    }
                 }
             },
-            "required": ["mode"]
+            "required": [
+                "mode"
+            ]
         }
     },
     "tools": [
@@ -59,7 +86,10 @@
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "enum": ["sovereign", "escrowed"],
+                        "enum": [
+                            "sovereign",
+                            "escrowed"
+                        ],
                         "description": "Operating mode, immutable once set. sovereign: tenant keys have the tenant as the only owner; no operator unlock path exists. escrowed: adds an org master-key escrow with policy-gated recovery (not yet available in this build).",
                         "x-privasys": {
                             "label": "Operating mode",
@@ -80,9 +110,33 @@
                         "x-privasys": {
                             "label": "Control-plane URL (token self-heal)"
                         }
+                    },
+                    "embeddings_base_url": {
+                        "type": "string",
+                        "description": "OpenAI-compatible embeddings endpoint base URL on the confidential-AI fleet, tried first for semantic indexing; the local CPU embedder is the fallback. Mutable.",
+                        "x-privasys": {
+                            "label": "Embeddings endpoint (confidential-AI)"
+                        }
+                    },
+                    "embeddings_model": {
+                        "type": "string",
+                        "description": "Embedding model name on the endpoint (must produce 768-dimensional vectors).",
+                        "x-privasys": {
+                            "label": "Embeddings model"
+                        }
+                    },
+                    "embeddings_api_key": {
+                        "type": "string",
+                        "description": "Bearer for the embeddings endpoint.",
+                        "x-privasys": {
+                            "label": "Embeddings API key",
+                            "secret": true
+                        }
                     }
                 },
-                "required": ["mode"]
+                "required": [
+                    "mode"
+                ]
             }
         },
         {
@@ -109,7 +163,9 @@
                         "description": "The tenant whose drive root to list."
                     }
                 },
-                "required": ["tenant_id"]
+                "required": [
+                    "tenant_id"
+                ]
             }
         },
         {
@@ -129,7 +185,10 @@
                         "description": "The folder node id returned by list_root, list_folder or create_folder."
                     }
                 },
-                "required": ["tenant_id", "folder_id"]
+                "required": [
+                    "tenant_id",
+                    "folder_id"
+                ]
             }
         },
         {
@@ -153,7 +212,10 @@
                         "description": "Folder name, unique within the parent."
                     }
                 },
-                "required": ["tenant_id", "name"]
+                "required": [
+                    "tenant_id",
+                    "name"
+                ]
             }
         },
         {
@@ -183,9 +245,18 @@
                     "content_base64": {
                         "type": "string",
                         "description": "File content, base64-encoded (max 8 MiB decoded)."
+                    },
+                    "index": {
+                        "type": "boolean",
+                        "description": "Set false to exclude this file from the semantic index (files are searchable by default).",
+                        "default": true
                     }
                 },
-                "required": ["tenant_id", "name", "content_base64"]
+                "required": [
+                    "tenant_id",
+                    "name",
+                    "content_base64"
+                ]
             }
         },
         {
@@ -205,7 +276,10 @@
                         "description": "The file node id."
                     }
                 },
-                "required": ["tenant_id", "file_id"]
+                "required": [
+                    "tenant_id",
+                    "file_id"
+                ]
             }
         },
         {
@@ -225,7 +299,10 @@
                         "description": "The node id to delete."
                     }
                 },
-                "required": ["tenant_id", "node_id"]
+                "required": [
+                    "tenant_id",
+                    "node_id"
+                ]
             }
         },
         {
@@ -249,7 +326,9 @@
                         "description": "Max entries to return (default 100, max 1000)."
                     }
                 },
-                "required": ["tenant_id"]
+                "required": [
+                    "tenant_id"
+                ]
             }
         },
         {
@@ -275,7 +354,9 @@
                         "description": "A fresh aud=attestation-server bearer used by the enclave to verify the vaults' quotes when reading key shares back."
                     }
                 },
-                "required": ["attestation_token"]
+                "required": [
+                    "attestation_token"
+                ]
             }
         },
         {
@@ -294,14 +375,32 @@
                         "type": "object",
                         "description": "The wrapped-secret operator key reference: {handle, endpoints, mrenclave, attestation_server, attestation_token, threshold} as printed by 'privasys vault key create --kind wrapped-secret'.",
                         "properties": {
-                            "handle": { "type": "string" },
-                            "endpoints": { "type": "array", "items": { "type": "string" } },
-                            "mrenclave": { "type": "string" },
-                            "attestation_server": { "type": "string" },
-                            "attestation_token": { "type": "string" },
-                            "threshold": { "type": "integer" }
+                            "handle": {
+                                "type": "string"
+                            },
+                            "endpoints": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            },
+                            "mrenclave": {
+                                "type": "string"
+                            },
+                            "attestation_server": {
+                                "type": "string"
+                            },
+                            "attestation_token": {
+                                "type": "string"
+                            },
+                            "threshold": {
+                                "type": "integer"
+                            }
                         },
-                        "required": ["handle", "endpoints"]
+                        "required": [
+                            "handle",
+                            "endpoints"
+                        ]
                     },
                     "ciphertext_b64": {
                         "type": "string",
@@ -320,7 +419,14 @@
                         "description": "Target bucket name (plaintext metadata; the sealed blob holds only the credential material)."
                     }
                 },
-                "required": ["tenant_id", "key_ref", "ciphertext_b64", "iv_b64", "content_type", "bucket"]
+                "required": [
+                    "tenant_id",
+                    "key_ref",
+                    "ciphertext_b64",
+                    "iv_b64",
+                    "content_type",
+                    "bucket"
+                ]
             }
         },
         {
@@ -336,7 +442,9 @@
                         "description": "The tenant to inspect."
                     }
                 },
-                "required": ["tenant_id"]
+                "required": [
+                    "tenant_id"
+                ]
             }
         },
         {
@@ -347,15 +455,43 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "grant": { "type": "string", "description": "The IdP-signed key-creation grant." },
-                    "handle": { "type": "string", "description": "The key handle from the grant response (handle_hint)." },
-                    "endpoints": { "type": "array", "items": { "type": "string" }, "description": "Constellation vault endpoints." },
-                    "mrenclave": { "type": "string", "description": "Expected vault MRENCLAVE (hex)." },
-                    "attestation_server": { "type": "string", "description": "Attestation server verify endpoint." },
-                    "attestation_token": { "type": "string", "description": "aud=attestation-server bearer for quote verification." },
-                    "threshold": { "type": "integer", "description": "Shamir threshold (k)." }
+                    "grant": {
+                        "type": "string",
+                        "description": "The IdP-signed key-creation grant."
+                    },
+                    "handle": {
+                        "type": "string",
+                        "description": "The key handle from the grant response (handle_hint)."
+                    },
+                    "endpoints": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Constellation vault endpoints."
+                    },
+                    "mrenclave": {
+                        "type": "string",
+                        "description": "Expected vault MRENCLAVE (hex)."
+                    },
+                    "attestation_server": {
+                        "type": "string",
+                        "description": "Attestation server verify endpoint."
+                    },
+                    "attestation_token": {
+                        "type": "string",
+                        "description": "aud=attestation-server bearer for quote verification."
+                    },
+                    "threshold": {
+                        "type": "integer",
+                        "description": "Shamir threshold (k)."
+                    }
                 },
-                "required": ["grant", "handle", "endpoints"]
+                "required": [
+                    "grant",
+                    "handle",
+                    "endpoints"
+                ]
             }
         },
         {
@@ -366,12 +502,28 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "tenant_id": { "type": "string", "description": "The tenant to recover." },
-                    "reason": { "type": "string", "description": "Why this recovery is needed (audited, disclosed to the tenant)." },
-                    "grantee_sub": { "type": "string", "description": "The subject who receives the time-bounded read grant." },
-                    "ttl_seconds": { "type": "integer", "description": "Read-grant lifetime in seconds (default 86400, max 7 days)." }
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant to recover."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why this recovery is needed (audited, disclosed to the tenant)."
+                    },
+                    "grantee_sub": {
+                        "type": "string",
+                        "description": "The subject who receives the time-bounded read grant."
+                    },
+                    "ttl_seconds": {
+                        "type": "integer",
+                        "description": "Read-grant lifetime in seconds (default 86400, max 7 days)."
+                    }
                 },
-                "required": ["tenant_id", "reason", "grantee_sub"]
+                "required": [
+                    "tenant_id",
+                    "reason",
+                    "grantee_sub"
+                ]
             }
         },
         {
@@ -382,11 +534,24 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "tenant_id": { "type": "string", "description": "The tenant under recovery." },
-                    "recovery_id": { "type": "string", "description": "The pending recovery id." },
-                    "approval_token": { "type": "string", "description": "The approver's token (ceremony token on privasys.id; fresh issuer bearer otherwise)." }
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant under recovery."
+                    },
+                    "recovery_id": {
+                        "type": "string",
+                        "description": "The pending recovery id."
+                    },
+                    "approval_token": {
+                        "type": "string",
+                        "description": "The approver's token (ceremony token on privasys.id; fresh issuer bearer otherwise)."
+                    }
                 },
-                "required": ["tenant_id", "recovery_id", "approval_token"]
+                "required": [
+                    "tenant_id",
+                    "recovery_id",
+                    "approval_token"
+                ]
             }
         },
         {
@@ -397,10 +562,19 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "tenant_id": { "type": "string", "description": "The tenant under recovery." },
-                    "recovery_id": { "type": "string", "description": "The recovery id." }
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant under recovery."
+                    },
+                    "recovery_id": {
+                        "type": "string",
+                        "description": "The recovery id."
+                    }
                 },
-                "required": ["tenant_id", "recovery_id"]
+                "required": [
+                    "tenant_id",
+                    "recovery_id"
+                ]
             }
         },
         {
@@ -416,7 +590,9 @@
                         "description": "The tenant whose credential to remove."
                     }
                 },
-                "required": ["tenant_id"]
+                "required": [
+                    "tenant_id"
+                ]
             }
         },
         {
@@ -437,7 +613,37 @@
                         "description": "Why the tenant is being purged (audited)."
                     }
                 },
-                "required": ["tenant_id", "reason"]
+                "required": [
+                    "tenant_id",
+                    "reason"
+                ]
+            }
+        },
+        {
+            "name": "search_semantic",
+            "title": "Semantic search (agentic RAG)",
+            "endpoint": "/tools/search_semantic",
+            "description": "Search a tenant's drive semantically over the in-enclave embeddings index and get scored snippets with node back-pointers; follow up with read_file on a hit to retrieve the source. Files are indexed by default at upload (owners can exclude folders or individual files), so the drive doubles as a permissioned RAG store for agents.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": {
+                        "type": "string",
+                        "description": "The tenant whose drive to search."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language query."
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Max hits to return (default 10, max 50)."
+                    }
+                },
+                "required": [
+                    "tenant_id",
+                    "query"
+                ]
             }
         }
     ]

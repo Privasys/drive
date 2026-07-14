@@ -39,6 +39,7 @@ type uploadSession struct {
 	Mime     string
 	Sub      string // creator; parts and finalize must match
 	Declared int64  // declared total size (0 = unknown)
+	NoIndex  bool   // explicit exclude-from-index flag
 	Next     int    // next expected part index
 	Bytes    int64
 	Path     string
@@ -88,6 +89,7 @@ type createUploadRequest struct {
 	Name     string `json:"name"`
 	Mime     string `json:"mime"`
 	Size     int64  `json:"size"` // declared plaintext size; 0 = unknown
+	Index    *bool  `json:"index,omitempty"` // false excludes from the semantic index
 }
 
 func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -135,6 +137,7 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request, p *P
 		Mime:     req.Mime,
 		Sub:      p.Sub,
 		Declared: req.Size,
+		NoIndex:  req.Index != nil && !*req.Index,
 		Created:  time.Now(),
 	}
 	u.Path = filepath.Join(s.stagingDir(), u.ID)
@@ -239,7 +242,7 @@ func (s *Server) handleFinalizeUpload(w http.ResponseWriter, r *http.Request, p 
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
-	n, status, err := s.uploadFile(r.Context(), p, u.TenantID, u.ParentID, u.Name, u.Mime, f)
+	n, status, err := s.uploadFile(r.Context(), p, u.TenantID, u.ParentID, u.Name, u.Mime, f, u.NoIndex)
 	f.Close()
 	if err != nil {
 		// Keep the session on transient errors so the client may retry

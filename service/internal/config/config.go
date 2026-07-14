@@ -101,6 +101,13 @@ type Config struct {
 	// re-arm. Mutable (an ops setting, not part of the trust contract).
 	MgmtBaseURL string `json:"mgmt_base_url,omitempty"`
 
+	// Semantic-index embedding backend: an OpenAI-compatible embeddings
+	// endpoint (the confidential-AI fleet), tried first; the local CPU
+	// embedder is the fallback. Mutable ops settings.
+	EmbeddingsBaseURL string `json:"embeddings_base_url,omitempty"`
+	EmbeddingsModel   string `json:"embeddings_model,omitempty"`
+	EmbeddingsAPIKey  string `json:"embeddings_api_key,omitempty"`
+
 	// Escrowed-mode fields. OrgMEKRef is the vault reference (a
 	// vaultmek.Ref JSON) for MEK_org — the org's BYOK master key, a
 	// RawShare the attested build reconstructs in-enclave to escrow-wrap

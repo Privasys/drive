@@ -69,8 +69,11 @@ FROM postgres:16-bookworm
 
 # The postgres base ships no CA bundle; the service's outbound HTTPS
 # (OIDC discovery/JWKS, vault attestation) needs a trust store.
+# pgvector backs the semantic index (embeddings live next to the node
+# index on the sealed volume; the drive is its own RAG store).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        postgresql-16-pgvector \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /drive /usr/local/bin/drive

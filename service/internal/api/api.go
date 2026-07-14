@@ -201,6 +201,9 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}", s.auth(s.handleDeleteNode))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/move", s.auth(s.handleMoveNode))
 
+	// Semantic index: per-tenant search + node searchability toggle.
+	mux.Handle("GET /v1/tenants/{tenantID}/search", s.auth(s.handleSearch))
+	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/indexing", s.auth(s.handleSetIndexing))
 	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/acl", s.auth(s.handleSetNodeACL))
 	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/permissions", s.auth(s.handleNodePermissions))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))
@@ -425,7 +428,7 @@ func (s *Server) handleListRoot(w http.ResponseWriter, r *http.Request, p *Princ
 		httpError(w, status, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, mapNodes(kids))
+	writeJSON(w, http.StatusOK, s.mapNodesWithIndex(r.Context(), tenantID, kids))
 }
 
 func (s *Server) handleListFolder(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -436,7 +439,27 @@ func (s *Server) handleListFolder(w http.ResponseWriter, r *http.Request, p *Pri
 		httpError(w, status, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, mapNodes(kids))
+	writeJSON(w, http.StatusOK, s.mapNodesWithIndex(r.Context(), tenantID, kids))
+}
+
+// mapNodesWithIndex attaches each file's semantic-index status to the
+// listing (one batched query), feeding the UI's searchable indicator.
+func (s *Server) mapNodesWithIndex(ctx context.Context, tenantID string, ns []*store.Node) []nodeJSON {
+	out := mapNodes(ns)
+	ids := make([]string, 0, len(ns))
+	for _, n := range ns {
+		if n.Kind == store.NodeFile {
+			ids = append(ids, n.ID)
+		}
+	}
+	statuses, err := s.Store.ListIndexStatus(ctx, tenantID, ids)
+	if err != nil {
+		return out
+	}
+	for i := range out {
+		out[i].IndexStatus = statuses[out[i].ID]
+	}
+	return out
 }
 
 func (s *Server) listChildren(ctx context.Context, p *Principal, tenantID, folderID string) ([]*store.Node, int, error) {
@@ -461,7 +484,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request, p *Pri
 		http.Error(w, "name query parameter required", http.StatusBadRequest)
 		return
 	}
-	n, status, err := s.uploadFile(r.Context(), p, tenantID, q.Get("parent_id"), name, q.Get("mime"), r.Body)
+	n, status, err := s.uploadFile(r.Context(), p, tenantID, q.Get("parent_id"), name, q.Get("mime"), r.Body, q.Get("index") == "false")
 	if err != nil {
 		httpError(w, status, err)
 		return
@@ -469,7 +492,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request, p *Pri
 	writeJSON(w, http.StatusCreated, nodeView(n))
 }
 
-func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentID, name, mime string, body io.Reader) (*store.Node, int, error) {
+func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentID, name, mime string, body io.Reader, noIndex bool) (*store.Node, int, error) {
 	if !s.allowNode(ctx, p, tenantID, parentID, grants.ScopeWrite) {
 		return nil, http.StatusForbidden, errors.New("forbidden")
 	}
@@ -541,6 +564,9 @@ func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentI
 	if err := s.Store.CreateNode(ctx, n, p.Sub); err != nil {
 		return nil, storeErrorStatus(err), err
 	}
+	// Searchable by default: schedule semantic indexing unless the
+	// upload opted out (folder exclusions re-check inside the worker).
+	s.scheduleIndexing(ctx, n, noIndex)
 	return n, http.StatusCreated, nil
 }
 
@@ -942,6 +968,9 @@ type nodeJSON struct {
 	PlainSize   int64  `json:"size_bytes"`
 	MerkleRoot  string `json:"merkle_root_hex,omitempty"`
 	ManifestRef string `json:"manifest_ref,omitempty"`
+	// IndexStatus: '' | pending | processing | indexed | skipped |
+	// failed — drives the searchable indicator in listings.
+	IndexStatus string `json:"index_status,omitempty"`
 }
 
 func nodeView(n *store.Node) nodeJSON {

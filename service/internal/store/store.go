@@ -91,6 +91,11 @@ var (
 type Store struct {
 	DB      *sql.DB
 	Dialect Dialect
+	// VectorOK reports whether the pgvector extension is available
+	// (Postgres with postgresql-16-pgvector installed). When false,
+	// semantic indexing and search are unavailable and files stay
+	// index_status='' rather than pending.
+	VectorOK bool
 }
 
 // Dialect is the small set of per-driver differences we need to express.
@@ -219,6 +224,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE tenants ADD COLUMN mek_ref TEXT`,
 		`ALTER TABLE tenants ADD COLUMN bucket_cred TEXT`,
 		`ALTER TABLE tenants ADD COLUMN escrow_wrap TEXT`,
+		// Semantic index bookkeeping: '' (n/a for folders / predates the
+		// feature) | pending | processing | indexed | skipped | failed.
+		// no_index marks a file excluded at upload, or a folder whose
+		// whole subtree is non-searchable (checked up the parent chain).
+		`ALTER TABLE nodes ADD COLUMN index_status TEXT DEFAULT ''`,
+		`ALTER TABLE nodes ADD COLUMN no_index BOOLEAN DEFAULT FALSE`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, col); err != nil {
 			msg := strings.ToLower(err.Error())
@@ -326,6 +337,32 @@ func (s *Store) migrate(ctx context.Context) error {
 	} {
 		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate link_requests: %w", err)
+		}
+	}
+	// Semantic index (pgvector). Postgres-only, and tolerant of a server
+	// without the extension (e.g. the CI service container): semantic
+	// search simply reports unavailable there. The real image bundles
+	// postgresql-16-pgvector.
+	if s.Dialect == DialectPostgres {
+		if _, err := s.DB.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err == nil {
+			for _, stmt := range []string{
+				`CREATE TABLE IF NOT EXISTS embeddings (
+					id BIGSERIAL PRIMARY KEY,
+					tenant_id TEXT NOT NULL,
+					node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+					chunk_index INT NOT NULL,
+					content TEXT NOT NULL,
+					embedding vector(768) NOT NULL,
+					created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+				)`,
+				`CREATE INDEX IF NOT EXISTS embeddings_node ON embeddings(node_id)`,
+				`CREATE INDEX IF NOT EXISTS embeddings_tenant ON embeddings(tenant_id)`,
+			} {
+				if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+					return fmt.Errorf("migrate embeddings: %w", err)
+				}
+			}
+			s.VectorOK = true
 		}
 	}
 	return nil
