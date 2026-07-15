@@ -35,13 +35,15 @@ def build_converter():
     """One DocumentConverter, models from the baked artifacts dir."""
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import (
-        EasyOcrOptions,
         PdfPipelineOptions,
+        TesseractCliOcrOptions,
     )
     from docling.document_converter import DocumentConverter, PdfFormatOption
 
     artifacts = os.environ.get("DOCLING_ARTIFACTS_PATH")
-    ocr = EasyOcrOptions(download_enabled=False)
+    # Tesseract via its CLI: an apt package with baked language data —
+    # fully offline and far lighter than EasyOCR's torch models.
+    ocr = TesseractCliOcrOptions(lang=["eng"])
     pdf_opts = PdfPipelineOptions(
         artifacts_path=artifacts,
         do_ocr=True,
@@ -80,9 +82,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/healthz":
-            import docling
+            from importlib.metadata import version
 
-            self._reply(200, {"status": "ok", "docling": docling.__version__})
+            self._reply(200, {"status": "ok", "docling": version("docling")})
         else:
             self._reply(404, {"error": "not found"})
 
