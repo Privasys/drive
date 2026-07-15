@@ -149,11 +149,12 @@ func cosine(a, b []float32) float64 {
 // --- Indexer flow with fakes -------------------------------------------
 
 type fakeOps struct {
-	status   map[string]string
-	secs     map[string][]SectionSpec
-	rows     map[string][]EmbeddingRowInput
-	space    map[string]string
-	excluded map[string]bool
+	status      map[string]string
+	secs        map[string][]SectionSpec
+	rows        map[string][]EmbeddingRowInput
+	space       map[string]string
+	excluded    map[string]bool
+	conversions map[string]string
 }
 
 func (f *fakeOps) SetIndexStatus(_ context.Context, _, nodeID, status string) error {
@@ -184,11 +185,16 @@ func (f *fakeOps) ListPendingIndex(_ context.Context, _ int) ([][3]string, error
 	return nil, nil
 }
 
+func (f *fakeOps) SaveConversion(_ context.Context, _, nodeID, converter, text string) error {
+	f.conversions[nodeID] = converter + "|" + text
+	return nil
+}
+
 func newFakeOps() *fakeOps {
 	return &fakeOps{
 		status: map[string]string{}, secs: map[string][]SectionSpec{},
 		rows: map[string][]EmbeddingRowInput{}, space: map[string]string{},
-		excluded: map[string]bool{},
+		excluded: map[string]bool{}, conversions: map[string]string{},
 	}
 }
 
@@ -230,7 +236,7 @@ func TestIndexerLifecycle(t *testing.T) {
 		t.Fatalf("video: status=%q", ops.status["n-video"])
 	}
 
-	// Needs conversion (docling leg pending): skipped.
+	// Needs conversion with NO converter wired: skipped.
 	ix.Enqueue("t1", "n-pdf", "deck.pdf", "application/pdf")
 	if ops.status["n-pdf"] != "skipped" {
 		t.Fatalf("pdf: status=%q", ops.status["n-pdf"])
@@ -247,6 +253,61 @@ func TestIndexerLifecycle(t *testing.T) {
 	ix.Enqueue("t1", "n-empty", "empty.txt", "text/plain")
 	if ops.status["n-empty"] != "indexed" || len(ops.rows["n-empty"]) != 0 {
 		t.Fatalf("empty: status=%q rows=%d", ops.status["n-empty"], len(ops.rows["n-empty"]))
+	}
+}
+
+// --- Conversion leg (docling) -------------------------------------------
+
+type fakeConverter struct {
+	markdown string
+	err      error
+}
+
+func (f fakeConverter) Convert(context.Context, string, string, []byte) (string, string, error) {
+	if f.err != nil {
+		return "", "", f.err
+	}
+	return f.markdown, "docling/test", nil
+}
+
+func TestIndexerConvertsNonText(t *testing.T) {
+	ops := newFakeOps()
+	ix := &Indexer{
+		Ops: ops,
+		Content: func(context.Context, string, string) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader("%PDF-1.7 binary bytes")), nil
+		},
+		Embedder: func() Embedder { return LocalEmbedder{} },
+		Convert:  fakeConverter{markdown: "# Deck\nslide one text\n\n# Annex\nslide two text"},
+		Sync:     true,
+	}
+	ix.Enqueue("t1", "n-deck", "deck.pdf", "application/pdf")
+	if ops.status["n-deck"] != "indexed" {
+		t.Fatalf("converted pdf: status=%q", ops.status["n-deck"])
+	}
+	if !strings.Contains(ops.conversions["n-deck"], "slide one text") {
+		t.Fatalf("conversion not saved: %q", ops.conversions["n-deck"])
+	}
+	// Sections come from the CONVERTED markdown: root + Deck + Annex.
+	if len(ops.secs["n-deck"]) != 3 {
+		t.Fatalf("sections from conversion: %d", len(ops.secs["n-deck"]))
+	}
+	if len(ops.rows["n-deck"]) == 0 {
+		t.Fatalf("no embedding rows")
+	}
+
+	// Transient sidecar failure parks pending.
+	ix.Convert = fakeConverter{err: io.ErrUnexpectedEOF}
+	ix.Enqueue("t1", "n-down", "down.pdf", "application/pdf")
+	if ops.status["n-down"] != "pending" {
+		t.Fatalf("sidecar down: status=%q", ops.status["n-down"])
+	}
+
+	// A permanently unconvertible document fails, no retry loop.
+	ix.Convert = fakeConverter{err: &PermanentError{Msg: "encrypted pdf"}}
+	ix.Enqueue("t1", "n-bad", "bad.pdf", "application/pdf")
+	if ops.status["n-bad"] != "failed" {
+		t.Fatalf("permanent: status=%q", ops.status["n-bad"])
 	}
 }
 

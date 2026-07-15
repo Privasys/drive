@@ -171,6 +171,33 @@ func (s *Store) ListNodeMeta(ctx context.Context, tenantID string, nodeIDs []str
 	return out, rows.Err()
 }
 
+// --- Conversions (docling markdown for non-text formats) ----------------
+
+// SaveConversion upserts a file's converted text (sections and chunks
+// anchor into it; read_section slices it).
+func (s *Store) SaveConversion(ctx context.Context, tenantID, nodeID, converter, text string) error {
+	_, err := s.DB.ExecContext(ctx, s.q(
+		`INSERT INTO conversions(node_id, tenant_id, converter, text) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(node_id) DO UPDATE SET converter = excluded.converter, text = excluded.text`),
+		nodeID, tenantID, converter, text)
+	return err
+}
+
+// GetConversion returns a file's converted text, or ErrNotFound.
+func (s *Store) GetConversion(ctx context.Context, tenantID, nodeID string) (string, string, error) {
+	var converter, text string
+	err := s.DB.QueryRowContext(ctx, s.q(
+		`SELECT converter, text FROM conversions WHERE tenant_id = ? AND node_id = ?`),
+		tenantID, nodeID).Scan(&converter, &text)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", "", ErrNotFound
+		}
+		return "", "", err
+	}
+	return converter, text, nil
+}
+
 // --- Sections (deterministic document structure) ------------------------
 
 // Section is one node of a file's structure tree.

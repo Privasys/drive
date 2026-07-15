@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 
@@ -31,10 +32,15 @@ var (
 // (fleet endpoint) apply without a restart.
 func (s *Server) indexer() *search.Indexer {
 	indexerOnce.Do(func() {
+		var conv search.Converter
+		if c := search.NewSidecarConverter(os.Getenv("DRIVE_DOCLING_SOCKET")); c != nil {
+			conv = c
+		}
 		indexerRef = &search.Indexer{
 			Ops:      indexOps{s.Store},
 			Content:  s.indexContent,
 			Embedder: s.activeEmbedder,
+			Convert:  conv,
 		}
 	})
 	return indexerRef
@@ -92,6 +98,10 @@ func (o indexOps) ReplaceEmbeddings(ctx context.Context, tenantID, nodeID, space
 
 func (o indexOps) ListPendingIndex(ctx context.Context, limit int) ([][3]string, error) {
 	return o.st.ListPendingIndex(ctx, limit)
+}
+
+func (o indexOps) SaveConversion(ctx context.Context, tenantID, nodeID, converter, text string) error {
+	return o.st.SaveConversion(ctx, tenantID, nodeID, converter, text)
 }
 
 // indexContent is the indexer's internal plaintext reader (same
@@ -354,16 +364,23 @@ func (s *Server) handleReadSection(w http.ResponseWriter, r *http.Request, p *Pr
 		httpError(w, http.StatusNotFound, errors.New("section does not belong to this file"))
 		return
 	}
-	rc, err := s.indexContent(r.Context(), tenantID, fileID)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	raw, err := io.ReadAll(io.LimitReader(rc, 8<<20))
-	rc.Close()
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
+	// Converted formats (PDF / Office / images) anchor their sections
+	// into the stored docling markdown, not the binary original.
+	var raw []byte
+	if _, converted, cerr := s.Store.GetConversion(r.Context(), tenantID, fileID); cerr == nil {
+		raw = []byte(converted)
+	} else {
+		rc, err := s.indexContent(r.Context(), tenantID, fileID)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err)
+			return
+		}
+		raw, err = io.ReadAll(io.LimitReader(rc, 8<<20))
+		rc.Close()
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	start, end := sec.CharStart, sec.CharEnd
 	if start < 0 {

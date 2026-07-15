@@ -71,10 +71,34 @@ FROM postgres:16-bookworm
 # (OIDC discovery/JWKS, vault attestation) needs a trust store.
 # pgvector backs the semantic index (embeddings live next to the node
 # index on the sealed volume; the drive is its own RAG store).
+# python3 + libgl/libglib host the docling conversion sidecar (PDF /
+# Office / images to markdown; libgl is an opencv runtime dependency).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         postgresql-16-pgvector \
+        python3 \
+        python3-venv \
+        libgl1 \
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
+
+# Docling conversion sidecar (drive plan section 8.2): pinned version,
+# CPU-only torch (the default wheels bundle CUDA), and the layout /
+# table / OCR models BAKED INTO THE IMAGE at build time so conversion
+# never downloads at runtime and stays part of the measured image.
+RUN python3 -m venv /opt/docling-venv \
+    && /opt/docling-venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/docling-venv/bin/pip install --no-cache-dir \
+        torch torchvision --index-url https://download.pytorch.org/whl/cpu \
+    && /opt/docling-venv/bin/pip install --no-cache-dir docling==2.113.0
+RUN /opt/docling-venv/bin/python -c "\
+from pathlib import Path; \
+from docling.utils.model_downloader import download_models; \
+download_models(output_dir=Path('/opt/docling-models'), progress=False)"
+ENV DOCLING_ARTIFACTS_PATH=/opt/docling-models
+COPY docling/server.py /opt/docling/server.py
+# Import smoke test: a broken sidecar must fail the build, not the enclave.
+RUN /opt/docling-venv/bin/python -c "import docling; import compileall, sys; sys.exit(0 if compileall.compile_file('/opt/docling/server.py', quiet=1) else 1)"
 
 COPY --from=builder /drive /usr/local/bin/drive
 # The app manifest: also baked into the org.privasys.manifest OCI label

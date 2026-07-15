@@ -50,6 +50,20 @@ fi
 # (root), which has no Postgres role.
 export DRIVE_DB_DSN="${DRIVE_DB_DSN:-postgres://postgres@/drive?host=$PGSOCK&sslmode=disable}"
 
+# Docling conversion sidecar: unix socket only (co-located apps share
+# the host network namespace - same rule as the Postgres socket). The
+# service treats a missing/starting sidecar as transient (files park
+# pending and retry), so a sidecar crash never blocks the drive.
+DOCLING_SOCK_DIR=/data/doclingsock
+DOCLING_SOCK="$DOCLING_SOCK_DIR/docling.sock"
+if [ -x /opt/docling-venv/bin/python ]; then
+  mkdir -p "$DOCLING_SOCK_DIR" 2>/dev/null || echo "entrypoint: mkdir $DOCLING_SOCK_DIR failed"
+  chmod 700 "$DOCLING_SOCK_DIR" 2>/dev/null || true
+  /opt/docling-venv/bin/python /opt/docling/server.py --socket "$DOCLING_SOCK" &
+  export DRIVE_DOCLING_SOCKET="$DOCLING_SOCK"
+  echo "entrypoint: docling sidecar starting on $DOCLING_SOCK"
+fi
+
 : "${PORT:?PORT environment variable is required}"
 echo "entrypoint: starting drive on :$PORT…"
 exec drive serve

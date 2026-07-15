@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -266,6 +267,9 @@ type Ops interface {
 	ReplaceSections(ctx context.Context, tenantID, nodeID string, secs []SectionSpec) ([]int64, error)
 	ReplaceEmbeddings(ctx context.Context, tenantID, nodeID, space string, rows []EmbeddingRowInput) error
 	ListPendingIndex(ctx context.Context, limit int) ([][3]string, error)
+	// SaveConversion persists converted markdown for non-text formats;
+	// sections and read_section anchor into it.
+	SaveConversion(ctx context.Context, tenantID, nodeID, converter, text string) error
 }
 
 // SectionSpec mirrors store.SectionInput without importing store.
@@ -298,6 +302,9 @@ type Indexer struct {
 	// Embedder returns the CURRENT embedder, resolved per run so a
 	// configure change (fleet endpoint) applies without a restart.
 	Embedder func() Embedder
+	// Convert handles non-text formats (the docling sidecar); nil means
+	// those formats stay skipped.
+	Convert Converter
 	// Sync makes Process run inline in Enqueue (tests).
 	Sync bool
 
@@ -417,15 +424,19 @@ func (ix *Indexer) process(ctx context.Context, j job) {
 		ix.clearBackoff(j.nodeID)
 		return
 	}
+	needsConversion := false
 	switch Classify(j.name, j.mime) {
 	case Indexable:
 		// proceed
 	case NeedsConversion:
-		// The docling conversion leg is not wired yet; recognised
-		// formats wait as skipped rather than failing.
-		setStatus(statusSkipped)
-		ix.clearBackoff(j.nodeID)
-		return
+		if ix.Convert == nil {
+			// No conversion sidecar in this build: recognised formats
+			// wait as skipped rather than failing.
+			setStatus(statusSkipped)
+			ix.clearBackoff(j.nodeID)
+			return
+		}
+		needsConversion = true
 	default:
 		setStatus(statusSkipped)
 		ix.clearBackoff(j.nodeID)
@@ -439,13 +450,49 @@ func (ix *Indexer) process(ctx context.Context, j job) {
 		ix.parkPending(ctx, j)
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(rc, maxIndexBytes))
+	limit := int64(maxIndexBytes)
+	if needsConversion {
+		// Binary originals (PDF, images) are larger than their text.
+		limit = 64 << 20
+	}
+	raw, err := io.ReadAll(io.LimitReader(rc, limit))
 	rc.Close()
 	if err != nil {
 		ix.parkPending(ctx, j)
 		return
 	}
 	text := string(raw)
+
+	if needsConversion {
+		converted, converter, cerr := ix.Convert.Convert(ctx, j.name, j.mime, raw)
+		if cerr != nil {
+			var perm *PermanentError
+			if errors.As(cerr, &perm) {
+				// The document itself cannot convert; retries are futile.
+				log.Printf("search: convert %s permanent: %v", j.nodeID, cerr)
+				setStatus(statusFailed)
+				ix.clearBackoff(j.nodeID)
+				return
+			}
+			// Sidecar starting/down: transient, park and retry.
+			log.Printf("search: convert %s: %v", j.nodeID, cerr)
+			ix.parkPending(ctx, j)
+			return
+		}
+		if len(converted) > maxIndexBytes {
+			converted = converted[:maxIndexBytes]
+		}
+		if err := ix.Ops.SaveConversion(ctx, j.tenantID, j.nodeID, converter, converted); err != nil {
+			log.Printf("search: save conversion %s: %v", j.nodeID, err)
+			setStatus(statusFailed)
+			return
+		}
+		// Sections, chunks and read_section all anchor into the
+		// CONVERTED text from here on.
+		text = converted
+		// The section builder treats converted output as markdown.
+		j.name = j.name + ".md"
+	}
 
 	// Deterministic structure first: the doc tree exists even when the
 	// embedding leg fails (titles now, summaries later, §8.5).

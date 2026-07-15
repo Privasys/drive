@@ -371,6 +371,22 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate sections: %w", err)
 		}
 	}
+	// Converted text (docling markdown) for non-text formats: sections
+	// and chunks anchor into THIS text, and read_section slices it. One
+	// row per converted file, cascading with the node.
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS conversions (
+			node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+			tenant_id TEXT NOT NULL,
+			converter TEXT NOT NULL,
+			text TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migrate conversions: %w", err)
+		}
+	}
 	// Semantic index (pgvector). Postgres-only, and tolerant of a server
 	// without the extension (e.g. the CI service container): semantic
 	// search simply reports unavailable there. The real image bundles
