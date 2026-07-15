@@ -29,6 +29,7 @@ import (
 	"github.com/Privasys/drive/service/internal/objectstore"
 	"github.com/Privasys/drive/service/internal/oidc"
 	"github.com/Privasys/drive/service/internal/platform"
+	"github.com/Privasys/drive/service/internal/search"
 	"github.com/Privasys/drive/service/internal/store"
 	"github.com/Privasys/drive/service/internal/vaultmek"
 )
@@ -114,10 +115,36 @@ func (s *Server) SetConfig(c *config.Config) error {
 		return err
 	}
 	s.cfgMu.Lock()
+	prev := s.cfg
 	s.cfg = c
 	s.cfgMu.Unlock()
 	s.applyConfigSideEffects(c)
+	// An embedding-space change (model cutover or upgrade) schedules the
+	// background reindex: indexed files flip to pending and the sweep
+	// re-embeds them into the new space. Boot-time re-apply goes through
+	// InstallConfig and never triggers this (prev == nil here means the
+	// FIRST configure of a fresh instance, where nothing is indexed yet
+	// anyway — resetting is a no-op).
+	if embedSpaceOf(prev) != embedSpaceOf(c) {
+		if n, err := s.Store.ResetIndexedForReindex(context.Background()); err == nil && n > 0 {
+			log.Printf("search: embedding space changed (%s -> %s), %d files scheduled for reindex",
+				embedSpaceOf(prev), embedSpaceOf(c), n)
+			s.indexer() // ensure the sweep goroutine is running
+		}
+	}
 	return nil
+}
+
+// embedSpaceOf mirrors activeEmbedder's space selection for a config.
+func embedSpaceOf(c *config.Config) string {
+	if c != nil && c.EmbeddingsBaseURL != "" {
+		model := c.EmbeddingsModel
+		if model == "" {
+			model = "qwen3-embedding-0.6b"
+		}
+		return (&search.FleetEmbedder{Model: model}).Space()
+	}
+	return search.LocalEmbedder{}.Space()
 }
 
 // InstallConfig sets the in-memory config without persisting (boot-time

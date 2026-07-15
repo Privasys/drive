@@ -94,6 +94,22 @@ func (s *Store) HasNoIndexAncestor(ctx context.Context, tenantID, nodeID string)
 	return false, nil
 }
 
+// ResetIndexedForReindex flips indexed and failed files back to
+// pending across all tenants — the scheduled background reindex when
+// the embedding space changes (model cutover or upgrade). The old
+// space's rows stay queryable until each file re-embeds; queries only
+// ever match the active space.
+func (s *Store) ResetIndexedForReindex(ctx context.Context) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE nodes SET index_status = ? WHERE kind = 'file' AND index_status IN (?, ?)`),
+		IndexPending, IndexIndexed, IndexFailed)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ListPendingIndex returns file node ids awaiting indexing, oldest
 // first, for the retry sweep.
 func (s *Store) ListPendingIndex(ctx context.Context, limit int) ([][3]string, error) {
