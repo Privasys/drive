@@ -78,6 +78,9 @@ type Client struct {
 	refresh  TokenRefresher
 	freshTok string
 	freshExp int64
+	// attServer is the constellation's attestation-server endpoint as
+	// reported by the last successful control-plane token refresh.
+	attServer string
 }
 
 // New builds a client. managerMintURL is the in-TD manager's

@@ -55,7 +55,7 @@
                 },
                 "embeddings_model": {
                     "type": "string",
-                    "description": "Embedding model name on the endpoint (must produce 768-dimensional vectors).",
+                    "description": "Embedding model name on the endpoint (must produce 1024-dimensional vectors).",
                     "x-privasys": {
                         "label": "Embeddings model"
                     }
@@ -66,6 +66,21 @@
                     "x-privasys": {
                         "label": "Embeddings API key",
                         "secret": true
+                    }
+                },
+                "embeddings_dependency": {
+                    "type": "string",
+                    "description": "Attested-dependency pin for the fleet: the canonical dependency-set JSON from the app record ({\"entries\":[...]}, as set via the platform's apps dependencies API). When present, every embeddings call dials RA-TLS and refuses any peer that does not match the pinned measurements and required OIDs (fail closed). Leave empty only for off-platform endpoints.",
+                    "x-privasys": {
+                        "label": "Fleet dependency pin (attested)"
+                    }
+                },
+                "embeddings_allow_debug": {
+                    "type": "boolean",
+                    "description": "Permit dev-profile fleet images on the pinned dial. Development environments only.",
+                    "default": false,
+                    "x-privasys": {
+                        "label": "Allow dev-profile fleet images"
                     }
                 }
             },
@@ -120,7 +135,7 @@
                     },
                     "embeddings_model": {
                         "type": "string",
-                        "description": "Embedding model name on the endpoint (must produce 768-dimensional vectors).",
+                        "description": "Embedding model name on the endpoint (must produce 1024-dimensional vectors).",
                         "x-privasys": {
                             "label": "Embeddings model"
                         }
@@ -131,6 +146,21 @@
                         "x-privasys": {
                             "label": "Embeddings API key",
                             "secret": true
+                        }
+                    },
+                    "embeddings_dependency": {
+                        "type": "string",
+                        "description": "Attested-dependency pin for the fleet: the canonical dependency-set JSON from the app record ({\"entries\":[...]}, as set via the platform's apps dependencies API). When present, every embeddings call dials RA-TLS and refuses any peer that does not match the pinned measurements and required OIDs (fail closed). Leave empty only for off-platform endpoints.",
+                        "x-privasys": {
+                            "label": "Fleet dependency pin (attested)"
+                        }
+                    },
+                    "embeddings_allow_debug": {
+                        "type": "boolean",
+                        "description": "Permit dev-profile fleet images on the pinned dial. Development environments only.",
+                        "default": false,
+                        "x-privasys": {
+                            "label": "Allow dev-profile fleet images"
                         }
                     }
                 },

@@ -108,6 +108,19 @@ type Config struct {
 	EmbeddingsModel   string `json:"embeddings_model,omitempty"`
 	EmbeddingsAPIKey  string `json:"embeddings_api_key,omitempty"`
 
+	// EmbeddingsDependency pins the fleet's attested identity: the
+	// canonical dependency-set JSON as stored on the app record
+	// ({"entries":[{"app_id","measurements","required_oids",...}]}).
+	// When set, every embeddings call dials RA-TLS and refuses a peer
+	// that does not match the pin — fail closed; when empty the client
+	// speaks plain HTTPS (off-platform endpoints only: the fleet
+	// requires the attested path). Part of the attested configuration
+	// users can read via /status.
+	EmbeddingsDependency string `json:"embeddings_dependency,omitempty"`
+	// EmbeddingsAllowDebug permits dev-profile fleet images on the
+	// pinned dial. Development environments only.
+	EmbeddingsAllowDebug bool `json:"embeddings_allow_debug,omitempty"`
+
 	// Escrowed-mode fields. OrgMEKRef is the vault reference (a
 	// vaultmek.Ref JSON) for MEK_org — the org's BYOK master key, a
 	// RawShare the attested build reconstructs in-enclave to escrow-wrap

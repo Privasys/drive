@@ -64,7 +64,7 @@ func TestMgmtRefresher_FetchesToken(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	refresh := newMgmtRefresher(ts.URL+"/", fm, nil) // trailing slash must be tolerated
+	refresh := newMgmtRefresher(ts.URL+"/", fm, nil, nil) // trailing slash must be tolerated
 	tok, exp, err := refresh(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestMgmtRefresher_Errors(t *testing.T) {
 		_, _ = w.Write([]byte(body))
 	}))
 	defer ts.Close()
-	refresh := newMgmtRefresher(ts.URL, fm, nil)
+	refresh := newMgmtRefresher(ts.URL, fm, nil, nil)
 
 	if _, _, err := refresh(context.Background()); err == nil {
 		t.Fatal("empty token should error")
@@ -112,7 +112,7 @@ func TestMgmtRefresher_Errors(t *testing.T) {
 	if _, _, err := refresh(context.Background()); err == nil {
 		t.Fatal("401 should error")
 	}
-	if _, _, err := newMgmtRefresher(ts.URL, &fakeMinter{fail: true}, nil)(context.Background()); err == nil {
+	if _, _, err := newMgmtRefresher(ts.URL, &fakeMinter{fail: true}, nil, nil)(context.Background()); err == nil {
 		t.Fatal("mint failure should error")
 	}
 }

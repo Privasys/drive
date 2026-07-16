@@ -49,18 +49,38 @@ func (s *Server) indexer() *search.Indexer {
 // activeEmbedder resolves the embedding backend per §8.4: the
 // configured fleet model when one exists (its failures park files
 // pending — the lexical space never pollutes a configured deployment),
-// the lexical space only until then.
+// the lexical space only until then. With a dependency pin configured
+// the fleet client dials RA-TLS and verifies the peer against the pin;
+// if the pinned client could not be armed, calls fail rather than
+// falling back to an unpinned dial.
 func (s *Server) activeEmbedder() search.Embedder {
-	if cfg := s.CurrentConfig(); cfg != nil && cfg.EmbeddingsBaseURL != "" {
-		model := cfg.EmbeddingsModel
-		if model == "" {
-			model = "qwen3-embedding-0.6b"
-		}
-		return &search.FleetEmbedder{
-			BaseURL: cfg.EmbeddingsBaseURL, Model: model, APIKey: cfg.EmbeddingsAPIKey,
+	cfg := s.CurrentConfig()
+	if cfg == nil || cfg.EmbeddingsBaseURL == "" {
+		return search.LocalEmbedder{}
+	}
+	model := cfg.EmbeddingsModel
+	if model == "" {
+		model = "qwen3-embedding-0.6b"
+	}
+	fe := &search.FleetEmbedder{
+		BaseURL: cfg.EmbeddingsBaseURL, Model: model, APIKey: cfg.EmbeddingsAPIKey,
+	}
+	if cfg.EmbeddingsDependency != "" {
+		if hc := s.fleetClient(); hc != nil {
+			fe.Client = hc
+		} else {
+			fe.Client = &http.Client{Transport: unarmedPinTransport{}}
 		}
 	}
-	return search.LocalEmbedder{}
+	return fe
+}
+
+// unarmedPinTransport refuses every request: a configured dependency
+// pin that could not be armed must never degrade to a plain dial.
+type unarmedPinTransport struct{}
+
+func (unarmedPinTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("embeddings dependency pin configured but not armed (no platform identity); refusing unpinned dial")
 }
 
 // indexOps adapts the store to the search.Ops interface.

@@ -23,6 +23,7 @@ import (
 
 	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/crypto"
+	"github.com/Privasys/drive/service/internal/deptls"
 	"github.com/Privasys/drive/service/internal/export"
 	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/manifest"
@@ -74,6 +75,13 @@ type Server struct {
 	backendsOnce sync.Once
 	backends     *tenantBackends
 
+	// fleetHTTP is the attested-dependency HTTP client for the
+	// embeddings fleet, rebuilt by applyConfigSideEffects whenever the
+	// pin changes. Nil when no dependency is configured (plain HTTPS).
+	fleetMu   sync.Mutex
+	fleetHTTP *http.Client
+	fleetKey  string
+
 	// recVer caches per-issuer JWKS verifiers for recovery approvals.
 	recVerMu sync.Mutex
 	recVer   map[string]oidc.Verifier
@@ -111,6 +119,11 @@ func (p *Principal) IsUser() bool { return p.ID != nil }
 
 // SetConfig installs (and persists) the instance configuration.
 func (s *Server) SetConfig(c *config.Config) error {
+	if c.EmbeddingsDependency != "" {
+		if _, err := deptls.ParseDependencySet(c.EmbeddingsDependency); err != nil {
+			return fmt.Errorf("embeddings_dependency: %w", err)
+		}
+	}
 	if err := c.Save(s.StateDir); err != nil {
 		return err
 	}
@@ -158,16 +171,46 @@ func (s *Server) InstallConfig(c *config.Config) {
 
 // applyConfigSideEffects wires config-driven runtime behaviour. With a
 // control-plane base URL configured, the vault client self-heals stale
-// attestation tokens via the app's manager-minted identity.
+// attestation tokens via the app's manager-minted identity; with an
+// embeddings dependency pinned, the fleet HTTP client is (re)built to
+// dial RA-TLS and refuse any peer that is not the pinned identity.
 func (s *Server) applyConfigSideEffects(c *config.Config) {
 	if c == nil || c.MgmtBaseURL == "" {
 		return
 	}
-	if v, ok := s.MEKs.(*vaultmek.Client); ok && v != nil {
+	var v *vaultmek.Client
+	if vc, ok := s.MEKs.(*vaultmek.Client); ok && vc != nil {
+		v = vc
 		if r := v.MgmtTokenRefresher(c.MgmtBaseURL); r != nil {
 			v.SetTokenRefresher(r)
 		}
 	}
+	s.fleetMu.Lock()
+	defer s.fleetMu.Unlock()
+	key := fmt.Sprintf("%s|%t", c.EmbeddingsDependency, c.EmbeddingsAllowDebug)
+	if key == s.fleetKey {
+		return
+	}
+	s.fleetHTTP, s.fleetKey = nil, key
+	if c.EmbeddingsDependency == "" || v == nil {
+		return
+	}
+	set, err := deptls.ParseDependencySet(c.EmbeddingsDependency)
+	if err != nil {
+		// SetConfig validates before persisting; a bad stored set stays
+		// fail-closed (no client => fleet calls error, files park).
+		log.Printf("search: embeddings_dependency invalid, fleet dialling disabled: %v", err)
+		return
+	}
+	s.fleetHTTP = deptls.NewHTTPClient(set, v.AttestationCredentials, c.EmbeddingsAllowDebug)
+}
+
+// fleetClient returns the pinned attested-dependency HTTP client, or
+// nil when no pin is configured.
+func (s *Server) fleetClient() *http.Client {
+	s.fleetMu.Lock()
+	defer s.fleetMu.Unlock()
+	return s.fleetHTTP
 }
 
 // CurrentConfig returns the active config, or nil before configure.
