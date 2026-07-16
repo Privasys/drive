@@ -60,16 +60,67 @@ func (s *Server) handleStatusTool(w http.ResponseWriter, r *http.Request, _ *Pri
 	writeJSON(w, http.StatusOK, s.statusDoc())
 }
 
+// configureRequest uses pointer fields so an omitted field keeps its
+// current value (merge-by-omission): a re-configure that only touches
+// the embeddings settings must never wipe the escrow reference or the
+// recovery policy, which the portal form does not carry. Send an empty
+// string to clear a field explicitly.
 type configureRequest struct {
 	Mode              config.Mode `json:"mode"`
-	QuotaDefaultBytes int64       `json:"quota_default_bytes"`
+	QuotaDefaultBytes *int64      `json:"quota_default_bytes"`
 	// MgmtBaseURL enables self-healing of stale vault attestation
 	// tokens via the control plane (see config.Config).
-	MgmtBaseURL string `json:"mgmt_base_url"`
+	MgmtBaseURL *string `json:"mgmt_base_url"`
+	// Semantic-index embedding backend (see config.Config). The
+	// dependency pin makes every embeddings call verify the fleet's
+	// attested identity before sending data.
+	EmbeddingsBaseURL    *string `json:"embeddings_base_url"`
+	EmbeddingsModel      *string `json:"embeddings_model"`
+	EmbeddingsAPIKey     *string `json:"embeddings_api_key"`
+	EmbeddingsDependency *string `json:"embeddings_dependency"`
+	EmbeddingsAllowDebug *bool   `json:"embeddings_allow_debug"`
 	// Escrowed-mode setup (sent via the API/CLI, not the portal form):
 	// the MEK_org vault reference and the recovery policy.
-	OrgMEKRef string                 `json:"org_mek_ref"`
+	OrgMEKRef *string                `json:"org_mek_ref"`
 	Recovery  *config.RecoveryPolicy `json:"recovery"`
+}
+
+// overlay applies the request on top of the current config (zero when
+// unconfigured), honouring merge-by-omission.
+func (req *configureRequest) overlay(cur *config.Config) *config.Config {
+	cfg := &config.Config{}
+	if cur != nil {
+		*cfg = *cur
+	}
+	cfg.Mode = req.Mode
+	if req.QuotaDefaultBytes != nil {
+		cfg.QuotaDefaultBytes = *req.QuotaDefaultBytes
+	}
+	if req.MgmtBaseURL != nil {
+		cfg.MgmtBaseURL = *req.MgmtBaseURL
+	}
+	if req.EmbeddingsBaseURL != nil {
+		cfg.EmbeddingsBaseURL = *req.EmbeddingsBaseURL
+	}
+	if req.EmbeddingsModel != nil {
+		cfg.EmbeddingsModel = *req.EmbeddingsModel
+	}
+	if req.EmbeddingsAPIKey != nil {
+		cfg.EmbeddingsAPIKey = *req.EmbeddingsAPIKey
+	}
+	if req.EmbeddingsDependency != nil {
+		cfg.EmbeddingsDependency = *req.EmbeddingsDependency
+	}
+	if req.EmbeddingsAllowDebug != nil {
+		cfg.EmbeddingsAllowDebug = *req.EmbeddingsAllowDebug
+	}
+	if req.OrgMEKRef != nil {
+		cfg.OrgMEKRef = *req.OrgMEKRef
+	}
+	if req.Recovery != nil {
+		cfg.Recovery = req.Recovery
+	}
+	return cfg
 }
 
 // handleConfigure is the role:config manifest tool. The enclave-os
@@ -87,11 +138,7 @@ func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request, p *Prin
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	cfg := &config.Config{
-		Mode: req.Mode, QuotaDefaultBytes: req.QuotaDefaultBytes,
-		MgmtBaseURL: req.MgmtBaseURL,
-		OrgMEKRef:   req.OrgMEKRef, Recovery: req.Recovery,
-	}
+	cfg := req.overlay(s.CurrentConfig())
 	if err := cfg.Validate(); err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
