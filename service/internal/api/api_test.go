@@ -49,6 +49,9 @@ func newTestServer(t *testing.T) (*httptest.Server, *Server) {
 		Verifier: oidc.DevVerifier{},
 		MEK:      mek[:],
 	}
+	// Drain fire-and-forget metric writes before the store + TempDir go
+	// (registered last, so it runs first under LIFO cleanup).
+	t.Cleanup(srv.WaitBackground)
 	ts := httptest.NewServer(srv.Routes())
 	t.Cleanup(ts.Close)
 	return ts, srv

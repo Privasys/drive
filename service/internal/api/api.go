@@ -91,7 +91,15 @@ type Server struct {
 	// recVer caches per-issuer JWKS verifiers for recovery approvals.
 	recVerMu sync.Mutex
 	recVer   map[string]oidc.Verifier
+
+	// bg tracks fire-and-forget background writes (access metrics) so a
+	// shutdown — or a test — can drain them before the store closes.
+	bg sync.WaitGroup
 }
+
+// WaitBackground blocks until in-flight background writes (access
+// metrics) have drained. Call before closing the store.
+func (s *Server) WaitBackground() { s.bg.Wait() }
 
 // authVia records how a principal authenticated.
 type authVia string
@@ -745,7 +753,9 @@ func (s *Server) recordAccess(p *Principal, tenantID, nodeID, ctxKind string, by
 	} else if !p.IsUser() {
 		event = "tool"
 	}
+	s.bg.Add(1)
 	go func() {
+		defer s.bg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := s.Store.RecordAccessEvent(ctx, store.AccessEvent{
