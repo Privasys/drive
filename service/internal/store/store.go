@@ -363,12 +363,32 @@ func (s *Store) migrate(ctx context.Context) error {
 			page_start INT,
 			page_end INT,
 			summary TEXT NOT NULL DEFAULT '',
-			summary_model TEXT NOT NULL DEFAULT ''
+			summary_model TEXT NOT NULL DEFAULT '',
+			-- anchor is the STABLE public section id (§8.3): a
+			-- content-derived hash of (node_id + title path + occurrence),
+			-- unchanged across reindex so digest/link citations survive.
+			-- The row id stays internal (embeddings FK to it, rebuilt on
+			-- reindex); the anchor is what the API returns and citations use.
+			anchor TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS sections_node ON sections(node_id, ord)`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate sections: %w", err)
+		}
+	}
+	// Additive on existing deployments (the CREATE above no-ops when the
+	// table exists). The next reindex repopulates anchors; already-indexed
+	// files get theirs on the reindex the anchor cutover schedules.
+	for _, stmt := range []string{
+		`ALTER TABLE sections ADD COLUMN anchor TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS sections_anchor ON sections(tenant_id, node_id, anchor)`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+			msg := strings.ToLower(err.Error())
+			if !strings.Contains(msg, "duplicate") && !strings.Contains(msg, "exists") {
+				return fmt.Errorf("migrate sections anchor: %w", err)
+			}
 		}
 	}
 	// Converted text (docling markdown) for non-text formats: sections
@@ -444,6 +464,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if err := s.migrateAccessEvents(ctx); err != nil {
 		return fmt.Errorf("migrate access_events: %w", err)
+	}
+	if err := s.migrateNodeExpiry(ctx); err != nil {
+		return fmt.Errorf("migrate node_expiry: %w", err)
 	}
 	return nil
 }

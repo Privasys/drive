@@ -203,6 +203,7 @@ func serve(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	revoked.Start(ctx)
+	srv.StartExpirySweep(ctx, time.Hour)
 
 	httpSrv := &http.Server{
 		Addr:              *addr,

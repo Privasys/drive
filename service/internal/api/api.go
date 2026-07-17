@@ -300,6 +300,12 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("DELETE /v1/tenants/{tenantID}/uploads/{uploadID}", s.auth(s.handleAbortUpload))
 	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}", s.auth(s.handleDownloadFile))
 	mux.Handle("GET /v1/tenants/{tenantID}/metrics", s.auth(s.handleTenantMetrics))
+	// Conversations in Drive (§8.7).
+	mux.Handle("POST /v1/tenants/{tenantID}/conversations", s.auth(s.handleCreateConversation))
+	mux.Handle("GET /v1/tenants/{tenantID}/conversations", s.auth(s.handleListConversations))
+	mux.Handle("GET /v1/tenants/{tenantID}/conversations/{convID}", s.auth(s.handleGetConversation))
+	mux.Handle("POST /v1/tenants/{tenantID}/conversations/{convID}/turns", s.auth(s.handleAppendTurn))
+	mux.Handle("POST /v1/tenants/{tenantID}/conversations/{convID}/attach", s.auth(s.handleAttachToConversation))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}", s.auth(s.handleDeleteNode))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/move", s.auth(s.handleMoveNode))
 

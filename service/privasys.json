@@ -435,6 +435,80 @@
             }
         },
         {
+            "name": "create_conversation",
+            "title": "Create a conversation",
+            "endpoint": "/tools/create_conversation",
+            "description": "Provision a chat conversation's Drive directory (under 'Chat conversations/') with an empty no_index transcript and a files/ folder. Idempotent per title+date. Returns conversation_id, transcript_id and files_folder_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "Tenant to create the conversation in." },
+                    "title": { "type": "string", "description": "Conversation title (slugified into the directory name)." },
+                    "date": { "type": "string", "description": "Optional YYYY-MM-DD prefix for the directory (the conversation start date)." }
+                },
+                "required": ["tenant_id", "title"]
+            }
+        },
+        {
+            "name": "append_turn",
+            "title": "Append a conversation turn",
+            "endpoint": "/tools/append_turn",
+            "description": "Append one serialised JSON turn to a conversation's transcript (conversation.jsonl). The transcript stays no_index; only the finalized digest is searchable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string" },
+                    "conversation_id": { "type": "string", "description": "The conversation id from create_conversation." },
+                    "turn": { "type": "string", "description": "One turn serialised as a JSON object (the caller owns the schema)." }
+                },
+                "required": ["tenant_id", "conversation_id", "turn"]
+            }
+        },
+        {
+            "name": "list_conversations",
+            "title": "List conversations",
+            "endpoint": "/tools/list_conversations",
+            "description": "List the caller's chat conversations with their transcript/digest ids and finalized flag.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "tenant_id": { "type": "string" } },
+                "required": ["tenant_id"]
+            }
+        },
+        {
+            "name": "get_conversation",
+            "title": "Get a conversation",
+            "endpoint": "/tools/get_conversation",
+            "description": "Return a conversation's metadata and its full transcript text, for cross-device resume.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string" },
+                    "conversation_id": { "type": "string" }
+                },
+                "required": ["tenant_id", "conversation_id"]
+            }
+        },
+        {
+            "name": "attach_to_conversation",
+            "title": "Attach a file to a conversation",
+            "endpoint": "/tools/attach_to_conversation",
+            "description": "Upload a file into a conversation's files/ folder. intent 'session' (default) stores it no_index and auto-expiring (use in this chat); intent 'knowledge' persists and indexes it (add to my knowledge base). Returns the node and the intent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string" },
+                    "conversation_id": { "type": "string" },
+                    "name": { "type": "string", "description": "File name." },
+                    "mime": { "type": "string", "description": "MIME type." },
+                    "content_base64": { "type": "string", "description": "File bytes, base64." },
+                    "intent": { "type": "string", "enum": ["session", "knowledge"], "description": "session = use in this chat (no_index, auto-expire); knowledge = persist + index." },
+                    "expires_unix": { "type": "integer", "description": "Optional expiry override for intent session (unix seconds)." }
+                },
+                "required": ["tenant_id", "conversation_id", "name", "content_base64"]
+            }
+        },
+        {
             "name": "rearm_tenant_key",
             "title": "Re-arm tenant vault key",
             "endpoint": "/tools/rearm_tenant_key",

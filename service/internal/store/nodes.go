@@ -352,6 +352,28 @@ func (s *Store) CreateNode(ctx context.Context, n *Node, actor string) error {
 	return nil
 }
 
+// UpdateNodeContent replaces a file node's stored-content pointers after
+// its bytes were rewritten in place (e.g. a transcript append). Records a
+// 'update' change and bumps updated_at.
+func (s *Store) UpdateNodeContent(ctx context.Context, tenantID, id string, wrappedCEK, merkleRoot []byte, manifestRef string, plainSize int64, actor string) error {
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE nodes SET wrapped_cek = ?, merkle_root = ?, manifest_ref = ?,
+		        plain_size = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE tenant_id = ? AND id = ?`),
+		nullableBytes(wrappedCEK), nullableBytes(merkleRoot), nullableString(manifestRef),
+		plainSize, tenantID, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	_, _ = s.DB.ExecContext(ctx, s.q(
+		`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'update', ?)`),
+		tenantID, id, actor)
+	return nil
+}
+
 // GetNode returns the node with the given id within a tenant.
 func (s *Store) GetNode(ctx context.Context, tenantID, id string) (*Node, error) {
 	row := s.DB.QueryRowContext(ctx, s.q(

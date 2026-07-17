@@ -241,10 +241,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request, p *Princip
 // searchHitJSON is the provenance contract of every retrieval result
 // (§8.3): enough for a citation chip that deep-links into the file.
 type searchHitJSON struct {
-	NodeID      string   `json:"node_id"`
-	Name        string   `json:"name"`
-	MimeHint    string   `json:"mime_hint,omitempty"`
-	SectionID   *int64   `json:"section_id,omitempty"`
+	NodeID string `json:"node_id"`
+	Name   string `json:"name"`
+	// SectionID is the STABLE public anchor (§8.3), safe to store in a
+	// citation; it survives reindex. Empty for anchorless legacy rows.
+	SectionID   string   `json:"section_id,omitempty"`
 	SectionPath []string `json:"section_path,omitempty"`
 	ChunkIndex  int      `json:"chunk_index"`
 	CharStart   int64    `json:"char_start"`
@@ -268,8 +269,8 @@ func (s *Server) semanticSearch(ctx context.Context, tenantID, q string, topK in
 	out := make([]searchHitJSON, 0, len(hits))
 	for _, h := range hits {
 		hit := searchHitJSON{
-			NodeID: h.NodeID, Name: h.Name, MimeHint: h.MimeHint,
-			SectionID: h.SectionID, ChunkIndex: h.ChunkIndex,
+			NodeID: h.NodeID, Name: h.Name,
+			SectionID: h.SectionAnchor, ChunkIndex: h.ChunkIndex,
 			CharStart: h.CharStart, CharEnd: h.CharEnd, Score: h.Score,
 		}
 		if len(h.Content) > 400 {
@@ -318,8 +319,10 @@ func sectionPaths(ctx context.Context, st *store.Store, tenantID, nodeID string)
 // --- Doc tree + section retrieval (agentic RAG legs, §8.5) --------------
 
 type sectionJSON struct {
-	ID        int64  `json:"id"`
-	ParentID  *int64 `json:"parent_id,omitempty"`
+	// SectionID and ParentID are STABLE public anchors (§8.3), not DB
+	// row ids: a citation stored against them survives reindex.
+	SectionID string `json:"section_id"`
+	ParentID  string `json:"parent_id,omitempty"`
 	Title     string `json:"title"`
 	Depth     int    `json:"depth"`
 	CharStart int64  `json:"char_start"`
@@ -348,10 +351,18 @@ func (s *Server) handleDocTree(w http.ResponseWriter, r *http.Request, p *Princi
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
+	anchorByID := make(map[int64]string, len(secs))
+	for _, sec := range secs {
+		anchorByID[sec.ID] = sec.Anchor
+	}
 	out := make([]sectionJSON, 0, len(secs))
 	for _, sec := range secs {
+		parentAnchor := ""
+		if sec.ParentID != nil {
+			parentAnchor = anchorByID[*sec.ParentID]
+		}
 		out = append(out, sectionJSON{
-			ID: sec.ID, ParentID: sec.ParentID, Title: sec.Title, Depth: sec.Depth,
+			SectionID: sec.Anchor, ParentID: parentAnchor, Title: sec.Title, Depth: sec.Depth,
 			CharStart: sec.CharStart, CharEnd: sec.CharEnd,
 			PageStart: sec.PageStart, PageEnd: sec.PageEnd, Summary: sec.Summary,
 		})
@@ -366,8 +377,10 @@ func (s *Server) handleDocTree(w http.ResponseWriter, r *http.Request, p *Princi
 func (s *Server) handleReadSection(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	fileID := r.PathValue("fileID")
-	sectionID, err := strconv.ParseInt(r.PathValue("sectionID"), 10, 64)
-	if err != nil {
+	// The public section id is the stable anchor (§8.3). Legacy int64
+	// row ids are still accepted so old links keep resolving.
+	anchor := r.PathValue("sectionID")
+	if anchor == "" {
 		httpError(w, http.StatusBadRequest, errors.New("bad section id"))
 		return
 	}
@@ -375,7 +388,12 @@ func (s *Server) handleReadSection(w http.ResponseWriter, r *http.Request, p *Pr
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
-	sec, err := s.Store.GetSection(r.Context(), tenantID, sectionID)
+	sec, err := s.Store.GetSectionByAnchor(r.Context(), tenantID, fileID, anchor)
+	if errors.Is(err, store.ErrNotFound) {
+		if id, perr := strconv.ParseInt(anchor, 10, 64); perr == nil {
+			sec, err = s.Store.GetSection(r.Context(), tenantID, id)
+		}
+	}
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -414,7 +432,7 @@ func (s *Server) handleReadSection(w http.ResponseWriter, r *http.Request, p *Pr
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"node_id":    fileID,
-		"section_id": sec.ID,
+		"section_id": sec.Anchor,
 		"title":      sec.Title,
 		"char_start": start,
 		"char_end":   end,
@@ -492,7 +510,7 @@ func (s *Server) toolReadSection(w http.ResponseWriter, r *http.Request, p *Prin
 	var req struct {
 		TenantID  string `json:"tenant_id"`
 		FileID    string `json:"file_id"`
-		SectionID int64  `json:"section_id"`
+		SectionID string `json:"section_id"` // stable anchor (§8.3)
 	}
 	if err := readJSON(r, &req); err != nil {
 		httpError(w, http.StatusBadRequest, err)
@@ -501,6 +519,6 @@ func (s *Server) toolReadSection(w http.ResponseWriter, r *http.Request, p *Prin
 	r2 := r.Clone(r.Context())
 	r2.SetPathValue("tenantID", req.TenantID)
 	r2.SetPathValue("fileID", req.FileID)
-	r2.SetPathValue("sectionID", strconv.FormatInt(req.SectionID, 10))
+	r2.SetPathValue("sectionID", req.SectionID)
 	s.handleReadSection(w, r2, p)
 }

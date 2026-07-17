@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -230,6 +233,30 @@ type Section struct {
 	PageStart *int
 	PageEnd   *int
 	Summary   string
+	// Anchor is the STABLE public section id (§8.3): a content-derived
+	// hash of (node_id + ancestor title path + occurrence). Unchanged
+	// across reindex, it is what the API returns and what citations use.
+	Anchor string
+}
+
+// SectionAnchor derives the stable public anchor for a section from its
+// node id and the chain of titles from the root to this section
+// (inclusive). occurrence disambiguates sibling sections that share an
+// identical title path (0 for the first). Deterministic and identical
+// across SDKs: a re-parse that leaves a section's title path unchanged
+// produces the same anchor, so stored digest/link citations survive.
+func SectionAnchor(nodeID string, titlePath []string, occurrence int) string {
+	h := sha256.New()
+	h.Write([]byte(nodeID))
+	h.Write([]byte{0})
+	for _, t := range titlePath {
+		h.Write([]byte(strings.TrimSpace(t)))
+		h.Write([]byte{0x1f}) // unit separator
+	}
+	h.Write([]byte{0})
+	h.Write([]byte(strconv.Itoa(occurrence)))
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:16]) // 128-bit anchor, ample for a file
 }
 
 // ReplaceSections atomically swaps a file's section tree. Input
@@ -246,6 +273,22 @@ func (s *Store) ReplaceSections(ctx context.Context, tenantID, nodeID string, se
 		return nil, err
 	}
 	ids := make([]int64, len(secs))
+	// Derive the stable public anchor per section from its ancestor title
+	// path (root → this section). occ disambiguates identical paths.
+	titlePaths := make([][]string, len(secs))
+	occ := map[string]int{}
+	anchors := make([]string, len(secs))
+	for i, sec := range secs {
+		var path []string
+		if sec.ParentIdx >= 0 {
+			path = append(path, titlePaths[sec.ParentIdx]...)
+		}
+		path = append(path, sec.Title)
+		titlePaths[i] = path
+		key := strings.Join(path, "\x1f")
+		anchors[i] = SectionAnchor(nodeID, path, occ[key])
+		occ[key]++
+	}
 	for i, sec := range secs {
 		var parent any
 		if sec.ParentIdx >= 0 {
@@ -255,18 +298,18 @@ func (s *Store) ReplaceSections(ctx context.Context, tenantID, nodeID string, se
 		if s.Dialect == DialectPostgres {
 			err = tx.QueryRowContext(ctx,
 				`INSERT INTO sections(tenant_id, node_id, parent_id, ord, title, depth,
-				                      char_start, char_end, page_start, page_end)
-				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+				                      char_start, char_end, page_start, page_end, anchor)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
 				tenantID, nodeID, parent, i, sec.Title, sec.Depth,
-				sec.CharStart, sec.CharEnd, sec.PageStart, sec.PageEnd).Scan(&id)
+				sec.CharStart, sec.CharEnd, sec.PageStart, sec.PageEnd, anchors[i]).Scan(&id)
 		} else {
 			var res sql.Result
 			res, err = tx.ExecContext(ctx, s.q(
 				`INSERT INTO sections(tenant_id, node_id, parent_id, ord, title, depth,
-				                      char_start, char_end, page_start, page_end)
-				 VALUES (?,?,?,?,?,?,?,?,?,?)`),
+				                      char_start, char_end, page_start, page_end, anchor)
+				 VALUES (?,?,?,?,?,?,?,?,?,?,?)`),
 				tenantID, nodeID, parent, i, sec.Title, sec.Depth,
-				sec.CharStart, sec.CharEnd, sec.PageStart, sec.PageEnd)
+				sec.CharStart, sec.CharEnd, sec.PageStart, sec.PageEnd, anchors[i])
 			if err == nil {
 				id, err = res.LastInsertId()
 			}
@@ -295,7 +338,7 @@ type SectionInput struct {
 func (s *Store) ListSections(ctx context.Context, tenantID, nodeID string) ([]*Section, error) {
 	rows, err := s.DB.QueryContext(ctx, s.q(
 		`SELECT id, tenant_id, node_id, parent_id, ord, title, depth,
-		        char_start, char_end, page_start, page_end, summary
+		        char_start, char_end, page_start, page_end, summary, anchor
 		 FROM sections WHERE tenant_id = ? AND node_id = ? ORDER BY ord`),
 		tenantID, nodeID)
 	if err != nil {
@@ -308,7 +351,7 @@ func (s *Store) ListSections(ctx context.Context, tenantID, nodeID string) ([]*S
 		var parent sql.NullInt64
 		var ps, pe sql.NullInt64
 		if err := rows.Scan(&sec.ID, &sec.TenantID, &sec.NodeID, &parent, &sec.Ord,
-			&sec.Title, &sec.Depth, &sec.CharStart, &sec.CharEnd, &ps, &pe, &sec.Summary); err != nil {
+			&sec.Title, &sec.Depth, &sec.CharStart, &sec.CharEnd, &ps, &pe, &sec.Summary, &sec.Anchor); err != nil {
 			return nil, err
 		}
 		if parent.Valid {
@@ -328,11 +371,26 @@ func (s *Store) ListSections(ctx context.Context, tenantID, nodeID string) ([]*S
 	return out, rows.Err()
 }
 
+// GetSectionByAnchor resolves a section by its stable public anchor
+// within a file. This is the read path digests and links cite into.
+func (s *Store) GetSectionByAnchor(ctx context.Context, tenantID, nodeID, anchor string) (*Section, error) {
+	secs, err := s.ListSections(ctx, tenantID, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, sec := range secs {
+		if sec.Anchor == anchor {
+			return sec, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
 // GetSection returns one section, tenant-scoped.
 func (s *Store) GetSection(ctx context.Context, tenantID string, id int64) (*Section, error) {
 	rows, err := s.DB.QueryContext(ctx, s.q(
 		`SELECT id, tenant_id, node_id, parent_id, ord, title, depth,
-		        char_start, char_end, page_start, page_end, summary
+		        char_start, char_end, page_start, page_end, summary, anchor
 		 FROM sections WHERE tenant_id = ? AND id = ?`), tenantID, id)
 	if err != nil {
 		return nil, err
@@ -348,7 +406,7 @@ func (s *Store) GetSection(ctx context.Context, tenantID string, id int64) (*Sec
 	var parent sql.NullInt64
 	var ps, pe sql.NullInt64
 	if err := rows.Scan(&sec.ID, &sec.TenantID, &sec.NodeID, &parent, &sec.Ord,
-		&sec.Title, &sec.Depth, &sec.CharStart, &sec.CharEnd, &ps, &pe, &sec.Summary); err != nil {
+		&sec.Title, &sec.Depth, &sec.CharStart, &sec.CharEnd, &ps, &pe, &sec.Summary, &sec.Anchor); err != nil {
 		return nil, err
 	}
 	if parent.Valid {
@@ -414,15 +472,16 @@ func (s *Store) ReplaceEmbeddings(ctx context.Context, tenantID, nodeID, space s
 
 // SearchHit is one semantic-search result with provenance.
 type SearchHit struct {
-	NodeID     string
-	Name       string
-	MimeHint   string
-	SectionID  *int64
-	ChunkIndex int
-	Content    string
-	CharStart  int64
-	CharEnd    int64
-	Score      float64 // cosine similarity, higher is better
+	NodeID        string
+	Name          string
+	MimeHint      string
+	SectionID     *int64
+	SectionAnchor string // stable public anchor (§8.3); "" for anchorless rows
+	ChunkIndex    int
+	Content       string
+	CharStart     int64
+	CharEnd       int64
+	Score         float64 // cosine similarity, higher is better
 }
 
 // SearchEmbeddings runs a cosine nearest-neighbour search over a
@@ -436,10 +495,12 @@ func (s *Store) SearchEmbeddings(ctx context.Context, tenantID, space string, qu
 		topK = 10
 	}
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT e.node_id, n.name, n.mime_hint, e.section_id, e.chunk_index, e.content,
-		        e.char_start, e.char_end,
+		`SELECT e.node_id, n.name, n.mime_hint, e.section_id, COALESCE(sec.anchor, ''),
+		        e.chunk_index, e.content, e.char_start, e.char_end,
 		        1 - (e.embedding <=> $1::vector) AS score
-		 FROM embeddings e JOIN nodes n ON n.id = e.node_id
+		 FROM embeddings e
+		 JOIN nodes n ON n.id = e.node_id
+		 LEFT JOIN sections sec ON sec.id = e.section_id
 		 WHERE e.tenant_id = $2 AND e.embed_space = $3
 		 ORDER BY e.embedding <=> $1::vector
 		 LIMIT $4`,
@@ -452,8 +513,8 @@ func (s *Store) SearchEmbeddings(ctx context.Context, tenantID, space string, qu
 	for rows.Next() {
 		var h SearchHit
 		var section sql.NullInt64
-		if err := rows.Scan(&h.NodeID, &h.Name, &h.MimeHint, &section, &h.ChunkIndex,
-			&h.Content, &h.CharStart, &h.CharEnd, &h.Score); err != nil {
+		if err := rows.Scan(&h.NodeID, &h.Name, &h.MimeHint, &section, &h.SectionAnchor,
+			&h.ChunkIndex, &h.Content, &h.CharStart, &h.CharEnd, &h.Score); err != nil {
 			return nil, err
 		}
 		if section.Valid {
