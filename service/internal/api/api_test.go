@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,7 +23,12 @@ import (
 
 func newTestServer(t *testing.T) (*httptest.Server, *Server) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file::memory:?_pragma=foreign_keys(1)")
+	// File-backed, not :memory:: the pool opens extra connections under
+	// concurrency (e.g. the async access-event writer) and every new
+	// :memory: connection is a fresh empty database. The busy timeout
+	// absorbs writer overlap.
+	dbPath := filepath.Join(t.TempDir(), "drive-test.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
