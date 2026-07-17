@@ -83,6 +83,27 @@ func (unarmedPinTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("embeddings dependency pin configured but not armed (no platform identity); refusing unpinned dial")
 }
 
+// activeChat resolves the fleet chat client for digests/summaries
+// (§8.7). It rides the same fleet host + attested pin as embeddings;
+// nil when no chat model is configured (generation is unavailable).
+func (s *Server) activeChat() *search.FleetChat {
+	cfg := s.CurrentConfig()
+	if cfg == nil || cfg.EmbeddingsBaseURL == "" || cfg.ChatModel == "" {
+		return nil
+	}
+	fc := &search.FleetChat{
+		BaseURL: cfg.EmbeddingsBaseURL, Model: cfg.ChatModel, APIKey: cfg.EmbeddingsAPIKey,
+	}
+	if cfg.EmbeddingsDependency != "" {
+		if hc := s.fleetClient(); hc != nil {
+			fc.Client = hc
+		} else {
+			fc.Client = &http.Client{Transport: unarmedPinTransport{}}
+		}
+	}
+	return fc
+}
+
 // indexOps adapts the store to the search.Ops interface.
 type indexOps struct{ st *store.Store }
 
@@ -122,6 +143,30 @@ func (o indexOps) ListPendingIndex(ctx context.Context, limit int) ([][3]string,
 
 func (o indexOps) SaveConversion(ctx context.Context, tenantID, nodeID, converter, text string) error {
 	return o.st.SaveConversion(ctx, tenantID, nodeID, converter, text)
+}
+
+// ReplaceLinks resolves extracted links (wikilinks against Memory/,
+// citations verbatim) and stores them for the graph (§8.7).
+func (o indexOps) ReplaceLinks(ctx context.Context, tenantID, nodeID string, raws []search.RawLink) error {
+	links := make([]store.NodeLink, 0, len(raws))
+	for _, r := range raws {
+		l := store.NodeLink{
+			FromNode: nodeID, FromSection: r.FromSection, Kind: store.LinkKind(r.Kind),
+		}
+		switch r.Kind {
+		case "citation":
+			l.ToNode = r.ToNode // a node id the digest cited
+			l.ToSection = r.ToSection
+			l.ToName = r.ToNode
+		case "wikilink":
+			l.ToName = r.ToName
+			l.ToNode = o.st.ResolveMemoryName(ctx, tenantID, r.ToName) // "" = dangling
+		default:
+			continue
+		}
+		links = append(links, l)
+	}
+	return o.st.ReplaceNodeLinks(ctx, tenantID, nodeID, links)
 }
 
 // indexContent is the indexer's internal plaintext reader (same
@@ -264,7 +309,12 @@ func (s *Server) semanticSearch(ctx context.Context, tenantID, q string, topK in
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	// Resolve section paths, one ListSections per distinct node.
+	return s.hitsToJSON(ctx, tenantID, hits), http.StatusOK, nil
+}
+
+// hitsToJSON resolves section paths and snippets for a set of hits,
+// shared by tenant-scoped and AI-scoped search.
+func (s *Server) hitsToJSON(ctx context.Context, tenantID string, hits []store.SearchHit) []searchHitJSON {
 	paths := map[string]map[int64][]string{}
 	out := make([]searchHitJSON, 0, len(hits))
 	for _, h := range hits {
@@ -288,7 +338,7 @@ func (s *Server) semanticSearch(ctx context.Context, tenantID, q string, topK in
 		}
 		out = append(out, hit)
 	}
-	return out, http.StatusOK, nil
+	return out
 }
 
 // sectionPaths builds sectionID -> ["Root", "Title", …] for a file.
@@ -464,6 +514,10 @@ func (s *Server) toolSearchSemantic(w http.ResponseWriter, r *http.Request, p *P
 		TenantID string `json:"tenant_id"`
 		Query    string `json:"query"`
 		TopK     int    `json:"top_k"`
+		// AssistantScope restricts results to the AI-scoped node set
+		// (§8.7): Memory/, Chat conversations/ and every directory the
+		// user enabled for AI. Enforced server-side.
+		AssistantScope bool `json:"assistant_scope"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		httpError(w, http.StatusBadRequest, err)
@@ -481,7 +535,14 @@ func (s *Server) toolSearchSemantic(w http.ResponseWriter, r *http.Request, p *P
 		httpError(w, http.StatusBadRequest, errors.New("query required"))
 		return
 	}
-	hits, status, err := s.semanticSearch(r.Context(), req.TenantID, req.Query, req.TopK)
+	var hits []searchHitJSON
+	var status int
+	var err error
+	if req.AssistantScope {
+		hits, status, err = s.semanticSearchScoped(r.Context(), req.TenantID, req.Query, req.TopK)
+	} else {
+		hits, status, err = s.semanticSearch(r.Context(), req.TenantID, req.Query, req.TopK)
+	}
 	if err != nil {
 		httpError(w, status, err)
 		return

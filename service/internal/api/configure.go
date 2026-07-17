@@ -79,6 +79,7 @@ type configureRequest struct {
 	EmbeddingsAPIKey     *string `json:"embeddings_api_key"`
 	EmbeddingsDependency *string `json:"embeddings_dependency"`
 	EmbeddingsAllowDebug *bool   `json:"embeddings_allow_debug"`
+	ChatModel            *string `json:"chat_model"`
 	// Escrowed-mode setup (sent via the API/CLI, not the portal form):
 	// the MEK_org vault reference and the recovery policy.
 	OrgMEKRef *string                `json:"org_mek_ref"`
@@ -101,6 +102,9 @@ func (req *configureRequest) overlay(cur *config.Config) *config.Config {
 	}
 	if req.EmbeddingsBaseURL != nil {
 		cfg.EmbeddingsBaseURL = *req.EmbeddingsBaseURL
+	}
+	if req.ChatModel != nil {
+		cfg.ChatModel = *req.ChatModel
 	}
 	if req.EmbeddingsModel != nil {
 		cfg.EmbeddingsModel = *req.EmbeddingsModel

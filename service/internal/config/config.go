@@ -106,6 +106,14 @@ type Config struct {
 	// embedder is the fallback. Mutable ops settings.
 	EmbeddingsBaseURL string `json:"embeddings_base_url,omitempty"`
 	EmbeddingsModel   string `json:"embeddings_model,omitempty"`
+
+	// ChatModel is the fleet chat model used for digests and summaries
+	// (§8.7). It rides the SAME fleet host + attested-dependency pin as
+	// embeddings (embeddings_base_url), so every plaintext-to-fleet flow
+	// stays inside Drive's disclosed boundary; only the model name and
+	// the OpenAI-compatible chat endpoint differ. Empty disables
+	// Drive-side generation (finalize_conversation returns unavailable).
+	ChatModel string `json:"chat_model,omitempty"`
 	EmbeddingsAPIKey  string `json:"embeddings_api_key,omitempty"`
 
 	// EmbeddingsDependency pins the fleet's attested identity: the

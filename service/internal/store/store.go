@@ -468,6 +468,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateNodeExpiry(ctx); err != nil {
 		return fmt.Errorf("migrate node_expiry: %w", err)
 	}
+	if err := s.migrateNodeLinks(ctx); err != nil {
+		return fmt.Errorf("migrate node_links: %w", err)
+	}
 	return nil
 }
 

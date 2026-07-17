@@ -155,6 +155,7 @@ type fakeOps struct {
 	space       map[string]string
 	excluded    map[string]bool
 	conversions map[string]string
+	links       map[string][]RawLink
 }
 
 func (f *fakeOps) SetIndexStatus(_ context.Context, _, nodeID, status string) error {
@@ -187,6 +188,14 @@ func (f *fakeOps) ListPendingIndex(_ context.Context, _ int) ([][3]string, error
 
 func (f *fakeOps) SaveConversion(_ context.Context, _, nodeID, converter, text string) error {
 	f.conversions[nodeID] = converter + "|" + text
+	return nil
+}
+
+func (f *fakeOps) ReplaceLinks(_ context.Context, _, nodeID string, links []RawLink) error {
+	if f.links == nil {
+		f.links = map[string][]RawLink{}
+	}
+	f.links[nodeID] = links
 	return nil
 }
 

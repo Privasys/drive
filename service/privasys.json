@@ -60,6 +60,13 @@
                         "label": "Embeddings model"
                     }
                 },
+                "chat_model": {
+                    "type": "string",
+                    "description": "Fleet chat model for conversation digests and summaries (same host + pin as embeddings). Empty disables Drive-side generation.",
+                    "x-privasys": {
+                        "label": "Chat model (digests)"
+                    }
+                },
                 "embeddings_api_key": {
                     "type": "string",
                     "description": "Bearer for the embeddings endpoint.",
@@ -138,6 +145,13 @@
                         "description": "Embedding model name on the endpoint (must produce 1024-dimensional vectors).",
                         "x-privasys": {
                             "label": "Embeddings model"
+                        }
+                    },
+                    "chat_model": {
+                        "type": "string",
+                        "description": "Fleet chat model for conversation digests and summaries (same host + pin as embeddings). Empty disables Drive-side generation.",
+                        "x-privasys": {
+                            "label": "Chat model (digests)"
                         }
                     },
                     "embeddings_api_key": {
@@ -509,6 +523,125 @@
             }
         },
         {
+            "name": "finalize_conversation",
+            "title": "Finalise a conversation",
+            "endpoint": "/tools/finalize_conversation",
+            "description": "Mark a conversation complete: Drive generates its digest.md via the pinned fleet, grounded on the provenance you accumulated (it may cite ONLY those chips, resolved and validated at write time; dead links dropped). Claims are marked extracted/inferred/ambiguous. Regenerates in place on re-finalise. Requires a configured chat model.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string" },
+                    "conversation_id": { "type": "string" },
+                    "provenance": {
+                        "type": "array",
+                        "description": "The citation chips actually used in the conversation.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "node_id": { "type": "string" },
+                                "section_id": { "type": "string", "description": "Stable section anchor; omit for a whole-file citation." }
+                            },
+                            "required": ["node_id"]
+                        }
+                    }
+                },
+                "required": ["tenant_id", "conversation_id"]
+            }
+        },
+        {
+            "name": "get_graph",
+            "title": "Get the knowledge graph",
+            "endpoint": "/tools/get_graph",
+            "description": "Return the tenant's node/edge graph: files and folders (coloured by class — memory / conversation / document) with typed edges (citation, wikilink, containment). Access-scoped to the caller's tenant.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "tenant_id": { "type": "string" } },
+                "required": ["tenant_id"]
+            }
+        },
+        {
+            "name": "enable_ai",
+            "title": "Enable a directory for AI",
+            "endpoint": "/tools/enable_ai",
+            "description": "Grant the assistant read access to a directory subtree ('Shared with: Assistant'). The assistant's scoped search then reaches it. Memory/ and Chat conversations/ are always in scope; everything else is opt-in.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string" },
+                    "node_id": { "type": "string", "description": "The folder (or file) to enable for AI." }
+                },
+                "required": ["tenant_id", "node_id"]
+            }
+        },
+        {
+            "name": "disable_ai",
+            "title": "Disable a directory for AI",
+            "endpoint": "/tools/disable_ai",
+            "description": "Revoke the assistant's grant on a directory subtree.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string" },
+                    "node_id": { "type": "string" }
+                },
+                "required": ["tenant_id", "node_id"]
+            }
+        },
+        {
+            "name": "list_ai_scope",
+            "title": "List the AI scope",
+            "endpoint": "/tools/list_ai_scope",
+            "description": "List the directories the assistant may read: explicit grants plus the always-scoped defaults (Memory/, Chat conversations/).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "tenant_id": { "type": "string" } },
+                "required": ["tenant_id"]
+            }
+        },
+        {
+            "name": "get_folder_tree",
+            "title": "Get a folder tree",
+            "endpoint": "/tools/get_folder_tree",
+            "description": "Return a folder's structure derived from the index: its subfolders and its files, each with a one-line description (authored summary, else derived) and a section index (stable anchors). Generalises get_doc_tree one level up. Serves the corpus 'what do we know' table of contents (e.g. over 'Chat conversations/'). Pass an empty folder_id for the drive root.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string" },
+                    "folder_id": { "type": "string", "description": "Folder to expand; empty for the drive root." }
+                },
+                "required": ["tenant_id"]
+            }
+        },
+        {
+            "name": "get_memory",
+            "title": "Get memory",
+            "endpoint": "/tools/get_memory",
+            "description": "Return the tenant's Memory/ for inlining at conversation start. mode 'full' (whole bodies) under the size budget, else mode 'tree' (one-line summary per memory) with lazy drill-down via read_file. Guaranteed enumeration: never search-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "tenant_id": { "type": "string" } },
+                "required": ["tenant_id"]
+            }
+        },
+        {
+            "name": "write_memory",
+            "title": "Write a memory",
+            "endpoint": "/tools/write_memory",
+            "description": "Write or update one standing fact in Memory/ (one fact per file, kebab-case name, authored summary). Returns overlapping memories (merge hygiene: update in place rather than duplicate). Set overwrite to replace an existing name; set by_assistant for assistant-authored writes (raises a wallet notification). Body may use [[wikilinks]] to other memories.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string" },
+                    "name": { "type": "string", "description": "Kebab-case memory name (the one fact)." },
+                    "summary": { "type": "string", "description": "One-line hook, stored as frontmatter summary." },
+                    "body": { "type": "string", "description": "Markdown body; may include [[wikilinks]]." },
+                    "overwrite": { "type": "boolean", "description": "Replace an existing memory of this name." },
+                    "by_assistant": { "type": "boolean", "description": "Assistant-authored (notifies the wallet)." }
+                },
+                "required": ["tenant_id", "name", "body"]
+            }
+        },
+        {
             "name": "rearm_tenant_key",
             "title": "Re-arm tenant vault key",
             "endpoint": "/tools/rearm_tenant_key",
@@ -805,6 +938,10 @@
                     "top_k": {
                         "type": "integer",
                         "description": "Max hits to return (default 10, max 50)."
+                    },
+                    "assistant_scope": {
+                        "type": "boolean",
+                        "description": "Restrict results to the AI-scoped node set (Memory/, Chat conversations/, and directories enabled for AI). Enforced server-side."
                     }
                 },
                 "required": [

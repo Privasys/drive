@@ -270,6 +270,22 @@ type Ops interface {
 	// SaveConversion persists converted markdown for non-text formats;
 	// sections and read_section anchor into it.
 	SaveConversion(ctx context.Context, tenantID, nodeID, converter, text string) error
+	// ReplaceLinks swaps a node's outbound typed links (§8.7 graph).
+	// Extracted at index time from markdown content.
+	ReplaceLinks(ctx context.Context, tenantID, nodeID string, links []RawLink) error
+}
+
+// RawLink is an extracted outbound edge (store-independent). ToNode is
+// resolved by the Ops implementation ("" = dangling).
+type RawLink struct {
+	FromSection string // stable anchor, "" for file-level
+	Kind        string // citation | wikilink
+	// For citations, ToNode/ToSection are the cited node + anchor. For
+	// wikilinks, ToName is the target name the store resolves against
+	// Memory/.
+	ToNode    string
+	ToSection string
+	ToName    string
 }
 
 // SectionSpec mirrors store.SectionInput without importing store.
@@ -502,6 +518,12 @@ func (ix *Indexer) process(ctx context.Context, j job) {
 		log.Printf("search: sections %s: %v", j.nodeID, err)
 		setStatus(statusFailed)
 		return
+	}
+
+	// Typed links for the graph (§8.7): citations + wikilinks. Best
+	// effort — a link-extraction hiccup must not fail indexing.
+	if err := ix.Ops.ReplaceLinks(ctx, j.tenantID, j.nodeID, ExtractLinks(text)); err != nil {
+		log.Printf("search: links %s: %v", j.nodeID, err)
 	}
 
 	// Section-anchored chunking.

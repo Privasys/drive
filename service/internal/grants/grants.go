@@ -27,9 +27,10 @@ import (
 
 // Subject prefixes used in the `subject` column.
 const (
-	SubjectUser = "subject:" // followed by OIDC sub
-	SubjectLink = "link"     // sentinel — no further data
-	SubjectApp  = "app:"     // followed by hex-encoded MRTD measurement
+	SubjectUser      = "subject:"  // followed by OIDC sub
+	SubjectLink      = "link"      // sentinel — no further data
+	SubjectApp       = "app:"      // followed by hex-encoded MRTD measurement
+	SubjectAssistant = "assistant" // sentinel — the Drive AI Tool (§8.7 AI scope)
 )
 
 // Scope flags. Stored as a comma-joined string for portability.
@@ -173,6 +174,64 @@ func (r *Repo) ActiveForSubjectOnNode(ctx context.Context, tenantID, nodeID, sub
 		}
 	}
 	return nil, rows.Err()
+}
+
+// ActiveRawSubjectOnNode is ActiveForSubjectOnNode with the subject used
+// VERBATIM (no SubjectUser prefix) — for sentinel subjects like the
+// assistant (§8.7 AI scope).
+func (r *Repo) ActiveRawSubjectOnNode(ctx context.Context, tenantID, nodeID, subject string) (*Grant, error) {
+	nodeClause := "node_id = ?"
+	args := []any{tenantID, nodeID, subject}
+	if nodeID == "" {
+		nodeClause = "node_id IS NULL"
+		args = []any{tenantID, subject}
+	}
+	rows, err := r.DB.QueryContext(ctx, r.q(
+		`SELECT id, tenant_id, node_id, subject, scope, created_by, created_at,
+		        expires_at, revoked_at, binding_pubkey, meta
+		 FROM grants WHERE tenant_id = ? AND `+nodeClause+` AND subject = ? AND revoked_at IS NULL`),
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	now := r.NowFn()
+	for rows.Next() {
+		g, serr := scanGrant(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		if g.IsActive(now) {
+			return g, nil
+		}
+	}
+	return nil, rows.Err()
+}
+
+// ListForTenantSubject returns a tenant's active grants for a verbatim
+// subject (e.g. all assistant-scoped nodes).
+func (r *Repo) ListForTenantSubject(ctx context.Context, tenantID, subject string) ([]*Grant, error) {
+	rows, err := r.DB.QueryContext(ctx, r.q(
+		`SELECT id, tenant_id, node_id, subject, scope, created_by, created_at,
+		        expires_at, revoked_at, binding_pubkey, meta
+		 FROM grants WHERE tenant_id = ? AND subject = ? AND revoked_at IS NULL ORDER BY created_at DESC`),
+		tenantID, subject)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	now := r.NowFn()
+	var out []*Grant
+	for rows.Next() {
+		g, serr := scanGrant(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		if g.IsActive(now) {
+			out = append(out, g)
+		}
+	}
+	return out, rows.Err()
 }
 
 // ListForSubject returns the active grants shared with a recipient

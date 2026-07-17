@@ -306,6 +306,20 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/conversations/{convID}", s.auth(s.handleGetConversation))
 	mux.Handle("POST /v1/tenants/{tenantID}/conversations/{convID}/turns", s.auth(s.handleAppendTurn))
 	mux.Handle("POST /v1/tenants/{tenantID}/conversations/{convID}/attach", s.auth(s.handleAttachToConversation))
+	// Folder tree + Memory (§8.7).
+	mux.Handle("GET /v1/tenants/{tenantID}/tree", s.auth(s.handleFolderTree))
+	mux.Handle("GET /v1/tenants/{tenantID}/folders/{folderID}/tree", s.auth(s.handleFolderTree))
+	mux.Handle("GET /v1/tenants/{tenantID}/memory", s.auth(s.handleGetMemory))
+	mux.Handle("POST /v1/tenants/{tenantID}/memory", s.auth(s.handleWriteMemory))
+	mux.Handle("POST /v1/tenants/{tenantID}/conversations/{convID}/finalize", s.auth(s.handleFinalizeConversation))
+	// Links, graph & wiki-lint (§8.7).
+	mux.Handle("GET /v1/tenants/{tenantID}/graph", s.auth(s.handleGraph))
+	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/backlinks", s.auth(s.handleBacklinks))
+	mux.Handle("GET /v1/tenants/{tenantID}/lint", s.auth(s.handleLint))
+	// AI scope (§8.7): enable/disable/list the assistant's subtree grants.
+	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/ai-scope", s.auth(s.handleEnableAI))
+	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}/ai-scope", s.auth(s.handleDisableAI))
+	mux.Handle("GET /v1/tenants/{tenantID}/ai-scope", s.auth(s.handleListAIScope))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}", s.auth(s.handleDeleteNode))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/move", s.auth(s.handleMoveNode))
 
@@ -974,6 +988,9 @@ func max64(a, b int64) int64 {
 
 type exportRequest struct {
 	Mode export.Mode `json:"mode"`
+	// Obsidian rewrites markdown drive:// citations to relative links so
+	// the export opens as an Obsidian vault, graph included (§8.7).
+	Obsidian bool `json:"obsidian"`
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -1009,7 +1026,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, p *Princip
 	}
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="drive-export.zip"`)
-	if _, err := export.WriteZip(r.Context(), s.Store, bk, dek, tenantID, req.Mode, w); err != nil {
+	if _, err := export.WriteZip(r.Context(), s.Store, bk, dek, tenantID, req.Mode, req.Obsidian, w); err != nil {
 		// Headers already sent — best effort.
 		return
 	}

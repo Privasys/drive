@@ -24,7 +24,10 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Privasys/drive/service/internal/manifest"
@@ -63,7 +66,11 @@ type TopManifest struct {
 
 // WriteZip writes a complete export of tenantID into out. dek is the
 // per-tenant DEK; for ModeCiphertext it can be nil — the caller is
-// expected to handle key escrow separately.
+// expected to handle key escrow separately. When obsidian is true (only
+// meaningful for plaintext mode), markdown files are rewritten so
+// drive:// citations gain a relative-path markdown link alongside them,
+// and the vault opens directly in Obsidian with a working graph
+// ([[wikilinks]] already resolve by name). See §8.7.
 func WriteZip(
 	ctx context.Context,
 	st *store.Store,
@@ -71,6 +78,7 @@ func WriteZip(
 	dek []byte,
 	tenantID string,
 	mode Mode,
+	obsidian bool,
 	out io.Writer,
 ) (TopManifest, error) {
 	zw := zip.NewWriter(out)
@@ -81,6 +89,13 @@ func WriteZip(
 		return TopManifest{}, err
 	}
 	sort.Slice(tree, func(i, j int) bool { return tree[i].FullPath < tree[j].FullPath })
+
+	// node-id → export path, for rewriting drive:// citations to
+	// relative markdown links (Obsidian export).
+	pathByID := map[string]string{}
+	for _, e := range tree {
+		pathByID[e.Node.ID] = e.FullPath
+	}
 
 	tm := TopManifest{TenantID: tenantID, Mode: mode, GeneratedAt: time.Now().UTC()}
 	for _, entry := range tree {
@@ -105,7 +120,7 @@ func WriteZip(
 			if dek == nil {
 				return TopManifest{}, fmt.Errorf("export: plaintext mode requires DEK")
 			}
-			if err := writePlainEntry(ctx, zw, backend, dek, tenantID, entry); err != nil {
+			if err := writePlainEntry(ctx, zw, backend, dek, tenantID, entry, obsidian, pathByID); err != nil {
 				return TopManifest{}, err
 			}
 		case ModeCiphertext:
@@ -153,7 +168,7 @@ func walk(ctx context.Context, st *store.Store, tenantID, parentID, basePath str
 	return out, nil
 }
 
-func writePlainEntry(ctx context.Context, zw *zip.Writer, backend objectstore.Backend, dek []byte, tenantID string, e entry) error {
+func writePlainEntry(ctx context.Context, zw *zip.Writer, backend objectstore.Backend, dek []byte, tenantID string, e entry, obsidian bool, pathByID map[string]string) error {
 	_, rc, err := manifest.Read(ctx, backend, dek, tenantID, e.Node.ID, e.Node.WrappedCEK)
 	if err != nil {
 		return fmt.Errorf("export: read %s: %w", e.FullPath, err)
@@ -163,10 +178,46 @@ func writePlainEntry(ctx context.Context, zw *zip.Writer, backend objectstore.Ba
 	if err != nil {
 		return err
 	}
+	if obsidian && isMarkdownName(e.Node.Name) {
+		body, rerr := io.ReadAll(io.LimitReader(rc, 32<<20))
+		if rerr != nil {
+			return rerr
+		}
+		_, err = w.Write(rewriteObsidianLinks(body, e.FullPath, pathByID))
+		return err
+	}
 	if _, err := io.Copy(w, rc); err != nil {
 		return err
 	}
 	return nil
+}
+
+var exportDriveLinkRe = regexp.MustCompile(`drive://([a-zA-Z0-9-]+)(#[a-f0-9]*)?`)
+
+func isMarkdownName(name string) bool {
+	l := strings.ToLower(name)
+	return strings.HasSuffix(l, ".md") || strings.HasSuffix(l, ".markdown")
+}
+
+// rewriteObsidianLinks appends a relative-path markdown link after each
+// drive:// citation whose target is in the export, so the vault's graph
+// works in Obsidian. Unknown targets are left untouched. [[wikilinks]]
+// already resolve by name in Obsidian and are not rewritten.
+func rewriteObsidianLinks(body []byte, fromPath string, pathByID map[string]string) []byte {
+	fromDir := path.Dir(fromPath)
+	return exportDriveLinkRe.ReplaceAllFunc(body, func(m []byte) []byte {
+		sub := exportDriveLinkRe.FindSubmatch(m)
+		target, ok := pathByID[string(sub[1])]
+		if !ok {
+			return m // unknown node: leave the drive:// anchor as-is
+		}
+		rel, err := filepath.Rel(fromDir, target)
+		if err != nil {
+			rel = target
+		}
+		rel = filepath.ToSlash(rel)
+		return append(append([]byte(nil), m...), []byte(" ([open]("+rel+"))")...)
+	})
 }
 
 func writeCipherEntry(ctx context.Context, zw *zip.Writer, backend objectstore.Backend, tenantID string, e entry) error {

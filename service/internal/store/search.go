@@ -526,6 +526,100 @@ func (s *Store) SearchEmbeddings(ctx context.Context, tenantID, space string, qu
 	return out, rows.Err()
 }
 
+// SearchEmbeddingsScoped is SearchEmbeddings restricted to an explicit
+// node-id allow-list (§8.7 AI scope: the assistant sees only nodes under
+// AI-enabled subtrees). An empty allow-list returns no hits — the
+// enforcement is server-side, never a trusted tool parameter.
+func (s *Store) SearchEmbeddingsScoped(ctx context.Context, tenantID, space string, query []float32, topK int, allow []string) ([]SearchHit, error) {
+	if !s.VectorOK {
+		return nil, fmt.Errorf("semantic index unavailable (pgvector missing)")
+	}
+	if len(allow) == 0 {
+		return nil, nil
+	}
+	if topK <= 0 || topK > 50 {
+		topK = 10
+	}
+	// Build an IN clause; args after the fixed three.
+	ph := make([]string, len(allow))
+	args := []any{vectorLiteral(query), tenantID, space}
+	for i, id := range allow {
+		ph[i] = fmt.Sprintf("$%d", i+4)
+		args = append(args, id)
+	}
+	args = append(args, topK)
+	q := fmt.Sprintf(
+		`SELECT e.node_id, n.name, n.mime_hint, e.section_id, COALESCE(sec.anchor, ''),
+		        e.chunk_index, e.content, e.char_start, e.char_end,
+		        1 - (e.embedding <=> $1::vector) AS score
+		 FROM embeddings e
+		 JOIN nodes n ON n.id = e.node_id
+		 LEFT JOIN sections sec ON sec.id = e.section_id
+		 WHERE e.tenant_id = $2 AND e.embed_space = $3 AND e.node_id IN (%s)
+		 ORDER BY e.embedding <=> $1::vector
+		 LIMIT $%d`, strings.Join(ph, ","), len(args))
+	rows, err := s.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SearchHit
+	for rows.Next() {
+		var h SearchHit
+		var section sql.NullInt64
+		if err := rows.Scan(&h.NodeID, &h.Name, &h.MimeHint, &section, &h.SectionAnchor,
+			&h.ChunkIndex, &h.Content, &h.CharStart, &h.CharEnd, &h.Score); err != nil {
+			return nil, err
+		}
+		if section.Valid {
+			v := section.Int64
+			h.SectionID = &v
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// DescendantNodeIDs returns rootIDs plus every node beneath them (BFS
+// over parent_id) — the expansion of AI-scoped folders to the concrete
+// node set the scoped search filters on.
+func (s *Store) DescendantNodeIDs(ctx context.Context, tenantID string, rootIDs []string) ([]string, error) {
+	seen := map[string]bool{}
+	var out []string
+	frontier := append([]string(nil), rootIDs...)
+	for _, id := range frontier {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for len(frontier) > 0 {
+		var next []string
+		for _, parent := range frontier {
+			rows, err := s.DB.QueryContext(ctx, s.q(
+				`SELECT id FROM nodes WHERE tenant_id = ? AND parent_id = ?`), tenantID, parent)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return nil, err
+				}
+				if !seen[id] {
+					seen[id] = true
+					out = append(out, id)
+					next = append(next, id)
+				}
+			}
+			rows.Close()
+		}
+		frontier = next
+	}
+	return out, nil
+}
+
 // vectorLiteral renders a pgvector input literal: [0.1,0.2,...].
 func vectorLiteral(v []float32) string {
 	var b strings.Builder
