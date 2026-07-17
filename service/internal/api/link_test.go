@@ -213,7 +213,9 @@ func TestRestrictedLinkShare(t *testing.T) {
 		t.Fatalf("pre-approval read: want 403, got %d", code)
 	}
 
-	// Owner sees the pending request with the presented attribute.
+	// Owner sees the pending request — by sub only. The presented
+	// attributes ride out to the owner's wallet in the notification and
+	// are never persisted on the drive (§7.6 PII boundary).
 	code, b = doReq(t, bearerReq(t, "GET",
 		fmt.Sprintf("%s/v1/tenants/%s/link-requests?status=pending", ts.URL, tenantID), owner, ""))
 	if code != 200 {
@@ -222,14 +224,18 @@ func TestRestrictedLinkShare(t *testing.T) {
 	var lr struct {
 		Requests []struct {
 			ID         string            `json:"id"`
+			Requester  string            `json:"requester_sub"`
 			Attributes map[string]string `json:"attributes"`
 		} `json:"requests"`
 	}
 	if err := json.Unmarshal(b, &lr); err != nil {
 		t.Fatal(err)
 	}
-	if len(lr.Requests) != 1 || lr.Requests[0].Attributes["name"] != "Alice Example" {
+	if len(lr.Requests) != 1 || lr.Requests[0].Requester == "" {
 		t.Fatalf("requests unexpected: %s", b)
+	}
+	if len(lr.Requests[0].Attributes) != 0 {
+		t.Fatalf("attributes must not persist on the drive: %s", b)
 	}
 
 	// Owner approves -> recipient gains access.

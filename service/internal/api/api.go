@@ -27,6 +27,7 @@ import (
 	"github.com/Privasys/drive/service/internal/export"
 	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/manifest"
+	"github.com/Privasys/drive/service/internal/notify"
 	"github.com/Privasys/drive/service/internal/objectstore"
 	"github.com/Privasys/drive/service/internal/oidc"
 	"github.com/Privasys/drive/service/internal/platform"
@@ -81,6 +82,11 @@ type Server struct {
 	fleetMu   sync.Mutex
 	fleetHTTP *http.Client
 	fleetKey  string
+
+	// notifier pushes wallet notifications via the control plane
+	// (share requests/decisions). Nil off-platform or before configure.
+	notifyMu sync.Mutex
+	notifier *notify.Client
 
 	// recVer caches per-issuer JWKS verifiers for recovery approvals.
 	recVerMu sync.Mutex
@@ -185,6 +191,9 @@ func (s *Server) applyConfigSideEffects(c *config.Config) {
 			v.SetTokenRefresher(r)
 		}
 	}
+	s.notifyMu.Lock()
+	s.notifier = nil // rebuilt lazily against the (possibly new) base URL
+	s.notifyMu.Unlock()
 	s.fleetMu.Lock()
 	defer s.fleetMu.Unlock()
 	key := fmt.Sprintf("%s|%t", c.EmbeddingsDependency, c.EmbeddingsAllowDebug)
@@ -203,6 +212,28 @@ func (s *Server) applyConfigSideEffects(c *config.Config) {
 		return
 	}
 	s.fleetHTTP = deptls.NewHTTPClient(set, v.AttestationCredentials, c.EmbeddingsAllowDebug)
+}
+
+// Notifier returns the wallet-push client, building it lazily from the
+// current config's control-plane base URL and the app's manager-minted
+// identity. Nil when either is unavailable (off-platform / unconfigured):
+// notifications degrade to silence, never to an error.
+func (s *Server) Notifier() *notify.Client {
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	if s.notifier != nil {
+		return s.notifier
+	}
+	cfg := s.CurrentConfig()
+	if cfg == nil || cfg.MgmtBaseURL == "" {
+		return nil
+	}
+	v, ok := s.MEKs.(*vaultmek.Client)
+	if !ok || v == nil {
+		return nil
+	}
+	s.notifier = notify.New(cfg.MgmtBaseURL, v.AppIdentityHeaders)
+	return s.notifier
 }
 
 // fleetClient returns the pinned attested-dependency HTTP client, or
@@ -268,6 +299,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/tenants/{tenantID}/uploads/{uploadID}/finalize", s.auth(s.handleFinalizeUpload))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/uploads/{uploadID}", s.auth(s.handleAbortUpload))
 	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}", s.auth(s.handleDownloadFile))
+	mux.Handle("GET /v1/tenants/{tenantID}/metrics", s.auth(s.handleTenantMetrics))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}", s.auth(s.handleDeleteNode))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/move", s.auth(s.handleMoveNode))
 
@@ -668,10 +700,89 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request, p *P
 	}
 	w.Header().Set("Content-Length", strconv.FormatInt(n.PlainSize, 10))
 	w.Header().Set("X-Drive-Merkle-Root", hex.EncodeToString(n.MerkleRoot))
-	if _, err := io.Copy(w, rc); err != nil {
+	start := time.Now()
+	written, err := io.Copy(w, rc)
+	// Access telemetry (§7.6): subject, node, bytes, stream span. The
+	// front marks explicit downloads with ?ctx=download; everything
+	// else counts as a view. Recorded best-effort after the stream.
+	s.recordAccess(p, tenantID, fileID, r.URL.Query().Get("ctx"), written, time.Since(start))
+	if err != nil {
 		// Best-effort: response already started.
 		return
 	}
+}
+
+// recordAccess writes one access event for a user principal. Internal
+// readers (the indexer) never come through here, and app principals
+// are attributed by their grant subject.
+func (s *Server) recordAccess(p *Principal, tenantID, nodeID, ctxKind string, bytes int64, d time.Duration) {
+	if p == nil || p.Sub == "" {
+		return
+	}
+	event := "view"
+	if ctxKind == "download" {
+		event = "download"
+	} else if !p.IsUser() {
+		event = "tool"
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.Store.RecordAccessEvent(ctx, store.AccessEvent{
+			TenantID: tenantID, Sub: p.Sub, Event: event, NodeID: nodeID,
+			DurationMS: d.Milliseconds(), Bytes: bytes,
+		}); err != nil {
+			log.Printf("metrics: record access: %v", err)
+		}
+	}()
+}
+
+// handleTenantMetrics serves the owner's Insights aggregates: per-day
+// series, top nodes, per-sub table. Subs are opaque — the wallet
+// decorates them client-side; no PII lives here.
+func (s *Server) handleTenantMetrics(w http.ResponseWriter, r *http.Request, p *Principal) {
+	tenantID := r.PathValue("tenantID")
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
+		return
+	}
+	days := 30
+	if v, err := strconv.Atoi(r.URL.Query().Get("days")); err == nil && v > 0 && v <= 365 {
+		days = v
+	}
+	series, err := s.Store.MetricsSeries(r.Context(), tenantID, days)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	topNodes, err := s.Store.MetricsTopNodes(r.Context(), tenantID, days, 20)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	subs, err := s.Store.MetricsSubs(r.Context(), tenantID, days, 100)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	uniq, err := s.Store.MetricsUniqueSubs(r.Context(), tenantID, days)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if series == nil {
+		series = []store.MetricsDay{}
+	}
+	if topNodes == nil {
+		topNodes = []store.MetricsNode{}
+	}
+	if subs == nil {
+		subs = []store.MetricsSub{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"days": days, "series": series, "top_nodes": topNodes, "subs": subs,
+		"unique_subs": uniq,
+	})
 }
 
 func (s *Server) openFile(ctx context.Context, p *Principal, tenantID, fileID string) (*store.Node, io.ReadCloser, int, error) {

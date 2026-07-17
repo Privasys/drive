@@ -442,6 +442,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			s.VectorOK = true
 		}
 	}
+	if err := s.migrateAccessEvents(ctx); err != nil {
+		return fmt.Errorf("migrate access_events: %w", err)
+	}
 	return nil
 }
 

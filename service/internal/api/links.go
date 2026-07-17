@@ -338,11 +338,13 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 			})
 			return
 		}
-		attrJSON, _ := json.Marshal(req.Attributes)
+		// PII boundary (§7.6): the presented attributes ride out to the
+		// sharer's wallet in the notification and are NOT persisted —
+		// the drive keeps only the sub, scope and timestamps.
 		lr := &store.LinkRequest{
 			TenantID: g.TenantID, LinkID: g.ID, NodeID: g.NodeID,
-			RequesterSub: p.Sub, Attributes: string(attrJSON),
-			Scope: joinScopeStrings(g.Scope),
+			RequesterSub: p.Sub,
+			Scope:        joinScopeStrings(g.Scope),
 		}
 		err := s.Store.CreateLinkRequest(r.Context(), lr)
 		if errors.Is(err, store.ErrDuplicateApproval) {
@@ -354,6 +356,15 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 			httpError(w, http.StatusInternalServerError, err)
 			return
 		}
+		s.Notifier().Fire(g.CreatedBy, "share-request", map[string]any{
+			"tenant_id":     g.TenantID,
+			"request_id":    lr.ID,
+			"node_id":       g.NodeID,
+			"node_name":     n.Name,
+			"requester_sub": p.Sub,
+			"attributes":    req.Attributes,
+			"scope":         scopeStrings(g.Scope),
+		})
 		writeJSON(w, http.StatusOK, redeemResult("pending", g, n, lr.ID))
 	default:
 		httpError(w, http.StatusInternalServerError, errors.New("unknown link mode"))
@@ -437,11 +448,19 @@ func (s *Server) handleDecideLinkRequest(w http.ResponseWriter, r *http.Request,
 		httpError(w, http.StatusConflict, errors.New("request already decided"))
 		return
 	}
+	nodeName := ""
+	if n, nerr := s.Store.GetNode(r.Context(), tenantID, lr.NodeID); nerr == nil {
+		nodeName = n.Name
+	}
 	if decision == "deny" {
 		if err := s.Store.DecideLinkRequest(r.Context(), tenantID, reqID, "denied", "", p.Sub); err != nil {
 			writeStoreError(w, err)
 			return
 		}
+		s.Notifier().Fire(lr.RequesterSub, "share-decision", map[string]any{
+			"tenant_id": tenantID, "request_id": reqID,
+			"node_id": lr.NodeID, "node_name": nodeName, "status": "denied",
+		})
 		writeJSON(w, http.StatusOK, map[string]any{"status": "denied"})
 		return
 	}
@@ -455,6 +474,10 @@ func (s *Server) handleDecideLinkRequest(w http.ResponseWriter, r *http.Request,
 		writeStoreError(w, err)
 		return
 	}
+	s.Notifier().Fire(lr.RequesterSub, "share-decision", map[string]any{
+		"tenant_id": tenantID, "request_id": reqID,
+		"node_id": lr.NodeID, "node_name": nodeName, "status": "approved",
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "grant_id": g.ID})
 }
 

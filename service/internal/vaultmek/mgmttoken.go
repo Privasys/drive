@@ -69,6 +69,32 @@ func (c *Client) AttestationCredentials(ctx context.Context) (server, token stri
 	return server, token, nil
 }
 
+// AppIdentityHeaders mints a fresh challenge-bound identity leaf and
+// returns the header pair (base64 DER, base64 challenge) that
+// authenticates one control-plane call behind the app-identity gate.
+// The challenge follows the freshness contract: first 8 bytes are
+// big-endian unix seconds, the rest anti-replay randomness. Errors
+// off-platform (no manager identity).
+func (c *Client) AppIdentityHeaders(ctx context.Context) (identityB64, challengeB64 string, err error) {
+	if c.minter == nil {
+		return "", "", fmt.Errorf("vaultmek: no manager identity available (not running on the platform)")
+	}
+	challenge := make([]byte, 16)
+	binary.BigEndian.PutUint64(challenge[:8], uint64(time.Now().Unix()))
+	if _, err := rand.Read(challenge[8:]); err != nil {
+		return "", "", err
+	}
+	cert, err := c.minter.mint(ctx, challenge)
+	if err != nil {
+		return "", "", fmt.Errorf("vaultmek: mint identity: %w", err)
+	}
+	if len(cert.Certificate) == 0 {
+		return "", "", fmt.Errorf("vaultmek: minted identity has no leaf")
+	}
+	return base64.StdEncoding.EncodeToString(cert.Certificate[0]),
+		base64.StdEncoding.EncodeToString(challenge), nil
+}
+
 // newMgmtRefresher builds the refresher against base (scheme://host)
 // with the given minter; hc defaults to a 30s-timeout client. onMeta,
 // when non-nil, receives the constellation's attestation-server
