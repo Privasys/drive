@@ -372,6 +372,69 @@
             }
         },
         {
+            "name": "share_link_create",
+            "title": "Create a share link",
+            "endpoint": "/tools/share_link_create",
+            "description": "Mint a share link on a file or folder (owner/admin). mode open grants on redemption; mode restricted requires the listed attributes and files an owner-approved access request. Returns the link id and the secret (shown exactly once).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "Tenant the node belongs to." },
+                    "node_id": { "type": "string", "description": "File or folder to share." },
+                    "mode": { "type": "string", "enum": ["open", "restricted"], "description": "open: anyone with the link gets access on sign-in. restricted: visitors present attributes and the owner approves each request." },
+                    "scope": { "type": "array", "items": { "type": "string" }, "description": "Granted scopes, default [\"read\"]." },
+                    "required_attributes": { "type": "array", "items": { "type": "string" }, "description": "Restricted mode: canonical attribute keys the visitor must present (e.g. name, email)." },
+                    "expires_unix": { "type": "integer", "description": "Optional expiry (unix seconds)." },
+                    "label": { "type": "string", "description": "Optional owner-facing label." }
+                },
+                "required": ["tenant_id", "node_id", "mode"]
+            }
+        },
+        {
+            "name": "redeem_link",
+            "title": "Redeem a share link",
+            "endpoint": "/tools/redeem_link",
+            "description": "Redeem a share link as the caller. Open links grant access immediately; restricted links file an access request carrying the presented attributes (the sharer's wallet is notified; the attributes are never persisted on the drive). Returns granted or pending with the request id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "link_id": { "type": "string", "description": "The link id from the share URL." },
+                    "secret": { "type": "string", "description": "The link secret (URL fragment)." },
+                    "attributes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Restricted mode: the attributes the caller presents (all required keys must be non-empty)." }
+                },
+                "required": ["link_id", "secret"]
+            }
+        },
+        {
+            "name": "list_link_requests",
+            "title": "List access requests",
+            "endpoint": "/tools/list_link_requests",
+            "description": "List a tenant's restricted-link access requests (owner/admin). Requests carry the requester's sub only; the presented attributes live in the sharer's wallet.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "Tenant to list for." },
+                    "status": { "type": "string", "enum": ["pending", "approved", "denied"], "description": "Optional status filter." }
+                },
+                "required": ["tenant_id"]
+            }
+        },
+        {
+            "name": "decide_link_request",
+            "title": "Decide an access request",
+            "endpoint": "/tools/decide_link_request",
+            "description": "Approve or deny a pending access request (owner/admin). Approval mints the requester's grant; either way the requester's wallet is notified of the outcome.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "Tenant the request belongs to." },
+                    "request_id": { "type": "string", "description": "The access request id." },
+                    "decision": { "type": "string", "enum": ["approve", "deny"], "description": "The decision." }
+                },
+                "required": ["tenant_id", "request_id", "decision"]
+            }
+        },
+        {
             "name": "rearm_tenant_key",
             "title": "Re-arm tenant vault key",
             "endpoint": "/tools/rearm_tenant_key",
