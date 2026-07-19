@@ -466,6 +466,38 @@ func (s *Store) DeleteNode(ctx context.Context, tenantID, id, actor string) erro
 	return tx.Commit()
 }
 
+// ListSubtreeFiles returns every file node in the subtree rooted at rootID
+// (the root itself included when it is a file), each with its WrappedCEK, so
+// a caller can reclaim the sealed object-store blobs before a recursive
+// DeleteNode removes the rows. Folders carry no blob and are only walked.
+func (s *Store) ListSubtreeFiles(ctx context.Context, tenantID, rootID string) ([]*Node, error) {
+	root, err := s.GetNode(ctx, tenantID, rootID)
+	if err != nil {
+		return nil, err
+	}
+	var files []*Node
+	if root.Kind == NodeFile {
+		files = append(files, root)
+	}
+	// Breadth-first over folders; files have no children so are never queued.
+	for queue := []string{rootID}; len(queue) > 0; {
+		cur := queue[0]
+		queue = queue[1:]
+		kids, err := s.ListChildren(ctx, tenantID, cur)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range kids {
+			if k.Kind == NodeFile {
+				files = append(files, k)
+			} else {
+				queue = append(queue, k.ID)
+			}
+		}
+	}
+	return files, nil
+}
+
 // ListTenantFiles returns every file node of a tenant (id + wrapped CEK),
 // for bulk chunk cleanup during a tenant purge.
 func (s *Store) ListTenantFiles(ctx context.Context, tenantID string) ([]*Node, error) {

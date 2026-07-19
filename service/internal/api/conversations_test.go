@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Privasys/drive/service/internal/objectstore"
 )
 
 // TestConversationLifecycle drives the §8.7 conversation flow through the
@@ -164,5 +168,134 @@ func TestConversationLifecycle(t *testing.T) {
 	if code, _ := doReq(t, bearerReq(t, "POST", ts.URL+"/tools/list_conversations", "user-9",
 		fmt.Sprintf(`{"tenant_id":%q}`, tenant.ID))); code != http.StatusForbidden {
 		t.Fatalf("stranger list: want 403, got %d", code)
+	}
+}
+
+// TestDeleteConversation covers the delete surface: the whole conversation
+// subtree (folder, transcript, files/, attachments, digest) is removed, its
+// sealed blobs are reclaimed from the object store, and a node that is not a
+// conversation folder is rejected rather than deleted.
+func TestDeleteConversation(t *testing.T) {
+	base, srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler(""))
+	t.Cleanup(ts.Close)
+	const owner = "user-1"
+
+	code, b := doReq(t, bearerReq(t, "POST", base.URL+"/v1/tenants", owner, `{"kind":"user","name":"Owner"}`))
+	if code != 201 {
+		t.Fatalf("tenant: %d %s", code, b)
+	}
+	var tenant struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(b, &tenant)
+
+	// A conversation with a turn (writes the transcript blob) and a knowledge
+	// attachment (its own blob) — so the delete has descendant files to reclaim.
+	code, b = doReq(t, bearerReq(t, "POST", ts.URL+"/tools/create_conversation", owner,
+		fmt.Sprintf(`{"tenant_id":%q,"title":"Trip planning","date":"2026-07-18"}`, tenant.ID)))
+	if code != 201 {
+		t.Fatalf("create_conversation: %d %s", code, b)
+	}
+	var conv struct {
+		ConversationID string `json:"conversation_id"`
+		TranscriptID   string `json:"transcript_id"`
+		FilesFolderID  string `json:"files_folder_id"`
+	}
+	_ = json.Unmarshal(b, &conv)
+
+	turn, _ := json.Marshal(map[string]string{
+		"tenant_id": tenant.ID, "conversation_id": conv.ConversationID,
+		"turn": `{"role":"user","content":"where to in July"}`,
+	})
+	if code, b = doReq(t, bearerReq(t, "POST", ts.URL+"/tools/append_turn", owner, string(turn))); code != 200 {
+		t.Fatalf("append_turn: %d %s", code, b)
+	}
+
+	kb := base64.StdEncoding.EncodeToString([]byte("# Itinerary\nDay 1: arrive."))
+	code, b = doReq(t, bearerReq(t, "POST", ts.URL+"/tools/attach_to_conversation", owner,
+		fmt.Sprintf(`{"tenant_id":%q,"conversation_id":%q,"name":"plan.md","mime":"text/markdown","content_base64":%q,"intent":"knowledge"}`,
+			tenant.ID, conv.ConversationID, kb)))
+	if code != 200 {
+		t.Fatalf("attach: %d %s", code, b)
+	}
+	var att struct {
+		Node struct {
+			ID string `json:"id"`
+		} `json:"node"`
+	}
+	_ = json.Unmarshal(b, &att)
+
+	root := srv.Backend.(*objectstore.LocalBackend).Root
+	countBlobs := func() int {
+		n := 0
+		_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				n++
+			}
+			return nil
+		})
+		return n
+	}
+	before := countBlobs()
+	if before == 0 {
+		t.Fatal("expected sealed blobs before delete")
+	}
+
+	// Delete the conversation.
+	code, b = doReq(t, bearerReq(t, "POST", ts.URL+"/tools/delete_conversation", owner,
+		fmt.Sprintf(`{"tenant_id":%q,"conversation_id":%q}`, tenant.ID, conv.ConversationID)))
+	if code != 200 {
+		t.Fatalf("delete_conversation: %d %s", code, b)
+	}
+	var del struct {
+		Deleted string `json:"deleted"`
+	}
+	_ = json.Unmarshal(b, &del)
+	if del.Deleted != conv.ConversationID {
+		t.Fatalf("deleted mismatch: %s", b)
+	}
+
+	// The whole subtree is gone.
+	for _, id := range []string{conv.ConversationID, conv.TranscriptID, conv.FilesFolderID, att.Node.ID} {
+		if _, err := srv.Store.GetNode(t.Context(), tenant.ID, id); err == nil {
+			t.Fatalf("node %s should be deleted", id)
+		}
+	}
+	// The blobs were reclaimed, not orphaned.
+	if after := countBlobs(); after >= before {
+		t.Fatalf("blobs not reclaimed: before=%d after=%d", before, after)
+	}
+	// It no longer lists.
+	code, b = doReq(t, bearerReq(t, "POST", ts.URL+"/tools/list_conversations", owner,
+		fmt.Sprintf(`{"tenant_id":%q}`, tenant.ID)))
+	var list struct {
+		Conversations []json.RawMessage `json:"conversations"`
+	}
+	_ = json.Unmarshal(b, &list)
+	if code != 200 || len(list.Conversations) != 0 {
+		t.Fatalf("still listed: %d %s", code, b)
+	}
+
+	// A plain folder that is not a conversation is rejected, not deleted.
+	code, b = doReq(t, bearerReq(t, "POST", ts.URL+"/tools/create_folder", owner,
+		fmt.Sprintf(`{"tenant_id":%q,"name":"Docs"}`, tenant.ID)))
+	if code != 200 && code != 201 {
+		t.Fatalf("create_folder: %d %s", code, b)
+	}
+	// create_folder returns the node view directly (not wrapped in "node").
+	var folder struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(b, &folder)
+	if folder.ID == "" {
+		t.Fatalf("create_folder id missing: %s", b)
+	}
+	if code, b = doReq(t, bearerReq(t, "POST", ts.URL+"/tools/delete_conversation", owner,
+		fmt.Sprintf(`{"tenant_id":%q,"conversation_id":%q}`, tenant.ID, folder.ID))); code != http.StatusBadRequest {
+		t.Fatalf("delete non-conversation: want 400, got %d %s", code, b)
+	}
+	if _, err := srv.Store.GetNode(t.Context(), tenant.ID, folder.ID); err != nil {
+		t.Fatalf("non-conversation folder must survive a rejected delete: %v", err)
 	}
 }

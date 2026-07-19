@@ -504,6 +504,20 @@
             }
         },
         {
+            "name": "delete_conversation",
+            "title": "Delete a conversation",
+            "endpoint": "/tools/delete_conversation",
+            "description": "Permanently delete a conversation and everything in it: the transcript, its files/ attachments, and the finalized digest. The sealed blobs are reclaimed. Irreversible.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string" },
+                    "conversation_id": { "type": "string" }
+                },
+                "required": ["tenant_id", "conversation_id"]
+            }
+        },
+        {
             "name": "attach_to_conversation",
             "title": "Attach a file to a conversation",
             "endpoint": "/tools/attach_to_conversation",

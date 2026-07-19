@@ -390,6 +390,39 @@ func (s *Server) conversationDocOf(ctx context.Context, tenantID string, conv *s
 	return doc
 }
 
+// handleDeleteConversation removes a conversation directory and everything in
+// it — the transcript, the files/ attachments, and the finalized digest —
+// reclaiming the sealed object-store blobs along the way.
+func (s *Server) handleDeleteConversation(w http.ResponseWriter, r *http.Request, p *Principal) {
+	status, err := s.deleteConversation(r.Context(), p, r.PathValue("tenantID"), r.PathValue("convID"))
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteConversation validates that convID is a conversation folder (a direct
+// child of "Chat conversations/") and then subtree-deletes it. Guarding on the
+// convention keeps an arbitrary node id from being routed through the
+// conversation surface and yields a clean 400 rather than removing the wrong
+// folder; the blob reclamation and row cascade come from the shared deleteNode.
+func (s *Server) deleteConversation(ctx context.Context, p *Principal, tenantID, convID string) (int, error) {
+	if !p.IsUser() || !s.canWrite(ctx, tenantID, p.Sub) {
+		return http.StatusForbidden, errors.New("forbidden")
+	}
+	conv, err := s.Store.GetNode(ctx, tenantID, convID)
+	if err != nil {
+		return storeErrorStatus(err), err
+	}
+	root, rerr := s.Store.ChildByName(ctx, tenantID, "", conversationsRoot)
+	if conv.Kind != store.NodeFolder || rerr != nil ||
+		!conv.ParentID.Valid || conv.ParentID.String != root.ID {
+		return http.StatusBadRequest, errors.New("not a conversation")
+	}
+	return s.deleteNode(ctx, p, tenantID, convID)
+}
+
 // Attachment intents (§8.7). Intent A ("use in this chat") stores the
 // file session-scoped: no_index and auto-expiring. Intent B ("add to my
 // knowledge base") persists and indexes it. Both land in the

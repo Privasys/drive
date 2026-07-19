@@ -37,6 +37,7 @@ func (s *Server) Tools() http.Handler {
 	mux.Handle("POST /tools/create_conversation", s.auth(s.toolCreateConversation))
 	mux.Handle("POST /tools/list_conversations", s.auth(s.toolListConversations))
 	mux.Handle("POST /tools/get_conversation", s.auth(s.toolGetConversation))
+	mux.Handle("POST /tools/delete_conversation", s.auth(s.toolDeleteConversation))
 	mux.Handle("POST /tools/append_turn", s.auth(s.toolAppendTurn))
 	mux.Handle("POST /tools/attach_to_conversation", s.auth(s.toolAttachToConversation))
 	mux.Handle("POST /tools/get_folder_tree", s.auth(s.toolFolderTree))
@@ -399,6 +400,22 @@ func (s *Server) toolDeleteNode(w http.ResponseWriter, r *http.Request, p *Princ
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": req.NodeID})
+}
+
+func (s *Server) toolDeleteConversation(w http.ResponseWriter, r *http.Request, p *Principal) {
+	var req struct {
+		TenantID       string `json:"tenant_id"`
+		ConversationID string `json:"conversation_id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if status, err := s.deleteConversation(r.Context(), p, req.TenantID, req.ConversationID); err != nil {
+		httpError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": req.ConversationID})
 }
 
 func (s *Server) toolChanges(w http.ResponseWriter, r *http.Request, p *Principal) {

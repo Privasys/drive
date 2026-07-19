@@ -312,6 +312,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/tenants/{tenantID}/conversations", s.auth(s.handleCreateConversation))
 	mux.Handle("GET /v1/tenants/{tenantID}/conversations", s.auth(s.handleListConversations))
 	mux.Handle("GET /v1/tenants/{tenantID}/conversations/{convID}", s.auth(s.handleGetConversation))
+	mux.Handle("DELETE /v1/tenants/{tenantID}/conversations/{convID}", s.auth(s.handleDeleteConversation))
 	mux.Handle("POST /v1/tenants/{tenantID}/conversations/{convID}/turns", s.auth(s.handleAppendTurn))
 	mux.Handle("POST /v1/tenants/{tenantID}/conversations/{convID}/attach", s.auth(s.handleAttachToConversation))
 	// Folder tree + Memory (§8.7).
@@ -870,19 +871,54 @@ func (s *Server) deleteNode(ctx context.Context, p *Principal, tenantID, nodeID 
 	if err != nil {
 		return storeErrorStatus(err), err
 	}
-	if n.Kind == store.NodeFile && n.WrappedCEK != nil {
-		if mek, merr := s.tenantMEK(ctx, tenantID); merr == nil {
-			if dek, derr := crypto.DeriveDEK(mek, tenantID); derr == nil {
-				if bk, berr := s.backendFor(ctx, tenantID); berr == nil {
-					_ = manifest.Delete(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
-				}
-			}
+	// Reclaim the sealed blob of every file in the subtree. Deleting a folder
+	// (a conversation, a UI folder) otherwise removes the rows but leaves the
+	// descendants' object-store bytes orphaned forever.
+	files := []*store.Node{n}
+	if n.Kind == store.NodeFolder {
+		if files, err = s.Store.ListSubtreeFiles(ctx, tenantID, nodeID); err != nil {
+			return http.StatusInternalServerError, err
 		}
 	}
+	s.deleteFileBlobs(ctx, tenantID, files)
 	if err := s.Store.DeleteNode(ctx, tenantID, nodeID, p.Sub); err != nil {
 		return storeErrorStatus(err), err
 	}
 	return http.StatusNoContent, nil
+}
+
+// deleteFileBlobs reclaims the sealed object-store bytes of the given file
+// nodes. Best-effort: a failed unlink leaves a harmless orphan rather than
+// blocking the delete. The tenant DEK is derived once for the whole batch.
+func (s *Server) deleteFileBlobs(ctx context.Context, tenantID string, files []*store.Node) {
+	has := false
+	for _, n := range files {
+		if n != nil && n.Kind == store.NodeFile && n.WrappedCEK != nil {
+			has = true
+			break
+		}
+	}
+	if !has {
+		return
+	}
+	mek, err := s.tenantMEK(ctx, tenantID)
+	if err != nil {
+		return
+	}
+	dek, err := crypto.DeriveDEK(mek, tenantID)
+	if err != nil {
+		return
+	}
+	bk, err := s.backendFor(ctx, tenantID)
+	if err != nil {
+		return
+	}
+	for _, n := range files {
+		if n == nil || n.Kind != store.NodeFile || n.WrappedCEK == nil {
+			continue
+		}
+		_ = manifest.Delete(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
+	}
 }
 
 type createGrantRequest struct {
