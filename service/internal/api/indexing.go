@@ -495,6 +495,11 @@ func (s *Server) handleReadSection(w http.ResponseWriter, r *http.Request, p *Pr
 // allowNodeRead is the shared read authorisation (tenant member or
 // grant-holder via the share cascade).
 func (s *Server) allowNodeRead(ctx context.Context, p *Principal, tenantID, nodeID string) bool {
+	if p.IsAssistant() {
+		// The assistant enclave may read a node's content only when the user
+		// is a tenant member AND the node is inside the AI-scoped set.
+		return s.canRead(ctx, tenantID, p.Sub) && s.nodeInAIScope(ctx, tenantID, nodeID)
+	}
 	if !p.IsUser() {
 		return false
 	}
@@ -523,9 +528,14 @@ func (s *Server) toolSearchSemantic(w http.ResponseWriter, r *http.Request, p *P
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	if !p.IsUser() || !s.canRead(r.Context(), req.TenantID, p.Sub) {
+	if !(p.IsUser() || p.IsAssistant()) || !s.canRead(r.Context(), req.TenantID, p.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
+	}
+	// The assistant enclave may only ever see the AI-scoped node set —
+	// force the scope regardless of what the caller asked for.
+	if p.IsAssistant() {
+		req.AssistantScope = true
 	}
 	if !s.Store.VectorOK {
 		httpError(w, http.StatusNotImplemented, errors.New("semantic search unavailable on this instance"))

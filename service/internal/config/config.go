@@ -113,8 +113,8 @@ type Config struct {
 	// stays inside Drive's disclosed boundary; only the model name and
 	// the OpenAI-compatible chat endpoint differ. Empty disables
 	// Drive-side generation (finalize_conversation returns unavailable).
-	ChatModel string `json:"chat_model,omitempty"`
-	EmbeddingsAPIKey  string `json:"embeddings_api_key,omitempty"`
+	ChatModel        string `json:"chat_model,omitempty"`
+	EmbeddingsAPIKey string `json:"embeddings_api_key,omitempty"`
 
 	// EmbeddingsDependency pins the fleet's attested identity: the
 	// canonical dependency-set JSON as stored on the app record
@@ -128,6 +128,24 @@ type Config struct {
 	// EmbeddingsAllowDebug permits dev-profile fleet images on the
 	// pinned dial. Development environments only.
 	EmbeddingsAllowDebug bool `json:"embeddings_allow_debug,omitempty"`
+
+	// AssistantEnclaveToken gates the "assistant enclave acting for a user"
+	// inbound path (§8.7 RAG-in-enclave): the confidential-AI enclave calls
+	// Drive's read-only RAG tools (search_semantic assistant-scoped,
+	// read_section, read_file, get_memory, get_folder_tree) on behalf of the
+	// signed-in user. INTERIM app-layer gate — a shared secret the enclave
+	// presents as `Authorization: Assistant <token>` alongside
+	// `X-Privasys-On-Behalf-Of: <sub>`. FINAL: replaced by the
+	// enclave-os-injected, stripped X-Privasys-Peer-Measurement verified
+	// against AssistantEnclaveMeasurement (inbound mutual RA-TLS). Empty
+	// disables the path (fail closed). Part of the attested configuration
+	// users can read via /status.
+	AssistantEnclaveToken string `json:"assistant_enclave_token,omitempty"`
+	// AssistantEnclaveMeasurement is the confidential-AI workload identity
+	// (OID 3.6 app id / 3.2 code hash) the FINAL mutual-RA-TLS gate will
+	// require of the caller. Recorded now so /status can disclose the intended
+	// peer; not yet enforced (see AssistantEnclaveToken).
+	AssistantEnclaveMeasurement string `json:"assistant_enclave_measurement,omitempty"`
 
 	// Escrowed-mode fields. OrgMEKRef is the vault reference (a
 	// vaultmek.Ref JSON) for MEK_org — the org's BYOK master key, a

@@ -51,7 +51,9 @@ type memoryFile struct {
 // "tree" (titles + summaries only). Never search-only.
 func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
-	if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) {
+	// Memory/ is always in the assistant's scope (§8.7), so the assistant
+	// enclave may read it on behalf of the user.
+	if !(p.IsUser() || p.IsAssistant()) || !s.canRead(r.Context(), tenantID, p.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}

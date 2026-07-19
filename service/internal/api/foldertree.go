@@ -48,7 +48,16 @@ type folderTreeFolder struct {
 func (s *Server) handleFolderTree(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	folderID := r.PathValue("folderID") // "" = root
-	if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) {
+	if p.IsAssistant() {
+		// The assistant enclave may walk the tree only within an AI-scoped
+		// folder (a whole-tree walk would leak names outside scope), so a
+		// concrete in-scope folderID is required.
+		if !s.canRead(r.Context(), tenantID, p.Sub) || folderID == "" ||
+			!s.nodeInAIScope(r.Context(), tenantID, folderID) {
+			httpError(w, http.StatusForbidden, errors.New("forbidden"))
+			return
+		}
+	} else if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}

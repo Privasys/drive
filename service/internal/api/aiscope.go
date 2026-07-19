@@ -205,6 +205,24 @@ func (s *Server) aiScopeNodeSet(ctx context.Context, tenantID string) ([]string,
 	return s.Store.DescendantNodeIDs(ctx, tenantID, rootIDs)
 }
 
+// nodeInAIScope reports whether a node is inside the tenant's AI-scoped set
+// (§8.7): a content read by the assistant enclave is permitted only for
+// nodes the user has made available to the assistant (Memory/ always, plus
+// opted-in directories / whole-Drive). Recomputed per call — reads are
+// bounded and this stays correct as scope changes.
+func (s *Server) nodeInAIScope(ctx context.Context, tenantID, nodeID string) bool {
+	ids, err := s.aiScopeNodeSet(ctx, tenantID)
+	if err != nil {
+		return false
+	}
+	for _, id := range ids {
+		if id == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
 // semanticSearchScoped runs the search restricted to the AI-scoped node
 // set (§8.7). Used when a caller requests assistant-scoped search.
 func (s *Server) semanticSearchScoped(ctx context.Context, tenantID, q string, topK int) ([]searchHitJSON, int, error) {

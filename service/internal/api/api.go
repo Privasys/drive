@@ -8,6 +8,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -105,9 +106,10 @@ func (s *Server) WaitBackground() { s.bg.Wait() }
 type authVia string
 
 const (
-	viaBearer   authVia = "bearer"   // platform OIDC at+jwt
-	viaAppGrant authVia = "appgrant" // Ed25519 AppGrant token
-	viaSealed   authVia = "sealed"   // session-relay sealed transport (X-Privasys-Sub)
+	viaBearer    authVia = "bearer"    // platform OIDC at+jwt
+	viaAppGrant  authVia = "appgrant"  // Ed25519 AppGrant token
+	viaSealed    authVia = "sealed"    // session-relay sealed transport (X-Privasys-Sub)
+	viaAssistant authVia = "assistant" // confidential-AI enclave acting for a user (§8.7 RAG)
 )
 
 // relaySubHeader is the relay-asserted subject. The enclave-os
@@ -116,6 +118,13 @@ const (
 // trustworthy for data-plane attribution (it carries no roles, which
 // is why it is never accepted for configure).
 const relaySubHeader = "X-Privasys-Sub"
+
+// onBehalfOfHeader names the acting user on the assistant-enclave path
+// (§8.7 RAG-in-enclave). It is trusted ONLY once the assistant-enclave
+// credential has been verified (verifyAssistantEnclave); on every other
+// path the acting subject comes from the caller's own identity, so a
+// forged value here is ignored.
+const onBehalfOfHeader = "X-Privasys-On-Behalf-Of"
 
 // Principal is an authenticated caller: a platform user (OIDC bearer or
 // sealed-transport session) or a third-party app presenting an
@@ -130,6 +139,12 @@ type Principal struct {
 
 // IsUser reports whether p is a user (OIDC bearer or sealed session).
 func (p *Principal) IsUser() bool { return p.ID != nil }
+
+// IsAssistant reports whether p is the confidential-AI assistant enclave
+// acting on behalf of a user (§8.7 RAG-in-enclave). Such a principal may
+// run only the read-only, AI-scoped RAG surface — never writes, and never
+// content outside the tenant's AI-scoped node set.
+func (p *Principal) IsAssistant() bool { return p.Via == viaAssistant }
 
 // SetConfig installs (and persists) the instance configuration.
 func (s *Server) SetConfig(c *config.Config) error {
@@ -398,6 +413,13 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 				return
 			}
 			next(w, r, p)
+		case strings.HasPrefix(h, "Assistant "):
+			p, err := s.verifyAssistantEnclave(r, strings.TrimSpace(strings.TrimPrefix(h, "Assistant ")))
+			if err != nil {
+				http.Error(w, "invalid assistant credential: "+err.Error(), http.StatusUnauthorized)
+				return
+			}
+			next(w, r, p)
 		case r.Header.Get(relaySubHeader) != "":
 			sub := r.Header.Get(relaySubHeader)
 			next(w, r, &Principal{Sub: sub, Via: viaSealed, ID: &oidc.Identity{Sub: sub, Issuer: "session-relay"}})
@@ -449,6 +471,30 @@ func (s *Server) verifyAppGrant(ctx context.Context, tok string) (*Principal, er
 		return nil, errors.New("signing key does not match the grant binding")
 	}
 	return &Principal{Sub: g.Subject, Via: viaAppGrant, Grant: g, Env: env}, nil
+}
+
+// verifyAssistantEnclave authenticates the confidential-AI enclave acting
+// for a user (§8.7 RAG-in-enclave). INTERIM app-layer gate: a shared secret
+// (config AssistantEnclaveToken) proves the caller is the configured
+// assistant enclave, and the acting user is named by the
+// X-Privasys-On-Behalf-Of header. FINAL: the shared secret is replaced by
+// the enclave-os-injected, stripped X-Privasys-Peer-Measurement header,
+// verified against the pinned confidential-AI measurement over inbound
+// mutual RA-TLS. The principal it returns may run only the read-only,
+// AI-scoped RAG surface (see IsAssistant).
+func (s *Server) verifyAssistantEnclave(r *http.Request, tok string) (*Principal, error) {
+	cfg := s.CurrentConfig()
+	if cfg == nil || cfg.AssistantEnclaveToken == "" {
+		return nil, errors.New("assistant enclave path not enabled")
+	}
+	if subtle.ConstantTimeCompare([]byte(tok), []byte(cfg.AssistantEnclaveToken)) != 1 {
+		return nil, errors.New("credential mismatch")
+	}
+	sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader))
+	if sub == "" {
+		return nil, errors.New("missing on-behalf-of subject")
+	}
+	return &Principal{Sub: sub, Via: viaAssistant}, nil
 }
 
 // decodePubkey accepts raw-std or std base64 (wallets vary).
@@ -1126,6 +1172,12 @@ func (s *Server) canAdmin(ctx context.Context, tenantID, sub string) bool {
 // root); app principals are always confined to their granted node's
 // subtree, so a root-level operation is never allowed on a grant.
 func (s *Server) allowNode(ctx context.Context, p *Principal, tenantID, nodeID string, need grants.Scope) bool {
+	if p.IsAssistant() {
+		// The assistant enclave may only READ, and only inside the tenant's
+		// AI-scoped node set (§8.7 RAG-in-enclave).
+		return need == grants.ScopeRead &&
+			s.canRead(ctx, tenantID, p.Sub) && s.nodeInAIScope(ctx, tenantID, nodeID)
+	}
 	if p.IsUser() {
 		if need == grants.ScopeRead {
 			if s.canRead(ctx, tenantID, p.Sub) && s.aclAllows(ctx, tenantID, nodeID, p.Sub) {
