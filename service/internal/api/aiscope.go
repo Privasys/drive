@@ -18,12 +18,16 @@ import (
 // what CAN be found) vs *AI-scoped* (this grant — what the assistant MAY
 // read in conversations).
 //
-// Defaults: Memory/ and Chat conversations/ are always in scope
-// implicitly (below); everything else is opt-in per directory.
+// Defaults (revised 2026-07-19): Memory/ is always in scope implicitly
+// (below); everything else — INCLUDING Chat conversations/ — is opt-in.
+// This matches the chat UI's product default of "memory ON, past
+// conversations OFF": the user turns conversations on with an ordinary
+// enable-AI grant on the Chat conversations/ folder, or turns on the whole
+// Drive with the tenant-wide grant (empty node id).
 
 // alwaysScoped are the folders always in AI scope regardless of an
 // explicit grant (the plan's fresh-user defaults).
-var alwaysScoped = []string{memoryRoot, conversationsRoot}
+var alwaysScoped = []string{memoryRoot}
 
 func (s *Server) handleEnableAI(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
@@ -86,7 +90,14 @@ func (s *Server) handleListAIScope(w http.ResponseWriter, r *http.Request, p *Pr
 		return
 	}
 	out := make([]map[string]any, 0, len(gs))
+	allScoped := false
 	for _, g := range gs {
+		// The tenant-wide grant (empty/NULL node id) is whole-Drive scope,
+		// reported as a flag rather than a directory row.
+		if g.NodeID == "" {
+			allScoped = true
+			continue
+		}
 		name := ""
 		if n, gerr := s.Store.GetNode(r.Context(), tenantID, g.NodeID); gerr == nil {
 			name = n.Name
@@ -100,7 +111,57 @@ func (s *Server) handleListAIScope(w http.ResponseWriter, r *http.Request, p *Pr
 			defaults = append(defaults, n.ID)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"scoped": out, "always_scoped": defaults})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"scoped": out, "always_scoped": defaults, "all_scoped": allScoped,
+	})
+}
+
+// handleEnableAIAll turns on whole-Drive assistant scope: a tenant-wide
+// assistant grant (empty node id, stored NULL), matching every directory —
+// including ones created later, since the scope is recomputed per search.
+func (s *Server) handleEnableAIAll(w http.ResponseWriter, r *http.Request, p *Principal) {
+	tenantID := r.PathValue("tenantID")
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
+		return
+	}
+	if g, err := s.Grants.ActiveRawSubjectOnNode(r.Context(), tenantID, "", grants.SubjectAssistant); err == nil && g != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"grant_id": g.ID, "already": true})
+		return
+	}
+	g := &grants.Grant{
+		TenantID: tenantID, NodeID: "", Subject: grants.SubjectAssistant,
+		Scope: []grants.Scope{grants.ScopeRead}, CreatedBy: p.Sub,
+	}
+	if err := s.Grants.Create(r.Context(), g); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"grant_id": g.ID, "all_scoped": true})
+}
+
+// handleDisableAIAll revokes the whole-Drive assistant grant. Explicit
+// per-directory grants (and the always-scoped Memory/) are unaffected.
+func (s *Server) handleDisableAIAll(w http.ResponseWriter, r *http.Request, p *Principal) {
+	tenantID := r.PathValue("tenantID")
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
+		return
+	}
+	g, err := s.Grants.ActiveRawSubjectOnNode(r.Context(), tenantID, "", grants.SubjectAssistant)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if g == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"disabled": false})
+		return
+	}
+	if err := s.Grants.Revoke(r.Context(), tenantID, g.ID); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"disabled": true})
 }
 
 // aiScopeNodeSet computes the concrete node-id allow-list the assistant
@@ -112,9 +173,24 @@ func (s *Server) aiScopeNodeSet(ctx context.Context, tenantID string) ([]string,
 	if err != nil {
 		return nil, err
 	}
+	wholeDrive := false
 	for _, g := range gs {
-		if g.NodeID != "" {
-			roots[g.NodeID] = true
+		if g.NodeID == "" {
+			wholeDrive = true // tenant-wide grant: entire Drive
+			continue
+		}
+		roots[g.NodeID] = true
+	}
+	// Whole-Drive scope: seed the roots with every top-level node so the set
+	// expands to the entire tree (new top-level folders included, since this
+	// runs per search).
+	if wholeDrive {
+		top, terr := s.Store.ListChildren(ctx, tenantID, "")
+		if terr != nil {
+			return nil, terr
+		}
+		for _, n := range top {
+			roots[n.ID] = true
 		}
 	}
 	for _, name := range alwaysScoped {

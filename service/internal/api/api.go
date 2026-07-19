@@ -329,6 +329,9 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/ai-scope", s.auth(s.handleEnableAI))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}/ai-scope", s.auth(s.handleDisableAI))
 	mux.Handle("GET /v1/tenants/{tenantID}/ai-scope", s.auth(s.handleListAIScope))
+	// Whole-Drive assistant scope (tenant-wide grant).
+	mux.Handle("POST /v1/tenants/{tenantID}/ai-scope/all", s.auth(s.handleEnableAIAll))
+	mux.Handle("DELETE /v1/tenants/{tenantID}/ai-scope/all", s.auth(s.handleDisableAIAll))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/nodes/{nodeID}", s.auth(s.handleDeleteNode))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/move", s.auth(s.handleMoveNode))
 

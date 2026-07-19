@@ -13,7 +13,7 @@ import (
 
 // TestAIScope: enable/disable/list the assistant's directory grants, and
 // verify the AI-scoped node set expands folder grants to descendants and
-// always includes Memory/ + Chat conversations/.
+// always includes Memory/ (Chat conversations/ is opt-in as of 2026-07-19).
 func TestAIScope(t *testing.T) {
 	base, srv := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler(""))
@@ -64,7 +64,7 @@ func TestAIScope(t *testing.T) {
 		t.Fatalf("enable_ai idempotent: got %d", code)
 	}
 
-	// List: Projects present; Memory/ + Chat conversations/ as defaults.
+	// List: Projects present; Memory/ as the always-scoped default.
 	code, b = doReq(t, bearerReq(t, "POST", ts.URL+"/tools/list_ai_scope", owner,
 		fmt.Sprintf(`{"tenant_id":%q}`, tenant.ID)))
 	if code != 200 {
