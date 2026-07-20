@@ -89,6 +89,21 @@
                     "x-privasys": {
                         "label": "Allow dev-profile fleet images"
                     }
+                },
+                "assistant_enclave_token": {
+                    "type": "string",
+                    "description": "RAG-in-enclave (§8.7): shared secret the confidential-AI enclave presents (Authorization: Assistant <token>) to call Drive's read-only, AI-scoped RAG tools on behalf of a user. Interim gate, later replaced by inbound mutual RA-TLS. Empty disables the path (fail closed).",
+                    "x-privasys": {
+                        "label": "Assistant enclave token",
+                        "secret": true
+                    }
+                },
+                "assistant_enclave_measurement": {
+                    "type": "string",
+                    "description": "RAG-in-enclave (§8.7): the confidential-AI workload identity the final mutual-RA-TLS gate will require of the caller. Recorded for disclosure; not yet enforced.",
+                    "x-privasys": {
+                        "label": "Assistant enclave measurement"
+                    }
                 }
             },
             "required": [
@@ -175,6 +190,21 @@
                         "default": false,
                         "x-privasys": {
                             "label": "Allow dev-profile fleet images"
+                        }
+                    },
+                    "assistant_enclave_token": {
+                        "type": "string",
+                        "description": "RAG-in-enclave (§8.7): shared secret the confidential-AI enclave presents (Authorization: Assistant <token>) to call Drive's read-only, AI-scoped RAG tools on behalf of a user. Interim gate, later replaced by inbound mutual RA-TLS. Empty disables the path (fail closed).",
+                        "x-privasys": {
+                            "label": "Assistant enclave token",
+                            "secret": true
+                        }
+                    },
+                    "assistant_enclave_measurement": {
+                        "type": "string",
+                        "description": "RAG-in-enclave (§8.7): the confidential-AI workload identity the final mutual-RA-TLS gate will require of the caller. Recorded for disclosure; not yet enforced.",
+                        "x-privasys": {
+                            "label": "Assistant enclave measurement"
                         }
                     }
                 },

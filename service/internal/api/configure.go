@@ -84,6 +84,10 @@ type configureRequest struct {
 	// the MEK_org vault reference and the recovery policy.
 	OrgMEKRef *string                `json:"org_mek_ref"`
 	Recovery  *config.RecoveryPolicy `json:"recovery"`
+	// Assistant-enclave RAG gate (§8.7 RAG-in-enclave): the interim shared
+	// secret and the (recorded, not-yet-enforced) confidential-AI measurement.
+	AssistantEnclaveToken       *string `json:"assistant_enclave_token"`
+	AssistantEnclaveMeasurement *string `json:"assistant_enclave_measurement"`
 }
 
 // overlay applies the request on top of the current config (zero when
@@ -123,6 +127,12 @@ func (req *configureRequest) overlay(cur *config.Config) *config.Config {
 	}
 	if req.Recovery != nil {
 		cfg.Recovery = req.Recovery
+	}
+	if req.AssistantEnclaveToken != nil {
+		cfg.AssistantEnclaveToken = *req.AssistantEnclaveToken
+	}
+	if req.AssistantEnclaveMeasurement != nil {
+		cfg.AssistantEnclaveMeasurement = *req.AssistantEnclaveMeasurement
 	}
 	return cfg
 }
