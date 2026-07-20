@@ -281,6 +281,9 @@ func (s *Server) Handler(manifestPath string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", s.Routes())
 	mux.Handle("/tools/", s.Tools())
+	// MCP shim for the confidential-AI agent (§8.7 RAG-in-enclave).
+	mux.Handle("GET /api/v1/mcp/tools", s.auth(s.handleMCPList))
+	mux.Handle("POST /api/v1/mcp/tools/{tool}", s.auth(s.handleMCPCall))
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /readiness", s.handleReadiness)
 	mux.HandleFunc("GET /status", s.handleStatus)

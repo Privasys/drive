@@ -126,6 +126,40 @@ func TestAssistantEnclaveRAG(t *testing.T) {
 		t.Fatalf("assistant read out-of-scope file: want 403, got %d", code)
 	}
 
+	// --- MCP shim: same tools without a client-supplied tenant_id ---
+	// Catalogue lists the read-only RAG surface.
+	code, b = doReq(t, assistantReq(t, "GET", ts.URL+"/api/v1/mcp/tools", secret, owner, ""))
+	if code != 200 {
+		t.Fatalf("mcp catalogue: %d %s", code, b)
+	}
+	var cat struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	_ = json.Unmarshal(b, &cat)
+	if len(cat.Tools) == 0 {
+		t.Fatalf("mcp catalogue empty: %s", b)
+	}
+	// get_memory via the shim with NO tenant_id — the shim injects it.
+	if code, b = doReq(t, assistantReq(t, "POST", ts.URL+"/api/v1/mcp/tools/get_memory", secret, owner, `{}`)); code != 200 {
+		t.Fatalf("mcp get_memory: %d %s", code, b)
+	}
+	// read_file via the shim confines to the AI-scoped set (out-of-scope → 403).
+	if code, _ := doReq(t, assistantReq(t, "POST", ts.URL+"/api/v1/mcp/tools/read_file", secret, owner,
+		fmt.Sprintf(`{"file_id":%q}`, privFileID))); code != http.StatusForbidden {
+		t.Fatalf("mcp read out-of-scope: want 403, got %d", code)
+	}
+	// In-scope read through the shim works.
+	if code, b = doReq(t, assistantReq(t, "POST", ts.URL+"/api/v1/mcp/tools/read_file", secret, owner,
+		fmt.Sprintf(`{"file_id":%q}`, docFileID))); code != 200 {
+		t.Fatalf("mcp read in-scope: %d %s", code, b)
+	}
+	// Unknown tool → 404.
+	if code, _ := doReq(t, assistantReq(t, "POST", ts.URL+"/api/v1/mcp/tools/write_memory", secret, owner, `{}`)); code != http.StatusNotFound {
+		t.Fatalf("mcp unknown/blocked tool: want 404, got %d", code)
+	}
+
 	// --- Gate disabled when no secret is configured ---
 	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign})
 	if code, _ := doReq(t, assistantReq(t, "POST", ts.URL+"/tools/get_memory", secret, owner,
