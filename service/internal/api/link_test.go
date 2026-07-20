@@ -249,3 +249,59 @@ func TestRestrictedLinkShare(t *testing.T) {
 		t.Fatalf("post-approval read: %d %q", code, got)
 	}
 }
+
+// A restricted link with NO required attributes is pure owner-approval ("I
+// approve each person"): redeem files a request with nothing to present, and
+// only the owner's approval mints the grant. This is what the chat front's
+// "Private" share uses.
+func TestOwnerApprovalLinkShare(t *testing.T) {
+	ts, _ := newTestServer(t)
+	const owner, recipient = "user-1", "user-2"
+	tenantID, nodeID, payload := ownerTenantWithFile(t, ts.URL, owner)
+	fileURL := fmt.Sprintf("%s/v1/tenants/%s/files/%s", ts.URL, tenantID, nodeID)
+
+	// Restricted with no attributes is accepted (owner-approval only).
+	code, b := doReq(t, bearerReq(t, "POST",
+		fmt.Sprintf("%s/v1/tenants/%s/nodes/%s/links", ts.URL, tenantID, nodeID),
+		owner, `{"mode":"restricted","scope":["read"]}`))
+	if code != 201 {
+		t.Fatalf("create owner-approval link: %d %s", code, b)
+	}
+	var link struct {
+		ID     string `json:"id"`
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(b, &link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recipient redeems with no attributes -> pending, no access yet.
+	code, b = doReq(t, bearerReq(t, "POST",
+		fmt.Sprintf("%s/v1/links/%s/redeem", ts.URL, link.ID), recipient,
+		`{"secret":"`+link.Secret+`"}`))
+	if code != 200 {
+		t.Fatalf("redeem owner-approval: %d %s", code, b)
+	}
+	var rr struct {
+		Status    string `json:"status"`
+		RequestID string `json:"request_id"`
+	}
+	_ = json.Unmarshal(b, &rr)
+	if rr.Status != "pending" || rr.RequestID == "" {
+		t.Fatalf("redeem status: %s", b)
+	}
+	if code, _ := doReq(t, bearerReq(t, "GET", fileURL, recipient, "")); code != http.StatusForbidden {
+		t.Fatalf("pre-approval read: want 403, got %d", code)
+	}
+
+	// Owner approves -> recipient gains access.
+	code, b = doReq(t, bearerReq(t, "POST",
+		fmt.Sprintf("%s/v1/tenants/%s/link-requests/%s/approve", ts.URL, tenantID, rr.RequestID), owner, ""))
+	if code != 200 {
+		t.Fatalf("approve: %d %s", code, b)
+	}
+	code, got := doReq(t, bearerReq(t, "GET", fileURL, recipient, ""))
+	if code != 200 || !bytes.Equal(got, payload) {
+		t.Fatalf("post-approval read: %d %q", code, got)
+	}
+}

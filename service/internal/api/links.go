@@ -25,10 +25,12 @@ import (
 //   - open        the recipient authenticates (wallet, or passkey once the
 //                 sealed transport supports it) and redeems the link, which
 //                 mints them a per-recipient read grant.
-//   - restricted  redeeming files an access request carrying the attributes
-//                 the recipient presented; the owner approves each one (or,
-//                 later, a saved wallet contact auto-matches). Only on
-//                 approval is a grant minted.
+//   - restricted  redeeming files an access request; the owner approves each
+//                 one (or, later, a saved wallet contact auto-matches). Only
+//                 on approval is a grant minted. Required attributes are
+//                 OPTIONAL: with none, the link is pure owner-approval ("I
+//                 approve each person"); with some, the recipient must present
+//                 them before a request is filed.
 //
 // The link itself is a `link`-subject grant whose Meta holds this JSON.
 // Because decryption happens inside the enclave from the tenant MEK, a
@@ -98,10 +100,6 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Pri
 		return
 	}
 	scope := normaliseLinkScope(req.Scope)
-	if mode == linkModeRestricted && len(req.RequiredAttributes) == 0 {
-		httpError(w, http.StatusBadRequest, errors.New("restricted links need at least one required attribute"))
-		return
-	}
 
 	secretBytes, err := crypto.RandomKey()
 	if err != nil {
