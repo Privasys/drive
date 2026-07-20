@@ -299,3 +299,74 @@ func TestDeleteConversation(t *testing.T) {
 		t.Fatalf("non-conversation folder must survive a rejected delete: %v", err)
 	}
 }
+
+// TestSharedConversationRead covers the read-only share path: the owner shares
+// a conversation folder with another user (a share-link grant), who can then
+// read the conversation — transcript included — while a stranger cannot, and
+// the recipient still cannot write (append) to it.
+func TestSharedConversationRead(t *testing.T) {
+	base, _ := newTestServer(t)
+	const owner, guest, stranger = "user-a", "user-b", "user-x"
+
+	code, b := doReq(t, bearerReq(t, "POST", base.URL+"/v1/tenants", owner, `{"kind":"user","name":"A"}`))
+	if code != 201 {
+		t.Fatalf("tenant: %d %s", code, b)
+	}
+	var tenant struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(b, &tenant)
+
+	code, b = doReq(t, bearerReq(t, "POST", base.URL+"/v1/tenants/"+tenant.ID+"/conversations", owner,
+		`{"title":"Roadmap sync","date":"2026-07-20"}`))
+	if code != 201 {
+		t.Fatalf("create: %d %s", code, b)
+	}
+	var conv struct {
+		ConversationID string `json:"conversation_id"`
+	}
+	_ = json.Unmarshal(b, &conv)
+
+	turnURL := base.URL + "/v1/tenants/" + tenant.ID + "/conversations/" + conv.ConversationID + "/turns"
+	if code, b = doReq(t, bearerReq(t, "POST", turnURL, owner, `{"turn":"{\"role\":\"user\",\"content\":\"ship it\"}"}`)); code != 200 {
+		t.Fatalf("append: %d %s", code, b)
+	}
+
+	getURL := base.URL + "/v1/tenants/" + tenant.ID + "/conversations/" + conv.ConversationID
+
+	// Before any share, the guest cannot read the conversation.
+	if code, _ := doReq(t, bearerReq(t, "GET", getURL, guest, "")); code != http.StatusForbidden {
+		t.Fatalf("pre-share get: want 403, got %d", code)
+	}
+
+	// Owner shares the conversation folder with the guest (read).
+	code, b = doReq(t, bearerReq(t, "POST",
+		base.URL+"/v1/tenants/"+tenant.ID+"/nodes/"+conv.ConversationID+"/grants",
+		owner, `{"subject":"subject:`+guest+`","scope":["read"]}`))
+	if code != 201 {
+		t.Fatalf("grant: %d %s", code, b)
+	}
+
+	// The guest can now read it as a conversation, transcript included.
+	code, b = doReq(t, bearerReq(t, "GET", getURL, guest, ""))
+	if code != 200 {
+		t.Fatalf("shared get: %d %s", code, b)
+	}
+	var got struct {
+		Transcript string `json:"transcript"`
+	}
+	_ = json.Unmarshal(b, &got)
+	if !strings.Contains(got.Transcript, "ship it") {
+		t.Fatalf("shared transcript missing content: %q", got.Transcript)
+	}
+
+	// A stranger with no grant still cannot.
+	if code, _ := doReq(t, bearerReq(t, "GET", getURL, stranger, "")); code != http.StatusForbidden {
+		t.Fatalf("stranger get: want 403, got %d", code)
+	}
+
+	// Read-only: the guest cannot append (writes stay owner-only).
+	if code, _ := doReq(t, bearerReq(t, "POST", turnURL, guest, `{"turn":"{\"role\":\"user\",\"content\":\"hi\"}"}`)); code != http.StatusForbidden {
+		t.Fatalf("guest append: want 403, got %d", code)
+	}
+}

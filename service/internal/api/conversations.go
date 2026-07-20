@@ -351,7 +351,13 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request,
 func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	convID := r.PathValue("convID")
-	if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) {
+	// Grant-aware read: the owner (tenant member) OR a user the owner shared
+	// the conversation folder with (share link / direct grant) may read it, so
+	// a "share conversation" link renders a read-only conversation for the
+	// recipient rather than raw transcript files. Writes — append, finalize,
+	// delete — stay owner-only (canWrite). Apps and the assistant are excluded
+	// here; they reach content through the node/RAG surfaces, not this one.
+	if !p.IsUser() || !s.allowNode(r.Context(), p, tenantID, convID, grants.ScopeRead) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
