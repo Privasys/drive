@@ -118,6 +118,8 @@ jobs:
           provenance: false
           build-args: |
             VERSION=${{ steps.version.outputs.value }}
+            RA_TLS_CLIENTS_REF=${{ env.RA_TLS_CLIENTS_REF }}
+            ENCLAVE_VAULTS_CLIENT_REF=${{ env.ENCLAVE_VAULTS_CLIENT_REF }}
           labels: |
             org.privasys.manifest=${{ steps.manifest.outputs.json }}
           tags: |
