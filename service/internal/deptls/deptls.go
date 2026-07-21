@@ -15,12 +15,37 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	ratls "enclave-os-mini/clients/go/ratls"
 )
+
+// egressClientCert returns the GetClientCertificate callback that presents
+// this container's attested client cert on the RA-TLS dial, so a callee
+// running ingress mutual RA-TLS can verify WHO is calling (app-id +
+// measurement) instead of trusting a bearer token. The manager mints the
+// cert per connection, bound to the callee-provided channel binder. Returns
+// nil when the manager identity is unavailable (off-platform, tests, or a
+// non-ratls build) — the dial then stays server-auth only, which a callee
+// that does NOT require a client cert still accepts. Never fatal: a callee
+// that DOES require one will reject the certless handshake, which is the
+// correct fail-closed behaviour.
+func egressClientCert() func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	mgrURL := os.Getenv("PRIVASYS_MANAGER_URL")
+	if mgrURL == "" {
+		return nil
+	}
+	_, getCert, err := ratls.EgressClientCert(mgrURL, os.Getenv("PRIVASYS_CONTAINER_TOKEN"))
+	if err != nil {
+		log.Printf("deptls: egress client identity unavailable, dialling server-auth only: %v", err)
+		return nil
+	}
+	return getCert
+}
 
 // CredentialSource supplies the attestation-server endpoint and a
 // currently-valid verification token for remote quote verification.
@@ -59,6 +84,10 @@ func ParseDependencySet(raw string) (ratls.DependencySet, error) {
 // allowDebugImages permits dev-profile enclave images and must stay
 // false in production.
 func NewHTTPClient(set ratls.DependencySet, creds CredentialSource, allowDebugImages bool) *http.Client {
+	// Built once and reused across connections: the callback mints a fresh
+	// per-connection cert bound to each handshake's channel binder. Nil off
+	// platform (server-auth-only dial).
+	getClientCert := egressClientCert()
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -83,6 +112,10 @@ func NewHTTPClient(set ratls.DependencySet, creds CredentialSource, allowDebugIm
 			// server negotiate a real protocol. No h2: the transport
 			// below speaks HTTP/1.1.
 			NextProtos: []string{ratls.RATLSALPNProto, "http/1.1"},
+			// Mutual leg: present our attested client cert when the callee
+			// requests one (ingress mutual RA-TLS). Nil off platform, which
+			// leaves the dial server-auth only.
+			GetClientCertificate: getClientCert,
 			VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 				if len(rawCerts) == 0 {
 					return errors.New("deptls: peer sent no certificate")
