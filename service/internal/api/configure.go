@@ -80,6 +80,12 @@ type configureRequest struct {
 	EmbeddingsDependency *string `json:"embeddings_dependency"`
 	EmbeddingsAllowDebug *bool   `json:"embeddings_allow_debug"`
 	ChatModel            *string `json:"chat_model"`
+	// Instance object backend (see config.Config): the store for encrypted
+	// chunk bodies. object_credential is secret (GCS SA JSON or an
+	// s3-keypair JSON); it is never echoed back via /status.
+	ObjectBackend    *string `json:"object_backend"`
+	ObjectBucket     *string `json:"object_bucket"`
+	ObjectCredential *string `json:"object_credential"`
 	// Escrowed-mode setup (sent via the API/CLI, not the portal form):
 	// the MEK_org vault reference and the recovery policy.
 	OrgMEKRef *string                `json:"org_mek_ref"`
@@ -121,6 +127,15 @@ func (req *configureRequest) overlay(cur *config.Config) *config.Config {
 	}
 	if req.EmbeddingsAllowDebug != nil {
 		cfg.EmbeddingsAllowDebug = *req.EmbeddingsAllowDebug
+	}
+	if req.ObjectBackend != nil {
+		cfg.ObjectBackend = *req.ObjectBackend
+	}
+	if req.ObjectBucket != nil {
+		cfg.ObjectBucket = *req.ObjectBucket
+	}
+	if req.ObjectCredential != nil {
+		cfg.ObjectCredential = *req.ObjectCredential
 	}
 	if req.OrgMEKRef != nil {
 		cfg.OrgMEKRef = *req.OrgMEKRef

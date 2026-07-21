@@ -54,3 +54,47 @@ func TestConfigureOverlay_ExplicitClear(t *testing.T) {
 		t.Fatalf("first configure = %+v", first)
 	}
 }
+
+// TestConfigureOverlay_ObjectBackend: object-store fields apply through
+// merge-by-omission like every other configure field.
+func TestConfigureOverlay_ObjectBackend(t *testing.T) {
+	cur := &config.Config{Mode: config.ModeSovereign, EmbeddingsBaseURL: "https://fleet.example"}
+	got := (&configureRequest{
+		Mode:             config.ModeSovereign,
+		ObjectBackend:    strp("gcs"),
+		ObjectBucket:     strp("privasys-drive-prod"),
+		ObjectCredential: strp(`{"type":"service_account"}`),
+	}).overlay(cur)
+	if got.ObjectBackend != "gcs" || got.ObjectBucket != "privasys-drive-prod" || got.ObjectCredential == "" {
+		t.Fatalf("object fields not applied: %+v", got)
+	}
+	// An omitted object_backend on a later configure keeps the store set.
+	next := (&configureRequest{Mode: config.ModeSovereign, ChatModel: strp("m")}).overlay(got)
+	if next.ObjectBackend != "gcs" || next.ObjectBucket != "privasys-drive-prod" {
+		t.Fatalf("object fields lost on omission: %+v", next)
+	}
+}
+
+// TestValidate_ObjectBackend: a remote backend needs bucket + credential;
+// an unknown backend is rejected; local needs nothing.
+func TestValidate_ObjectBackend(t *testing.T) {
+	base := func() *config.Config { return &config.Config{Mode: config.ModeSovereign} }
+	if err := (&config.Config{Mode: config.ModeSovereign, ObjectBackend: "gcs"}).Validate(); err == nil {
+		t.Fatal("gcs without bucket/credential should fail")
+	}
+	c := base()
+	c.ObjectBackend, c.ObjectBucket = "gcs", "b"
+	if err := c.Validate(); err == nil {
+		t.Fatal("gcs without credential should fail")
+	}
+	c.ObjectCredential = `{"type":"service_account"}`
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid gcs config rejected: %v", err)
+	}
+	if err := (&config.Config{Mode: config.ModeSovereign, ObjectBackend: "wat"}).Validate(); err == nil {
+		t.Fatal("unknown backend should fail")
+	}
+	if err := (&config.Config{Mode: config.ModeSovereign, ObjectBackend: "local"}).Validate(); err != nil {
+		t.Fatalf("local backend rejected: %v", err)
+	}
+}

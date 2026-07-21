@@ -2,12 +2,86 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 
+	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/objectstore"
 )
+
+// instanceBackend returns the current instance object store under the
+// read lock. The configure flow can swap Backend (applyObjectBackend), so
+// every runtime reader must go through here to avoid a torn interface read.
+func (s *Server) instanceBackend() objectstore.Backend {
+	s.objectMu.RLock()
+	defer s.objectMu.RUnlock()
+	return s.Backend
+}
+
+// objectContentType maps a config object_backend value to the sealed
+// credential content type understood by buildBYOBackend. The empty second
+// return means "local" — keep the startup (sealed-volume) backend.
+func objectContentType(backend string) (string, bool) {
+	switch backend {
+	case "gcs":
+		return "gcs-sa-json", true
+	case "s3":
+		return "s3-keypair", true
+	case "ovh":
+		return "ovh-s3", true
+	default: // "" / "local"
+		return "", false
+	}
+}
+
+// applyObjectBackend (re)builds the instance object store from the
+// owner-set config when object_backend/bucket/credential change. It reuses
+// buildBYOBackend — the same constructor the per-tenant BYO path uses — so
+// GCS/S3/OVH behave identically at instance and tenant scope. A build
+// failure keeps the previous backend and leaves objectKey stale so a
+// corrected credential retries on the next configure. Never touches the
+// backend for a "local"/empty selection (the startup volume store stands).
+func (s *Server) applyObjectBackend(c *config.Config) {
+	ct, remote := objectContentType(c.ObjectBackend)
+	key := c.ObjectBackend + "\x00" + c.ObjectBucket + "\x00" + credFingerprint(c.ObjectCredential)
+
+	s.objectMu.Lock()
+	defer s.objectMu.Unlock()
+	if key == s.objectKey {
+		return
+	}
+	if !remote {
+		// Local/unset: the startup sealed-volume backend stays in place.
+		s.objectKey = key
+		return
+	}
+	backend, err := buildBYOBackend(context.Background(), ct, c.ObjectBucket, []byte(c.ObjectCredential))
+	if err != nil {
+		log.Printf("object backend %q init failed, keeping previous store: %v", c.ObjectBackend, err)
+		return // leave objectKey stale so a fixed credential retries
+	}
+	old := s.Backend
+	s.Backend = backend
+	s.objectKey = key
+	if closer, ok := old.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
+	log.Printf("object backend switched to %s (bucket %q)", c.ObjectBackend, c.ObjectBucket)
+}
+
+// credFingerprint is a short non-reversible tag of the credential, used
+// only to detect a change (never logged in full).
+func credFingerprint(cred string) string {
+	if cred == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(cred))
+	return hex.EncodeToString(sum[:8])
+}
 
 // tenantBackends caches per-tenant BYO object backends (built from the
 // tenant's sealed bucket credential, unwrapped in-enclave). Keyed by
@@ -33,10 +107,10 @@ func newTenantBackends() *tenantBackends {
 func (s *Server) backendFor(ctx context.Context, tenantID string) (objectstore.Backend, error) {
 	raw, err := s.Store.TenantBucketCred(ctx, tenantID)
 	if err != nil || raw == "" {
-		return s.Backend, nil // no BYO credential -> instance default
+		return s.instanceBackend(), nil // no BYO credential -> instance default
 	}
 	if s.MEKs == nil {
-		return s.Backend, nil // BYO not available on this instance
+		return s.instanceBackend(), nil // BYO not available on this instance
 	}
 	s.backendsOnce.Do(func() { s.backends = newTenantBackends() })
 

@@ -147,6 +147,22 @@ type Config struct {
 	// peer; not yet enforced (see AssistantEnclaveToken).
 	AssistantEnclaveMeasurement string `json:"assistant_enclave_measurement,omitempty"`
 
+	// Instance object backend — the store for the encrypted chunk bodies
+	// (a backend only ever sees opaque AEAD ciphertext). Owner-set through
+	// the configure+freeze flow rather than deploy-time env, because the
+	// platform injects no operator env into container apps. ObjectBackend
+	// selects the store: "gcs" | "s3" | "ovh" | "" / "local" (the sealed
+	// /data volume, the default). ObjectBucket is the bucket name.
+	// ObjectCredential is the secret access material — a GCS service-account
+	// JSON for "gcs", or an s3-keypair JSON
+	// ({access_key_id,secret_access_key,region,endpoint}) for "s3"/"ovh".
+	// It rides the sealed /data config (same at-rest protection as
+	// embeddings_api_key); it is NOT disclosed via /status. A tenant may
+	// still BYO its own bucket on top of this instance default.
+	ObjectBackend    string `json:"object_backend,omitempty"`
+	ObjectBucket     string `json:"object_bucket,omitempty"`
+	ObjectCredential string `json:"object_credential,omitempty"`
+
 	// Escrowed-mode fields. OrgMEKRef is the vault reference (a
 	// vaultmek.Ref JSON) for MEK_org — the org's BYOK master key, a
 	// RawShare the attested build reconstructs in-enclave to escrow-wrap
@@ -163,6 +179,19 @@ func (c *Config) Validate() error {
 	if c.MgmtBaseURL != "" &&
 		!strings.HasPrefix(c.MgmtBaseURL, "https://") && !strings.HasPrefix(c.MgmtBaseURL, "http://") {
 		return errors.New("mgmt_base_url must be an http(s) URL")
+	}
+	switch c.ObjectBackend {
+	case "", "local", "gcs", "s3", "ovh":
+	default:
+		return fmt.Errorf("object_backend must be one of gcs, s3, ovh, local (got %q)", c.ObjectBackend)
+	}
+	if c.ObjectBackend == "gcs" || c.ObjectBackend == "s3" || c.ObjectBackend == "ovh" {
+		if c.ObjectBucket == "" {
+			return errors.New("object_backend " + c.ObjectBackend + " requires object_bucket")
+		}
+		if c.ObjectCredential == "" {
+			return errors.New("object_backend " + c.ObjectBackend + " requires object_credential")
+		}
 	}
 	switch c.Mode {
 	case ModeSovereign:

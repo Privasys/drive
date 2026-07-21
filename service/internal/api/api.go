@@ -77,6 +77,12 @@ type Server struct {
 	backendsOnce sync.Once
 	backends     *tenantBackends
 
+	// objectMu guards Backend (the instance object store), which the
+	// configure flow can swap when the owner sets object_backend. objectKey
+	// dedupes rebuilds when the object config is unchanged.
+	objectMu  sync.RWMutex
+	objectKey string
+
 	// fleetHTTP is the attested-dependency HTTP client for the
 	// embeddings fleet, rebuilt by applyConfigSideEffects whenever the
 	// pin changes. Nil when no dependency is configured (plain HTTPS).
@@ -204,7 +210,14 @@ func (s *Server) InstallConfig(c *config.Config) {
 // embeddings dependency pinned, the fleet HTTP client is (re)built to
 // dial RA-TLS and refuse any peer that is not the pinned identity.
 func (s *Server) applyConfigSideEffects(c *config.Config) {
-	if c == nil || c.MgmtBaseURL == "" {
+	if c == nil {
+		return
+	}
+	// The instance object backend is owner-configured (the platform
+	// injects no operator env), so a fresh/changed object_backend rebuilds
+	// s.Backend here — independent of the control-plane settings below.
+	s.applyObjectBackend(c)
+	if c.MgmtBaseURL == "" {
 		return
 	}
 	var v *vaultmek.Client

@@ -75,6 +75,34 @@
                         "secret": true
                     }
                 },
+                "object_backend": {
+                    "type": "string",
+                    "enum": [
+                        "local",
+                        "gcs",
+                        "s3",
+                        "ovh"
+                    ],
+                    "description": "Instance object store for encrypted chunk bodies (a backend only ever sees opaque AEAD ciphertext). local = the sealed /data volume (default). gcs/s3/ovh require object_bucket + object_credential. A tenant may still bring its own bucket on top of this default.",
+                    "x-privasys": {
+                        "label": "Object storage backend"
+                    }
+                },
+                "object_bucket": {
+                    "type": "string",
+                    "description": "Bucket name for the gcs/s3/ovh object backend.",
+                    "x-privasys": {
+                        "label": "Object storage bucket"
+                    }
+                },
+                "object_credential": {
+                    "type": "string",
+                    "description": "Secret access material for the object backend: a GCS service-account JSON for gcs, or an s3-keypair JSON ({access_key_id,secret_access_key,region,endpoint}) for s3/ovh. Sealed on the instance; never disclosed.",
+                    "x-privasys": {
+                        "label": "Object storage credential",
+                        "secret": true
+                    }
+                },
                 "embeddings_dependency": {
                     "type": "string",
                     "description": "Attested-dependency pin for the fleet: the canonical dependency-set JSON from the app record ({\"entries\":[...]}, as set via the platform's apps dependencies API). When present, every embeddings call dials RA-TLS and refuses any peer that does not match the pinned measurements and required OIDs (fail closed). Leave empty only for off-platform endpoints.",
