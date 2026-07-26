@@ -125,6 +125,17 @@ const (
 // is why it is never accepted for configure).
 const relaySubHeader = "X-Privasys-Sub"
 
+// Attested-peer identity published by enclave-os after it verifies an inbound
+// mutual-RA-TLS caller against this app's allowed-callers policy. Trustworthy
+// inside the enclave because enclave-os strips the whole X-Privasys-Peer-*
+// namespace from any request that did not pass verification, then sets these
+// itself (see verifyAttestedAssistant).
+const (
+	peerVerifiedHeader    = "X-Privasys-Peer-Verified"
+	peerAppIDHeader       = "X-Privasys-Peer-App-Id"
+	peerImageDigestHeader = "X-Privasys-Peer-Image-Digest"
+)
+
 // onBehalfOfHeader names the acting user on the assistant-enclave path
 // (§8.7 RAG-in-enclave). It is trusted ONLY once the assistant-enclave
 // credential has been verified (verifyAssistantEnclave); on every other
@@ -436,6 +447,19 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 				return
 			}
 			next(w, r, p)
+		case strings.EqualFold(r.Header.Get(peerVerifiedHeader), "true"):
+			// Attested sibling enclave acting for a user (§8.7 final form).
+			// Checked BEFORE the sealed-session case: this caller presents no
+			// Authorization header and no X-Privasys-Sub, so it would
+			// otherwise fall through — and it must never be mistaken for a
+			// browser session, since it names its user with a different
+			// header and gets the restricted AI-scoped surface.
+			p, err := s.verifyAttestedAssistant(r)
+			if err != nil {
+				http.Error(w, "invalid attested caller: "+err.Error(), http.StatusUnauthorized)
+				return
+			}
+			next(w, r, p)
 		case r.Header.Get(relaySubHeader) != "":
 			sub := r.Header.Get(relaySubHeader)
 			next(w, r, &Principal{Sub: sub, Via: viaSealed, ID: &oidc.Identity{Sub: sub, Issuer: "session-relay"}})
@@ -498,6 +522,48 @@ func (s *Server) verifyAppGrant(ctx context.Context, tok string) (*Principal, er
 // verified against the pinned confidential-AI measurement over inbound
 // mutual RA-TLS. The principal it returns may run only the read-only,
 // AI-scoped RAG surface (see IsAssistant).
+// verifyAttestedAssistant authenticates the confidential-AI enclave from its
+// ATTESTED IDENTITY rather than a shared secret — the FINAL form of the §8.7
+// path described above, and the reason no per-tool credential has to exist.
+//
+// The caller presented a TEE-bound client certificate on an inbound mutual
+// RA-TLS connection; enclave-os verified it (quote signature, measurements,
+// the app's allowed-callers pin and the session channel binder) and
+// republished the result as X-Privasys-Peer-*. Those headers are trustworthy
+// here because enclave-os strips the entire namespace from every request that
+// did not pass that verification, so a client cannot forge them.
+//
+// This function adds the app-layer half: the verified peer must be the
+// workload this Drive instance was configured to accept, matched against
+// AssistantEnclaveMeasurement (its app id, OID 3.6, or its code hash, OID
+// 3.2 — the two forms that identify a workload rather than its host). The
+// acting user is still named by X-Privasys-On-Behalf-Of, and the principal
+// returned is the same read-only, AI-scoped one the shared-secret path
+// produces, so the tool surface is unchanged.
+//
+// Empty configuration disables the path, and an unverified caller is refused:
+// both directions fail closed.
+func (s *Server) verifyAttestedAssistant(r *http.Request) (*Principal, error) {
+	cfg := s.CurrentConfig()
+	if cfg == nil || cfg.AssistantEnclaveMeasurement == "" {
+		return nil, errors.New("attested assistant path not enabled")
+	}
+	if !strings.EqualFold(strings.TrimSpace(r.Header.Get(peerVerifiedHeader)), "true") {
+		return nil, errors.New("caller is not an attested peer")
+	}
+	want := strings.ToLower(strings.TrimSpace(cfg.AssistantEnclaveMeasurement))
+	appID := strings.ToLower(strings.TrimSpace(r.Header.Get(peerAppIDHeader)))
+	digest := strings.ToLower(strings.TrimSpace(r.Header.Get(peerImageDigestHeader)))
+	if want == "" || (want != appID && want != digest) {
+		return nil, errors.New("attested caller is not the configured assistant enclave")
+	}
+	sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader))
+	if sub == "" {
+		return nil, errors.New("missing on-behalf-of subject")
+	}
+	return &Principal{Sub: sub, Via: viaAssistant}, nil
+}
+
 func (s *Server) verifyAssistantEnclave(r *http.Request, tok string) (*Principal, error) {
 	cfg := s.CurrentConfig()
 	if cfg == nil || cfg.AssistantEnclaveToken == "" {
