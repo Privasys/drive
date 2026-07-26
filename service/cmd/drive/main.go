@@ -204,6 +204,10 @@ func serve(args []string) error {
 	defer cancel()
 	revoked.Start(ctx)
 	srv.StartExpirySweep(ctx, time.Hour)
+	// Start the search indexer now, not on first upload: a restart with a
+	// backlog must recover orphaned 'processing' rows and drain 'pending'
+	// ones without waiting for new activity.
+	srv.StartIndexer()
 
 	httpSrv := &http.Server{
 		Addr:              *addr,

@@ -123,6 +123,22 @@ func (s *Store) ResetIndexedForReindex(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// ResetStaleProcessing flips every 'processing' file back to 'pending'.
+// Called once at indexer start, before any worker runs: a row still
+// 'processing' at that point was orphaned mid-index by a restart, and the
+// retry sweep matches 'pending' only, so nothing else ever recovers it.
+func (s *Store) ResetStaleProcessing(ctx context.Context) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE nodes SET index_status = ?
+		 WHERE kind = 'file' AND index_status = ?`),
+		IndexPending, IndexProcessing)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ListPendingIndex returns file node ids awaiting indexing, oldest
 // first, for the retry sweep.
 func (s *Store) ListPendingIndex(ctx context.Context, limit int) ([][3]string, error) {

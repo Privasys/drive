@@ -266,6 +266,11 @@ type Ops interface {
 	// SetIndexProgress records `done` of `total` chunks embedded so the UI
 	// can show a real progress bar while a file is "processing".
 	SetIndexProgress(ctx context.Context, tenantID, nodeID string, done, total int) error
+	// ResetStaleProcessing flips every 'processing' file back to 'pending'.
+	// Called once at worker start, when no job can be in flight: a file
+	// still marked 'processing' was orphaned by a restart and no other
+	// code path ever picks it up again.
+	ResetStaleProcessing(ctx context.Context) (int64, error)
 	HasNoIndexAncestor(ctx context.Context, tenantID, nodeID string) (bool, error)
 	ReplaceSections(ctx context.Context, tenantID, nodeID string, secs []SectionSpec) ([]int64, error)
 	ReplaceEmbeddings(ctx context.Context, tenantID, nodeID, space string, rows []EmbeddingRowInput) error
@@ -347,10 +352,30 @@ const (
 	maxBackoff    = 30 * time.Minute
 )
 
+// Start launches the worker and retry sweep. Idempotent. MUST be called at
+// boot: Enqueue also starts them lazily, but a deployment restarted with a
+// backlog and no fresh uploads would otherwise never look at its queue —
+// exactly how prod files stayed "Indexing…" forever after a restart.
+func (ix *Indexer) Start() {
+	if ix == nil {
+		return
+	}
+	ix.once.Do(ix.start)
+}
+
 func (ix *Indexer) start() {
 	ix.queue = make(chan job, 256)
 	ix.attempts = make(map[string]int)
 	ix.nextTry = make(map[string]time.Time)
+	// Restart recovery, before any worker runs: a row still 'processing'
+	// now was orphaned mid-index by the previous process — flip it back to
+	// 'pending' so the sweep below can see it (the sweep matches 'pending'
+	// only).
+	if n, err := ix.Ops.ResetStaleProcessing(context.Background()); err != nil {
+		log.Printf("search: reset stale processing: %v", err)
+	} else if n > 0 {
+		log.Printf("search: requeued %d file(s) orphaned in 'processing' by a restart", n)
+	}
 	go func() {
 		for j := range ix.queue {
 			ix.process(context.Background(), j)

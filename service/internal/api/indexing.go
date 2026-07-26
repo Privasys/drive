@@ -27,6 +27,17 @@ var (
 	indexerRef  *search.Indexer
 )
 
+// StartIndexer starts the background indexer's worker and retry sweep at
+// boot. Without this, the sweep only starts on the first post-boot upload
+// (Enqueue), and a restarted deployment with a backlog but no new uploads
+// never drains its queue. No-op without pgvector (SQLite dev, CI).
+func (s *Server) StartIndexer() {
+	if !s.Store.VectorOK {
+		return
+	}
+	s.indexer().Start()
+}
+
 // indexer lazily builds the singleton background indexer. The embedder
 // resolves from the CURRENT config on every run, so configure changes
 // (fleet endpoint) apply without a restart.
@@ -113,6 +124,10 @@ func (o indexOps) SetIndexStatus(ctx context.Context, tenantID, nodeID, status s
 
 func (o indexOps) SetIndexProgress(ctx context.Context, tenantID, nodeID string, done, total int) error {
 	return o.st.SetIndexProgress(ctx, tenantID, nodeID, done, total)
+}
+
+func (o indexOps) ResetStaleProcessing(ctx context.Context) (int64, error) {
+	return o.st.ResetStaleProcessing(ctx)
 }
 
 func (o indexOps) HasNoIndexAncestor(ctx context.Context, tenantID, nodeID string) (bool, error) {

@@ -164,6 +164,8 @@ func (f *fakeOps) SetIndexStatus(_ context.Context, _, nodeID, status string) er
 	return nil
 }
 
+func (f *fakeOps) ResetStaleProcessing(_ context.Context) (int64, error) { return 0, nil }
+
 func (f *fakeOps) SetIndexProgress(_ context.Context, _, nodeID string, done, total int) error {
 	if f.progress == nil {
 		f.progress = map[string][2]int{}
