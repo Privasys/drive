@@ -33,6 +33,16 @@ func (s *Store) SetIndexStatus(ctx context.Context, tenantID, nodeID, status str
 	return err
 }
 
+// SetIndexProgress records how far a file's embedding has got: `done` of
+// `total` chunks embedded. The indexer updates it as it batches through the
+// chunks so the UI can show a real progress bar during "processing".
+func (s *Store) SetIndexProgress(ctx context.Context, tenantID, nodeID string, done, total int) error {
+	_, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE nodes SET index_chunks_done = ?, index_chunks_total = ? WHERE tenant_id = ? AND id = ?`),
+		done, total, tenantID, nodeID)
+	return err
+}
+
 // SetNoIndex flags a node (file or folder) as excluded from the
 // semantic index. For folders the exclusion covers the whole subtree
 // (the indexer walks the parent chain).
@@ -144,6 +154,8 @@ func (s *Store) ListPendingIndex(ctx context.Context, limit int) ([][3]string, e
 type NodeListMeta struct {
 	IndexStatus string // '' | pending | processing | indexed | skipped | failed | excluded
 	CreatedBy   string
+	ChunksDone  int // chunks embedded so far (progress numerator)
+	ChunksTotal int // chunks to embed (0 until known; progress denominator)
 }
 
 // ListNodeMeta returns nodeID -> listing meta for a set of nodes. A
@@ -162,7 +174,7 @@ func (s *Store) ListNodeMeta(ctx context.Context, tenantID string, nodeIDs []str
 		args = append(args, id)
 	}
 	rows, err := s.DB.QueryContext(ctx, s.q(
-		`SELECT id, index_status, no_index, created_by FROM nodes WHERE tenant_id = ? AND id IN (`+strings.Join(ph, ",")+`)`),
+		`SELECT id, index_status, no_index, created_by, index_chunks_done, index_chunks_total FROM nodes WHERE tenant_id = ? AND id IN (`+strings.Join(ph, ",")+`)`),
 		args...)
 	if err != nil {
 		return nil, err
@@ -172,7 +184,8 @@ func (s *Store) ListNodeMeta(ctx context.Context, tenantID string, nodeIDs []str
 		var id string
 		var status, createdBy *string
 		var noIndex *bool
-		if err := rows.Scan(&id, &status, &noIndex, &createdBy); err != nil {
+		var done, total *int64
+		if err := rows.Scan(&id, &status, &noIndex, &createdBy, &done, &total); err != nil {
 			return nil, err
 		}
 		var m NodeListMeta
@@ -184,6 +197,12 @@ func (s *Store) ListNodeMeta(ctx context.Context, tenantID string, nodeIDs []str
 		}
 		if createdBy != nil {
 			m.CreatedBy = *createdBy
+		}
+		if done != nil {
+			m.ChunksDone = int(*done)
+		}
+		if total != nil {
+			m.ChunksTotal = int(*total)
 		}
 		out[id] = m
 	}

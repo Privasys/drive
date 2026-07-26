@@ -263,6 +263,9 @@ type Content func(ctx context.Context, tenantID, nodeID string) (io.ReadCloser, 
 // store).
 type Ops interface {
 	SetIndexStatus(ctx context.Context, tenantID, nodeID, status string) error
+	// SetIndexProgress records `done` of `total` chunks embedded so the UI
+	// can show a real progress bar while a file is "processing".
+	SetIndexProgress(ctx context.Context, tenantID, nodeID string, done, total int) error
 	HasNoIndexAncestor(ctx context.Context, tenantID, nodeID string) (bool, error)
 	ReplaceSections(ctx context.Context, tenantID, nodeID string, secs []SectionSpec) ([]int64, error)
 	ReplaceEmbeddings(ctx context.Context, tenantID, nodeID, space string, rows []EmbeddingRowInput) error
@@ -546,16 +549,31 @@ func (ix *Indexer) process(ctx context.Context, j job) {
 	}
 
 	emb := ix.Embedder()
-	vecs, err := emb.Embed(ctx, chunkTexts, Document)
-	if err != nil {
-		// Transient by policy (§8.4): the fleet being down parks the
-		// file pending; deferred beats polluted.
-		log.Printf("search: embed %s (%s): %v", j.nodeID, emb.Space(), err)
-		ix.parkPending(ctx, j)
-		return
+	total := len(chunkTexts)
+	setProgress := func(done int) {
+		if err := ix.Ops.SetIndexProgress(ctx, j.tenantID, j.nodeID, done, total); err != nil {
+			log.Printf("search: set progress %d/%d on %s: %v", done, total, j.nodeID, err)
+		}
 	}
-	for i := range rows {
-		rows[i].Vector = vecs[i]
+	// Embed in batches so the UI sees a moving bar on a large file, rather
+	// than one opaque "processing". The total is published up front (done=0)
+	// and advanced after each batch's vectors are in hand.
+	setProgress(0)
+	const embedBatch = 32
+	for start := 0; start < total; start += embedBatch {
+		end := min(start+embedBatch, total)
+		vecs, err := emb.Embed(ctx, chunkTexts[start:end], Document)
+		if err != nil {
+			// Transient by policy (§8.4): the fleet being down parks the
+			// file pending; deferred beats polluted.
+			log.Printf("search: embed %s (%s) [%d:%d]: %v", j.nodeID, emb.Space(), start, end, err)
+			ix.parkPending(ctx, j)
+			return
+		}
+		for i, v := range vecs {
+			rows[start+i].Vector = v
+		}
+		setProgress(end)
 	}
 	if err := ix.Ops.ReplaceEmbeddings(ctx, j.tenantID, j.nodeID, emb.Space(), rows); err != nil {
 		log.Printf("search: store embeddings %s: %v", j.nodeID, err)

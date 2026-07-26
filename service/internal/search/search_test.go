@@ -156,10 +156,19 @@ type fakeOps struct {
 	excluded    map[string]bool
 	conversions map[string]string
 	links       map[string][]RawLink
+	progress    map[string][2]int // nodeID -> {done, total}
 }
 
 func (f *fakeOps) SetIndexStatus(_ context.Context, _, nodeID, status string) error {
 	f.status[nodeID] = status
+	return nil
+}
+
+func (f *fakeOps) SetIndexProgress(_ context.Context, _, nodeID string, done, total int) error {
+	if f.progress == nil {
+		f.progress = map[string][2]int{}
+	}
+	f.progress[nodeID] = [2]int{done, total}
 	return nil
 }
 
@@ -226,6 +235,10 @@ func TestIndexerLifecycle(t *testing.T) {
 	ix.Enqueue("t1", "n-text", "report.md", "text/markdown")
 	if ops.status["n-text"] != "indexed" || len(ops.rows["n-text"]) == 0 {
 		t.Fatalf("text: status=%q rows=%d", ops.status["n-text"], len(ops.rows["n-text"]))
+	}
+	// Progress must have reached done==total==chunk count.
+	if p := ops.progress["n-text"]; p[1] == 0 || p[0] != p[1] || p[1] != len(ops.rows["n-text"]) {
+		t.Fatalf("text: progress %d/%d, want done==total==%d", p[0], p[1], len(ops.rows["n-text"]))
 	}
 	if len(ops.secs["n-text"]) != 3 { // root + Report + Annex
 		t.Fatalf("sections: %d", len(ops.secs["n-text"]))

@@ -111,6 +111,10 @@ func (o indexOps) SetIndexStatus(ctx context.Context, tenantID, nodeID, status s
 	return o.st.SetIndexStatus(ctx, tenantID, nodeID, status)
 }
 
+func (o indexOps) SetIndexProgress(ctx context.Context, tenantID, nodeID string, done, total int) error {
+	return o.st.SetIndexProgress(ctx, tenantID, nodeID, done, total)
+}
+
 func (o indexOps) HasNoIndexAncestor(ctx context.Context, tenantID, nodeID string) (bool, error) {
 	return o.st.HasNoIndexAncestor(ctx, tenantID, nodeID)
 }

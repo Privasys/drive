@@ -658,6 +658,8 @@ func (s *Server) mapNodesWithIndex(ctx context.Context, tenantID string, ns []*s
 	for i := range out {
 		m := meta[out[i].ID]
 		out[i].IndexStatus = m.IndexStatus
+		out[i].IndexChunksDone = m.ChunksDone
+		out[i].IndexChunksTotal = m.ChunksTotal
 		out[i].CreatedBy = m.CreatedBy
 	}
 	return out
@@ -1297,6 +1299,10 @@ type nodeJSON struct {
 	// IndexStatus: '' | pending | processing | indexed | skipped |
 	// failed | excluded — drives the searchable indicator in listings.
 	IndexStatus string `json:"index_status,omitempty"`
+	// IndexChunksDone/Total drive the progress bar while IndexStatus is
+	// "processing": `done` of `total` chunks embedded (0/0 until known).
+	IndexChunksDone  int `json:"index_chunks_done,omitempty"`
+	IndexChunksTotal int `json:"index_chunks_total,omitempty"`
 	// CreatedBy is the creator's sub (the Owner column); UpdatedAt is
 	// RFC3339 (the Modified column).
 	CreatedBy string `json:"created_by,omitempty"`

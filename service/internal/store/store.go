@@ -233,6 +233,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		// Who created the node (the change-feed actor), for the Owner
 		// column in listings. '' on nodes that predate the column.
 		`ALTER TABLE nodes ADD COLUMN created_by TEXT DEFAULT ''`,
+		// Embedding progress for the "indexing…" state: chunks embedded so
+		// far of the total, so the UI can show a real bar. 0/0 until known.
+		`ALTER TABLE nodes ADD COLUMN index_chunks_done INTEGER DEFAULT 0`,
+		`ALTER TABLE nodes ADD COLUMN index_chunks_total INTEGER DEFAULT 0`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, col); err != nil {
 			msg := strings.ToLower(err.Error())
