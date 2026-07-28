@@ -9,7 +9,7 @@
 # this repo alone (build context = service/). Bump the ARGs when the
 # siblings move.
 ARG GO_RATLS_VERSION=privasys-v0.5.1-go1.26.5
-ARG RA_TLS_CLIENTS_REF=e8e18ee55de8d2c2924bdebde950c57bb2a829f4
+ARG RA_TLS_CLIENTS_REF=7d5418ef675141c2380ac01e45a65e7788b8ba7e
 ARG ENCLAVE_VAULTS_CLIENT_REF=7cfea6e33ff809d0a13d0303726b79329ea1ae60
 
 FROM alpine:3.21 AS toolchain

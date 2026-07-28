@@ -11,8 +11,8 @@ package deptls
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -116,29 +116,58 @@ func NewHTTPClient(set ratls.DependencySet, creds CredentialSource, allowDebugIm
 			// requests one (ingress mutual RA-TLS). Nil off platform, which
 			// leaves the dial server-auth only.
 			GetClientCertificate: getClientCert,
-			VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-				if len(rawCerts) == 0 {
-					return errors.New("deptls: peer sent no certificate")
-				}
-				leaf, err := x509.ParseCertificate(rawCerts[0])
-				if err != nil {
-					return fmt.Errorf("deptls: parse peer certificate: %w", err)
-				}
-				info, err := ratls.VerifyRaTlsCert(leaf, &ratls.VerificationPolicy{
-					TEE:               ratls.TeeTypeTDX,
-					ReportData:        ratls.ReportDataDeterministic,
-					QuoteVerification: &ratls.QuoteVerificationConfig{Endpoint: server, Token: token},
-					AllowDebugImages:  allowDebugImages,
-				})
-				if err != nil {
-					return fmt.Errorf("deptls: peer attestation failed: %w", err)
-				}
-				return matchPinned(info, set)
-			},
 		}
+
+		// Challenge mode. A fresh nonce per connection makes the peer bind its
+		// quote to THIS handshake, so a replayed certificate cannot pass. It is
+		// also what causes BOTH ends to derive a channel binder: without the
+		// challenge the callee derives none, our egress certificate cannot be
+		// bound to the session, and a callee running ingress mutual RA-TLS
+		// rejects us outright ("missing or undecodable channel binder").
+		nonce := make([]byte, 32)
+		if _, err := rand.Read(nonce); err != nil {
+			raw.Close()
+			return nil, fmt.Errorf("deptls: nonce: %w", err)
+		}
+		if err := ratls.SetClientHelloChallenge(conf, nonce); err != nil {
+			raw.Close()
+			return nil, fmt.Errorf("deptls: %w", err)
+		}
+
 		tc := tls.Client(raw, conf)
 		if err := tc.HandshakeContext(ctx); err != nil {
 			raw.Close()
+			return nil, err
+		}
+
+		// Verify AFTER the handshake, not in VerifyPeerCertificate: the
+		// channel binder only exists once the key schedule is complete, and
+		// challenge-mode report_data folds it. No application data has been
+		// written yet, and any failure closes the connection here, so nothing
+		// is ever sent to an unverified peer.
+		st := tc.ConnectionState()
+		if len(st.PeerCertificates) == 0 {
+			tc.Close()
+			return nil, errors.New("deptls: peer sent no certificate")
+		}
+		binder := ratls.ChannelBinder(tc)
+		if len(binder) == 0 {
+			tc.Close()
+			return nil, errors.New("deptls: no channel binder derived (peer did not answer the RA-TLS challenge)")
+		}
+		info, err := ratls.VerifyRaTlsCertBound(st.PeerCertificates[0], &ratls.VerificationPolicy{
+			TEE:               ratls.TeeTypeTDX,
+			ReportData:        ratls.ReportDataChallengeResponse,
+			Nonce:             nonce,
+			QuoteVerification: &ratls.QuoteVerificationConfig{Endpoint: server, Token: token},
+			AllowDebugImages:  allowDebugImages,
+		}, binder)
+		if err != nil {
+			tc.Close()
+			return nil, fmt.Errorf("deptls: peer attestation failed: %w", err)
+		}
+		if err := matchPinned(info, set); err != nil {
+			tc.Close()
 			return nil, err
 		}
 		return tc, nil
