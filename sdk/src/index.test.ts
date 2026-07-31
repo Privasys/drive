@@ -100,6 +100,73 @@ test("listChanges builds the since/limit query", async () => {
   assert.match(captured!.url, /limit=10/);
 });
 
+test("createShareLink sends the chosen attributes and reports what they cost", async () => {
+  let captured: Recorded | undefined;
+  const drive = PrivasysDrive.connect({
+    baseUrl: "https://drive.example",
+    token: "tok",
+    fetch: makeFakeFetch((r) => {
+      captured = r;
+      return new Response(JSON.stringify({
+        id: "l1", secret: "s3cret", mode: "restricted", scope: ["read"], node_id: "n1",
+        required_attributes: ["privasys:document_valid", "name"],
+        paid_attributes: ["privasys:document_valid"],
+        billing_state: "funded", billing_credits: 30,
+      }), { status: 201 });
+    }),
+  });
+  const link = await drive.createShareLink("t1", "n1", {
+    mode: "restricted",
+    requiredAttributes: ["document_valid", "name"],
+  });
+  assert.equal(link.billing_state, "funded");
+  assert.equal(link.billing_credits, 30);
+  assert.deepEqual(link.paid_attributes, ["privasys:document_valid"]);
+  assert.deepEqual(JSON.parse(captured!.body!).required_attributes, ["document_valid", "name"]);
+});
+
+test("previewShareLink asks with the secret alone and yields the billing grant", async () => {
+  let captured: Recorded | undefined;
+  const preview = await PrivasysDrive.previewShareLink({
+    baseUrl: "https://drive.example/",
+    linkId: "l1",
+    secret: "s3cret",
+    fetch: makeFakeFetch((r) => {
+      captured = r;
+      return new Response(JSON.stringify({
+        link_id: "l1", mode: "restricted",
+        required_attributes: ["privasys:document_valid"],
+        paid_attributes: ["privasys:document_valid"],
+        billing_grant: "grant-1", billing_state: "funded",
+      }), { status: 200 });
+    }),
+  });
+  assert.equal(preview.billing_grant, "grant-1");
+  // Token-less: the visitor has not signed in yet, which is the whole point.
+  assert.equal(captured?.headers["authorization"], undefined);
+  assert.equal(captured?.url, "https://drive.example/v1/links/l1/preview");
+  assert.deepEqual(JSON.parse(captured!.body!), { secret: "s3cret" });
+});
+
+test("quoteAttributes prices the set before the share exists", async () => {
+  let captured: Recorded | undefined;
+  const drive = PrivasysDrive.connect({
+    baseUrl: "https://drive.example",
+    token: "tok",
+    fetch: makeFakeFetch((r) => {
+      captured = r;
+      return new Response(JSON.stringify({
+        attributes: [{ key: "privasys:document_valid", namespace: "privasys", assurance: "gov", price_credits: 30 }],
+        total_credits: 30,
+      }), { status: 200 });
+    }),
+  });
+  const quote = await drive.quoteAttributes(["privasys:document_valid"]);
+  assert.equal(quote.total_credits, 30);
+  assert.equal(captured?.url, "https://drive.example/v1/attributes/quote");
+  assert.equal(captured?.headers["authorization"], "Bearer tok");
+});
+
 test("setupPersonalDrive chains tenant, grant fetch and key provisioning", async () => {
   const calls: string[] = [];
   const drive = PrivasysDrive.connect({

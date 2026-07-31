@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Privasys/drive/service/internal/attrbilling"
 	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/crypto"
 	"github.com/Privasys/drive/service/internal/deptls"
@@ -95,6 +96,12 @@ type Server struct {
 	notifyMu sync.Mutex
 	notifier *notify.Client
 
+	// market talks to the attribute marketplace for the sharer who is
+	// paying (catalogue, quote, billing grant). Nil off-platform or
+	// before configure.
+	marketMu sync.Mutex
+	market   *attrbilling.Client
+
 	// recVer caches per-issuer JWKS verifiers for recovery approvals.
 	recVerMu sync.Mutex
 	recVer   map[string]oidc.Verifier
@@ -152,6 +159,13 @@ type Principal struct {
 	ID    *oidc.Identity   // non-nil for users
 	Grant *grants.Grant    // non-nil for app principals
 	Env   *grants.Envelope // non-nil for app principals
+	// Bearer is the caller's raw platform token, kept for the bearer
+	// path alone. Funding a recipient's attribute disclosure is an act
+	// the control plane attributes to the caller's OWN account, which it
+	// resolves from the token, so Drive has to present the caller's
+	// token rather than its app identity. Empty on every other path,
+	// which is why a sealed-session sharer cannot fund a share.
+	Bearer string
 }
 
 // IsUser reports whether p is a user (OIDC bearer or sealed session).
@@ -335,6 +349,9 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/me/tenant", s.auth(s.handleEnsurePersonalTenant))
 	mux.Handle("POST /v1/me/tenant/key", s.auth(s.handleTenantKey))
 	mux.Handle("GET /v1/shared", s.auth(s.handleSharedWithMe))
+	// Attribute marketplace, for the sharer choosing what to require.
+	mux.Handle("GET /v1/attributes", s.auth(s.handleAttributeCatalogue))
+	mux.Handle("POST /v1/attributes/quote", s.auth(s.handleAttributeQuote))
 	mux.Handle("POST /v1/tenants", s.auth(s.handleCreateTenant))
 	mux.Handle("POST /v1/tenants/{tenantID}/members", s.auth(s.handleAddMember))
 	mux.Handle("GET /v1/tenants/{tenantID}/members", s.auth(s.handleListMembers))
@@ -394,6 +411,11 @@ func (s *Server) Routes() http.Handler {
 	// redeems by link id after signing in.
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/links", s.auth(s.handleCreateLink))
 	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/links", s.auth(s.handleListLinks))
+	mux.Handle("POST /v1/tenants/{tenantID}/links/{linkID}/billing-grant", s.auth(s.handleRearmLinkBilling))
+	// Deliberately unauthenticated: the visitor needs the link's billing
+	// grant to build the sign-in that would authenticate them (see
+	// handlePreviewLink). The link secret is the authority.
+	mux.HandleFunc("POST /v1/links/{linkID}/preview", s.handlePreviewLink)
 	mux.Handle("POST /v1/links/{linkID}/resolve", s.auth(s.handleResolveLink))
 	mux.Handle("POST /v1/links/{linkID}/redeem", s.auth(s.handleRedeemLink))
 	mux.Handle("GET /v1/tenants/{tenantID}/link-requests", s.auth(s.handleListLinkRequests))
@@ -434,7 +456,8 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 				http.Error(w, "credential revoked", http.StatusUnauthorized)
 				return
 			}
-			next(w, r, &Principal{Sub: id.Sub, Via: viaBearer, ID: id})
+			next(w, r, &Principal{Sub: id.Sub, Via: viaBearer, ID: id,
+				Bearer: strings.TrimPrefix(h, "Bearer ")})
 		case strings.HasPrefix(h, "AppGrant "):
 			p, err := s.verifyAppGrant(r.Context(), strings.TrimSpace(strings.TrimPrefix(h, "AppGrant ")))
 			if err != nil {

@@ -134,6 +134,23 @@ func (r *Repo) Get(ctx context.Context, id string) (*Grant, error) {
 	return scanGrant(rows)
 }
 
+// UpdateMeta replaces an active grant's Meta JSON. A share link's
+// identity and secret outlive the single-use billing grant attached to
+// it, so re-funding the link for the next recipient rewrites Meta in
+// place rather than minting a second link.
+func (r *Repo) UpdateMeta(ctx context.Context, tenantID, id, meta string) error {
+	res, err := r.DB.ExecContext(ctx, r.q(
+		`UPDATE grants SET meta = ? WHERE tenant_id = ? AND id = ? AND revoked_at IS NULL`),
+		nullableString(meta), tenantID, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // Revoke marks a grant revoked. Idempotent.
 func (r *Repo) Revoke(ctx context.Context, tenantID, id string) error {
 	_, err := r.DB.ExecContext(ctx, r.q(

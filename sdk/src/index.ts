@@ -41,6 +41,74 @@ export interface Me {
   tenants: { id: string; kind: TenantKind; name: string; role: string }[];
 }
 
+/** One attribute a sharer may require, as published by its provider. */
+export interface AttributeCatalogueEntry {
+  /** Namespaced key (`privasys:document_valid`), as the reservation expects it. */
+  key: string;
+  namespace: string;
+  name: string;
+  /** `gov` attributes are proven against a credential; `self` are asserted. */
+  assurance: string;
+  price_credits: number;
+  description?: string;
+}
+
+export interface AttributeQuoteLine {
+  key: string;
+  namespace: string;
+  assurance: string;
+  price_credits: number;
+}
+
+export interface AttributeQuote {
+  attributes: AttributeQuoteLine[];
+  total_credits: number;
+}
+
+/**
+ * Billing state of a share link: `funded` (a grant is armed for the next
+ * recipient), `free` (the chosen attributes disclose at no charge),
+ * `expired` (the grant lapsed before anyone opened the link) or
+ * `unavailable` (nobody could be billed here, so the attributes stay
+ * self-asserted).
+ */
+export type ShareLinkBillingState = "funded" | "free" | "expired" | "unavailable";
+
+export interface ShareLinkBilling {
+  link_id: string;
+  billing_state: ShareLinkBillingState;
+  billing_credits: number;
+  billing_grant_expires_at?: string;
+  paid_attributes?: string[];
+}
+
+export interface ShareLink {
+  id: string;
+  /** Returned exactly once; it lives in the link's URL fragment. */
+  secret: string;
+  mode: "open" | "restricted";
+  scope: string[];
+  node_id: string;
+  required_attributes?: string[];
+  expires_at?: string;
+  /** The subset the sharer is paying to have proven. */
+  paid_attributes?: string[];
+  billing_state?: ShareLinkBillingState;
+  billing_credits?: number;
+  billing_grant_expires_at?: string;
+}
+
+export interface ShareLinkPreview {
+  link_id: string;
+  mode: "open" | "restricted";
+  required_attributes?: string[];
+  paid_attributes?: string[];
+  /** Present only while a grant is armed; carry it into `/authorize`. */
+  billing_grant?: string;
+  billing_state?: ShareLinkBillingState;
+  billing_grant_expires_at?: string;
+}
+
 export interface ConnectOptions {
   baseUrl: string;
   token: string;
@@ -224,6 +292,86 @@ export class PrivasysDrive {
 
   async revokeGrant(tenantId: string, grantId: string): Promise<void> {
     await this.req<void>("DELETE", `/v1/tenants/${enc(tenantId)}/grants/${enc(grantId)}`);
+  }
+
+  // --- attribute-gated share links -----------------------------------
+
+  /**
+   * The attributes a sharer may require of a recipient, priced. Read
+   * live from the platform marketplace, so an attribute published by a
+   * new provider is offerable without an SDK release.
+   */
+  async attributeCatalogue(): Promise<AttributeCatalogueEntry[]> {
+    const res = await this.req<{ attributes: AttributeCatalogueEntry[] }>("GET", "/v1/attributes");
+    return res.attributes;
+  }
+
+  /**
+   * What a chosen set costs, before the share exists. Show this to the
+   * sharer: under "the inviter pays" it is their own credits that fund
+   * the recipient's disclosure.
+   */
+  async quoteAttributes(keys: string[]): Promise<AttributeQuote> {
+    return this.req<AttributeQuote>("POST", "/v1/attributes/quote", JSON.stringify({ attributes: keys }), "application/json");
+  }
+
+  /**
+   * Mint a share link. `requiredAttributes` takes catalogue keys
+   * (`privasys:document_valid`) or bare names; the priced ones come back
+   * in `paid_attributes` with a billing grant charged to the caller.
+   */
+  async createShareLink(tenantId: string, nodeId: string, params: {
+    mode?: "open" | "restricted";
+    scope?: string[];
+    requiredAttributes?: string[];
+    expiresUnix?: number;
+    label?: string;
+  } = {}): Promise<ShareLink> {
+    const body = JSON.stringify({
+      mode: params.mode ?? "open",
+      scope: params.scope ?? ["read"],
+      required_attributes: params.requiredAttributes ?? [],
+      expires_unix: params.expiresUnix,
+      label: params.label,
+    });
+    return this.req<ShareLink>("POST", `/v1/tenants/${enc(tenantId)}/nodes/${enc(nodeId)}/links`, body, "application/json");
+  }
+
+  /**
+   * Fund the NEXT recipient of a link. A billing grant is single-use, so
+   * a link handed to a second person needs a second grant, charged to
+   * the caller like the first.
+   */
+  async rearmShareLinkBilling(tenantId: string, linkId: string): Promise<ShareLinkBilling> {
+    return this.req<ShareLinkBilling>("POST", `/v1/tenants/${enc(tenantId)}/links/${enc(linkId)}/billing-grant`);
+  }
+
+  /**
+   * What a visitor must prove to open a link, and the billing grant that
+   * pays for proving it. Static and token-less on purpose: the caller
+   * needs `billing_grant` to build the sign-in that would authenticate
+   * them, and the answer is gated on the link secret alone.
+   *
+   * Pass `billing_grant` to the IdP as the `billing_grant` query
+   * parameter on `/authorize`. That is what moves the charge from the
+   * OAuth client's owner to the person who shared the document. A
+   * `billing_state` other than `"funded"` means no grant is armed and
+   * the sharer has to re-arm the link.
+   */
+  static async previewShareLink(opts: {
+    baseUrl: string;
+    linkId: string;
+    secret: string;
+    fetch?: typeof fetch;
+  }): Promise<ShareLinkPreview> {
+    const fetcher = opts.fetch ?? globalThis.fetch.bind(globalThis);
+    const res = await fetcher(`${opts.baseUrl.replace(/\/$/, "")}/v1/links/${enc(opts.linkId)}/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secret: opts.secret }),
+    });
+    if (!res.ok) throw await asError(res);
+    return (await res.json()) as ShareLinkPreview;
   }
 
   // --- change feed + GDPR export ------------------------------------

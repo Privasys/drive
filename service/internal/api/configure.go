@@ -71,6 +71,9 @@ type configureRequest struct {
 	// MgmtBaseURL enables self-healing of stale vault attestation
 	// tokens via the control plane (see config.Config).
 	MgmtBaseURL *string `json:"mgmt_base_url"`
+	// OIDCClientID binds the billing grants that fund attribute-gated
+	// shares to the front end's OAuth client (see config.Config).
+	OIDCClientID *string `json:"oidc_client_id"`
 	// Semantic-index embedding backend (see config.Config). The
 	// dependency pin makes every embeddings call verify the fleet's
 	// attested identity before sending data.
@@ -109,6 +112,9 @@ func (req *configureRequest) overlay(cur *config.Config) *config.Config {
 	}
 	if req.MgmtBaseURL != nil {
 		cfg.MgmtBaseURL = *req.MgmtBaseURL
+	}
+	if req.OIDCClientID != nil {
+		cfg.OIDCClientID = *req.OIDCClientID
 	}
 	if req.EmbeddingsBaseURL != nil {
 		cfg.EmbeddingsBaseURL = *req.EmbeddingsBaseURL

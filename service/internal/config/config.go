@@ -101,6 +101,13 @@ type Config struct {
 	// re-arm. Mutable (an ops setting, not part of the trust contract).
 	MgmtBaseURL string `json:"mgmt_base_url,omitempty"`
 
+	// OIDCClientID is the OAuth client the Drive front end presents at the
+	// IdP's /authorize. Attribute billing grants are bound to one client
+	// id, so a share that requires paid attributes cannot be funded until
+	// this is set; without it, required attributes stay self-asserted.
+	// Mutable ops setting.
+	OIDCClientID string `json:"oidc_client_id,omitempty"`
+
 	// Semantic-index embedding backend: an OpenAI-compatible embeddings
 	// endpoint (the confidential-AI fleet), tried first; the local CPU
 	// embedder is the fallback. Mutable ops settings.

@@ -78,7 +78,20 @@ Drive itself never calls a model.
     revocation (`DELETE .../grants/{grantID}`) removes access
     immediately. Client-side re-wrap to the recipient (the `wrapped_cek`
     field, so the operator never sees plaintext) is a later hardening.
-  - `link` anonymous static link with URL fragment-secret
+  - `link` anonymous static link with URL fragment-secret. A
+    `restricted` link may require attributes of its recipient. Those the
+    platform marketplace prices are *proven* (read from the recipient's
+    verified token, never from a form) and paid for by the **sharer**,
+    not by whoever registered the OAuth client: creating the link mints
+    an attribute billing grant against the sharer's own account, and
+    `POST /v1/links/{id}/preview` (token-less, gated on the link secret,
+    because the visitor needs the grant before they have a session)
+    hands the grant id to the visitor's sign-in, which must carry it as
+    the `billing_grant` parameter on `/authorize`. A grant funds one
+    sign-in, so a link handed to a second person is re-armed with
+    `POST /v1/tenants/{t}/links/{id}/billing-grant`. Attributes the
+    catalogue does not price stay self-asserted, as does everything when
+    no marketplace is configured (`oidc_client_id` + `mgmt_base_url`).
   - `app:<mrtd>` third-party platform app authenticated by an
     Ed25519-signed AppGrant token bound to the wallet pubkey
 

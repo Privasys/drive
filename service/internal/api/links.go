@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -32,6 +33,13 @@ import (
 //                 approve each person"); with some, the recipient must present
 //                 them before a request is filed.
 //
+// Required attributes come in two grades, and which grade an attribute
+// has is decided by the marketplace, not by Drive. A self-asserted one
+// (a name typed into a form) is what restricted links have always used.
+// A PAID one is proven: the IdP discloses it against a verified
+// credential during the recipient's sign-in, and someone is charged for
+// that disclosure. That someone is the SHARER (see armLinkBilling).
+//
 // The link itself is a `link`-subject grant whose Meta holds this JSON.
 // Because decryption happens inside the enclave from the tenant MEK, a
 // redeemed link needs nothing more than an ordinary subject grant for the
@@ -48,12 +56,46 @@ type linkMeta struct {
 	Mode   string   `json:"mode"`            // open | restricted
 	Attrs  []string `json:"attrs,omitempty"` // restricted: required attributes
 	Label  string   `json:"label,omitempty"` // owner's note
+
+	// PaidAttrs are the required attributes the marketplace charges for,
+	// spelled as the reservation expects them (namespaced). They are
+	// proven from the recipient's token rather than typed in, and
+	// BillingGrant is the sharer's promise to pay for exactly them.
+	//
+	// A grant is single-use and bound to one OAuth client, so it funds ONE
+	// recipient: a link handed to a second person needs re-arming (see
+	// handleRearmLinkBilling). BillingExpires is the platform's own
+	// expiry, restated here so the pre-sign-in preview can withhold a
+	// grant that would only be refused.
+	PaidAttrs      []string `json:"paid_attrs,omitempty"`
+	BillingGrant   string   `json:"billing_grant,omitempty"`
+	BillingExpires string   `json:"billing_expires,omitempty"` // RFC3339
+	BillingCredits int64    `json:"billing_credits,omitempty"`
 }
 
 const (
 	linkModeOpen       = "open"
 	linkModeRestricted = "restricted"
 )
+
+// Billing states a sharer's client can act on: funded means a grant is
+// armed for the next recipient, free means the chosen attributes cost
+// nothing to disclose, expired means the promise lapsed before anyone
+// opened the link, and unavailable means no one could be billed here (no
+// marketplace configured, or a sharer with no payer authority) so the
+// attributes stay self-asserted.
+const (
+	billingFunded      = "funded"
+	billingFree        = "free"
+	billingExpired     = "expired"
+	billingUnavailable = "unavailable"
+)
+
+// linkBillingTTL is how long a funding promise stays open. A share link
+// is opened when the recipient gets round to it, not when it is created,
+// so the grant takes the longest window the platform allows (its own
+// ceiling is 24h); past that the sharer re-arms.
+const linkBillingTTL = 24 * time.Hour
 
 // --- Owner: create / list -------------------------------------------------
 
@@ -73,6 +115,13 @@ type createLinkResponse struct {
 	NodeID             string   `json:"node_id"`
 	RequiredAttributes []string `json:"required_attributes,omitempty"`
 	ExpiresAt          *string  `json:"expires_at,omitempty"`
+	// What this share costs its creator, and for which attributes. The
+	// sharer is told after the fact as well as before (the quote
+	// endpoint) because the price is only fixed once the grant exists.
+	PaidAttributes []string `json:"paid_attributes,omitempty"`
+	BillingState   string   `json:"billing_state,omitempty"`
+	BillingCredits int64    `json:"billing_credits,omitempty"`
+	BillingExpires string   `json:"billing_grant_expires_at,omitempty"`
 }
 
 func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -112,6 +161,13 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Pri
 	if mode == linkModeRestricted {
 		meta.Attrs = req.RequiredAttributes
 	}
+	// Fund the disclosure before the link exists: a link whose attributes
+	// look required but cannot be proven is worse than no link at all.
+	state, err := s.armLinkBilling(r.Context(), p, &meta)
+	if err != nil {
+		writeMarketError(w, err)
+		return
+	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
@@ -146,7 +202,78 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Pri
 		NodeID:             nodeID,
 		RequiredAttributes: meta.Attrs,
 		ExpiresAt:          expIso,
+		PaidAttributes:     meta.PaidAttrs,
+		BillingState:       state,
+		BillingCredits:     meta.BillingCredits,
+		BillingExpires:     meta.BillingExpires,
 	})
+}
+
+// armLinkBilling prices the attributes the sharer chose and, when any of
+// them is billable, mints a billing grant against the SHARER's own
+// account, "the inviter pays". It reports the resulting billing state
+// and writes the grant into meta.
+//
+// The two ways it declines both leave nobody billed rather than moving
+// the charge somewhere nobody agreed to:
+//
+//   - No marketplace configured, or a sharer holding no platform token
+//     (the payer is resolved from the token, so a sealed-session sharer
+//     has no account to charge): the attributes stay self-asserted,
+//     exactly as restricted links worked before billing existed.
+//   - An attribute the catalogue does not price, such as the profile
+//     fields a sharer has always been able to ask for, is not billable
+//     and is left self-asserted rather than failing the share.
+//
+// A marketplace that refuses to mint is different: that is a share the
+// sharer asked to pay for and could not, so it fails.
+func (s *Server) armLinkBilling(ctx context.Context, p *Principal, meta *linkMeta) (string, error) {
+	meta.PaidAttrs, meta.BillingGrant, meta.BillingExpires, meta.BillingCredits = nil, "", "", 0
+	if len(meta.Attrs) == 0 {
+		return "", nil
+	}
+	m := s.marketClient()
+	if m == nil || p.Bearer == "" {
+		return billingUnavailable, nil
+	}
+	catalogue, err := m.Catalogue(ctx, p.Bearer)
+	if err != nil {
+		return "", err
+	}
+	// Store the catalogue's spelling from here on: the reservation the
+	// recipient's sign-in triggers resolves attributes by namespace, so a
+	// share funded under a bare name would be refused at the till.
+	attrs, paid := canonicaliseAttributes(catalogue, meta.Attrs)
+	meta.Attrs = attrs
+	if len(paid) == 0 {
+		return billingFree, nil
+	}
+	g, err := s.mintLinkBillingGrant(ctx, p, paid)
+	if err != nil {
+		return "", err
+	}
+	meta.PaidAttrs = paid
+	meta.BillingGrant = g.ID
+	meta.BillingExpires = g.ExpiresAt.UTC().Format(time.RFC3339)
+	meta.BillingCredits = g.QuotedCredits
+	return billingFunded, nil
+}
+
+// billingStateOf reports where a stored link's funding stands now. A
+// lapsed promise is called out rather than served, because a recipient
+// who carried an expired grant into their sign-in would be refused with
+// no way to know why.
+func (m *linkMeta) billingStateOf(now time.Time) string {
+	if len(m.PaidAttrs) == 0 {
+		return ""
+	}
+	if m.BillingGrant == "" {
+		return billingUnavailable
+	}
+	if exp, err := time.Parse(time.RFC3339, m.BillingExpires); err == nil && !exp.After(now) {
+		return billingExpired
+	}
+	return billingFunded
 }
 
 type linkView struct {
@@ -161,6 +288,13 @@ type linkView struct {
 	// Secret lets the owner re-copy the full link; empty for links minted
 	// before secrets were kept. This endpoint is canShare-gated.
 	Secret string `json:"secret,omitempty"`
+	// What the link is costing its creator, and whether the next
+	// recipient is still funded ("Active links" is where a sharer
+	// notices a lapsed grant and re-arms).
+	PaidAttributes []string `json:"paid_attributes,omitempty"`
+	BillingState   string   `json:"billing_state,omitempty"`
+	BillingCredits int64    `json:"billing_credits,omitempty"`
+	BillingExpires string   `json:"billing_grant_expires_at,omitempty"`
 }
 
 func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -188,6 +322,11 @@ func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request, p *Prin
 			CreatedAt: g.CreatedAt.UTC().Format(time.RFC3339),
 			Revoked:   g.RevokedAt != nil,
 			Secret:    meta.Secret,
+
+			PaidAttributes: meta.PaidAttrs,
+			BillingState:   meta.billingStateOf(time.Now().UTC()),
+			BillingCredits: meta.BillingCredits,
+			BillingExpires: meta.BillingExpires,
 		}
 		if g.ExpiresAt != nil {
 			iso := g.ExpiresAt.UTC().Format(time.RFC3339)
@@ -232,6 +371,129 @@ func (s *Server) loadLink(ctx context.Context, linkID, secret string) (*grants.G
 
 var errLinkSecret = errors.New("invalid or expired link")
 
+// previewLinkResponse is the pre-sign-in view of a link: what the
+// visitor must prove, and who is paying for it.
+type previewLinkResponse struct {
+	LinkID             string   `json:"link_id"`
+	Mode               string   `json:"mode"`
+	RequiredAttributes []string `json:"required_attributes,omitempty"`
+	PaidAttributes     []string `json:"paid_attributes,omitempty"`
+	BillingGrant       string   `json:"billing_grant,omitempty"`
+	BillingState       string   `json:"billing_state,omitempty"`
+	BillingExpires     string   `json:"billing_grant_expires_at,omitempty"`
+}
+
+// handlePreviewLink serves the one thing a visitor needs BEFORE they
+// have signed in: which attributes the link requires, and the billing
+// grant that funds the paid ones. The grant id has to reach the IdP as
+// the `billing_grant` parameter on the visitor's /authorize request,
+// which is what makes the sharer, rather than the OAuth client's owner,
+// pay for the disclosure, and by then it is far too late to ask an
+// endpoint that needs a session.
+//
+// Unauthenticated for exactly that reason, and sound because the link
+// secret IS the authority: this is the same POST body that opens the
+// link for a signed-in caller, checked the same way. It answers with
+// strictly less than resolve does (no node, no owner, no tenant), so
+// holding the secret buys nothing extra by skipping the sign-in.
+//
+// Drive's responsibility ends here. Putting the id on the authorize URL
+// belongs to whoever runs the sign-in, and the @privasys/auth SDK has no
+// way to add a parameter to that request today: it builds the query from
+// a fixed list. Until it can, a funded share still charges the OAuth
+// client's owner, because the IdP never learns the grant exists.
+func (s *Server) handlePreviewLink(w http.ResponseWriter, r *http.Request) {
+	var req redeemLinkRequest
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	g, meta, err := s.loadLink(r.Context(), r.PathValue("linkID"), req.Secret)
+	if err != nil {
+		writeLinkError(w, err)
+		return
+	}
+	out := previewLinkResponse{
+		LinkID:             g.ID,
+		Mode:               meta.Mode,
+		RequiredAttributes: meta.Attrs,
+		PaidAttributes:     meta.PaidAttrs,
+		BillingState:       meta.billingStateOf(time.Now().UTC()),
+		BillingExpires:     meta.BillingExpires,
+	}
+	// A lapsed grant is withheld, not passed on: spending it would fail
+	// the sign-in with a billing error the visitor cannot act on, whereas
+	// the state tells their client to ask the sharer to re-arm.
+	if out.BillingState == billingFunded {
+		out.BillingGrant = meta.BillingGrant
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRearmLinkBilling mints a fresh billing grant on an existing
+// link, charged to the sharer calling it.
+//
+// A grant funds ONE sign-in, so this is how a link reaches a second
+// recipient: cost scales per person, which is the honest shape of "the
+// inviter pays" and the reason it is an explicit act rather than
+// something Drive does on the sharer's behalf. It is also the repair for
+// a grant that expired before anyone opened the link.
+func (s *Server) handleRearmLinkBilling(w http.ResponseWriter, r *http.Request, p *Principal) {
+	tenantID := r.PathValue("tenantID")
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
+		return
+	}
+	g, err := s.Grants.Get(r.Context(), r.PathValue("linkID"))
+	if err != nil || g.TenantID != tenantID || g.Subject != grants.SubjectLink || !g.IsActive(time.Now().UTC()) {
+		httpError(w, http.StatusNotFound, errLinkSecret)
+		return
+	}
+	var meta linkMeta
+	if err := json.Unmarshal([]byte(g.Meta), &meta); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if len(meta.PaidAttrs) == 0 {
+		httpError(w, http.StatusBadRequest, errors.New("this link requires no paid attributes"))
+		return
+	}
+	// Re-price against the attributes the link already commits to, not
+	// against anything the caller sends: re-arming funds the share that
+	// exists, it does not redefine it.
+	grant, err := s.mintLinkBillingGrant(r.Context(), p, meta.PaidAttrs)
+	if err != nil {
+		writeMarketError(w, err)
+		return
+	}
+	meta.BillingGrant = grant.ID
+	meta.BillingExpires = grant.ExpiresAt.UTC().Format(time.RFC3339)
+	meta.BillingCredits = grant.QuotedCredits
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	err = s.Grants.UpdateMeta(r.Context(), tenantID, g.ID, string(metaJSON))
+	if errors.Is(err, sql.ErrNoRows) {
+		// Revoked between the read and the write. The grant just minted is
+		// the sharer's to lose; the link it was for no longer exists.
+		httpError(w, http.StatusNotFound, errLinkSecret)
+		return
+	}
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"link_id":                  g.ID,
+		"billing_state":            billingFunded,
+		"billing_credits":          meta.BillingCredits,
+		"billing_grant_expires_at": meta.BillingExpires,
+		"paid_attributes":          meta.PaidAttrs,
+	})
+}
+
 func (s *Server) handleResolveLink(w http.ResponseWriter, r *http.Request, p *Principal) {
 	linkID := r.PathValue("linkID")
 	if !p.IsUser() {
@@ -274,10 +536,15 @@ func (s *Server) handleResolveLink(w http.ResponseWriter, r *http.Request, p *Pr
 		"mode":                meta.Mode,
 		"scope":               scopeStrings(g.Scope),
 		"required_attributes": meta.Attrs,
-		"tenant_id":           g.TenantID,
-		"owner_name":          ownerName,
-		"already_granted":     granted,
-		"request_status":      requestStatus,
+		// Which of them the visitor must have PROVEN (they come off the
+		// token, so a visitor who signed in without them has to sign in
+		// again rather than fill a form in).
+		"paid_attributes": meta.PaidAttrs,
+		"billing_state":   meta.billingStateOf(time.Now().UTC()),
+		"tenant_id":       g.TenantID,
+		"owner_name":      ownerName,
+		"already_granted": granted,
+		"request_status":  requestStatus,
 		"node": map[string]any{
 			"id": n.ID, "name": n.Name, "kind": string(n.Kind), "size_bytes": n.PlainSize,
 		},
@@ -323,12 +590,7 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 		// Every required attribute must be presented, else no request is
 		// filed: a half-empty request would push an undecidable card at
 		// the owner. The front tells the visitor what is missing.
-		var missing []string
-		for _, k := range meta.Attrs {
-			if strings.TrimSpace(req.Attributes[k]) == "" {
-				missing = append(missing, k)
-			}
-		}
+		presented, missing := linkAttributeEvidence(p, meta, req.Attributes)
 		if len(missing) > 0 {
 			writeJSON(w, http.StatusForbidden, map[string]any{
 				"error":              "missing required attributes: " + strings.Join(missing, ", "),
@@ -360,7 +622,7 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 			"node_id":       g.NodeID,
 			"node_name":     n.Name,
 			"requester_sub": p.Sub,
-			"attributes":    req.Attributes,
+			"attributes":    presented,
 			"scope":         scopeStrings(g.Scope),
 		})
 		writeJSON(w, http.StatusOK, redeemResult("pending", g, n, lr.ID))
@@ -480,6 +742,40 @@ func (s *Server) handleDecideLinkRequest(w http.ResponseWriter, r *http.Request,
 }
 
 // --- helpers --------------------------------------------------------------
+
+// linkAttributeEvidence collects what the visitor actually has for each
+// required attribute, and names the ones they do not.
+//
+// An attribute the sharer PAID for is read from the visitor's verified
+// token, where the IdP put it after disclosing it against a verified
+// credential, and a typed-in value for it is ignored: honouring one
+// would make the sharer's payment buy nothing. Everything else stays
+// self-asserted, which is what a restricted link has always asked for.
+//
+// The returned map is the evidence that rides out to the sharer's wallet
+// in the notification (§7.6) and is never persisted here.
+func linkAttributeEvidence(p *Principal, meta *linkMeta, claimed map[string]string) (map[string]string, []string) {
+	paid := make(map[string]bool, len(meta.PaidAttrs))
+	for _, k := range meta.PaidAttrs {
+		paid[k] = true
+	}
+	evidence := make(map[string]string, len(meta.Attrs))
+	var missing []string
+	for _, k := range meta.Attrs {
+		var v string
+		if paid[k] {
+			v = attributeClaim(p.ID, k)
+		} else {
+			v = strings.TrimSpace(claimed[k])
+		}
+		if v == "" {
+			missing = append(missing, k)
+			continue
+		}
+		evidence[k] = v
+	}
+	return evidence, missing
+}
 
 // mintSubjectGrant creates a per-recipient read/write grant on a node,
 // noting the originating link in Meta for audit.
