@@ -490,3 +490,32 @@ func TestUnconfiguredInstanceKeepsAttributesSelfAsserted(t *testing.T) {
 		t.Fatalf("self-asserted redeem: %d %s", code, b)
 	}
 }
+
+// A paid attribute is read from the government-backed claim, never its
+// self-asserted twin.
+//
+// Assurance is a property of the key: the registry row `privasys:birthdate`
+// names the field the enclave meters, and the IdP mints that disclosure as
+// `birthdate_id` because a bare `birthdate` is now whatever the holder typed.
+// A link whose sharer paid for a passport-certified date must not be opened by
+// a visitor who typed one, and a link stored before the split names the same
+// row, so this is the read path for old and new links alike.
+func TestPaidAttributeClaimPrefersTheGovernmentSpelling(t *testing.T) {
+	id := &oidc.Identity{Claims: map[string]any{
+		"birthdate":    "1990-01-01", // self-asserted, from the visitor's profile
+		"birthdate_id": "1980-02-03", // the enclave-signed disclosure
+		// A metered field with no self-asserted reading is minted bare.
+		"document_valid": true,
+	}}
+	if got := attributeClaim(id, "privasys:birthdate"); got != "1980-02-03" {
+		t.Errorf("privasys:birthdate read %q, want the certified value", got)
+	}
+	if got := attributeClaim(id, "privasys:document_valid"); got != "true" {
+		t.Errorf("privasys:document_valid read %q, want true", got)
+	}
+	// A bare requirement is a self-asserted one and stays exactly that: it is
+	// what a restricted link asked for before billing existed.
+	if got := attributeClaim(id, "birthdate"); got != "1990-01-01" {
+		t.Errorf("bare birthdate read %q, want the self-asserted value", got)
+	}
+}

@@ -173,6 +173,15 @@ func canonicaliseAttributes(catalogue []attrbilling.Attribute, chosen []string) 
 // ("privasys:nationality") while the IdP mints the bare canonical claim,
 // so the namespace is dropped for the lookup. A false boolean returns
 // empty on purpose: "age_over_18: false" is an answer, not evidence.
+//
+// The "_id" spelling is tried first, because assurance is a property of
+// the key: a registry row names the field the enclave meters, and where
+// that field also has a self-asserted reading the IdP mints the
+// government-backed one under "<field>_id". Reading the bare claim first
+// would let a birth date the visitor typed satisfy a link the sharer
+// paid a passport ceremony for. Fields with no such reading
+// (document_valid, age_over_18) are minted bare and found by the
+// fallback.
 func attributeClaim(id *oidc.Identity, key string) string {
 	if id == nil || len(id.Claims) == 0 {
 		return ""
@@ -180,6 +189,9 @@ func attributeClaim(id *oidc.Identity, key string) string {
 	name := key
 	if _, after, found := strings.Cut(key, ":"); found {
 		name = after
+		if _, ok := id.Claims[name+"_id"]; ok {
+			name += "_id"
+		}
 	}
 	switch v := id.Claims[name].(type) {
 	case string:
