@@ -111,8 +111,13 @@ func (s *Server) handleListAIScope(w http.ResponseWriter, r *http.Request, p *Pr
 			defaults = append(defaults, n.ID)
 		}
 	}
+	memOn, merr := s.Store.AssistantMemoryOn(r.Context(), tenantID)
+	if merr != nil {
+		memOn = true // fail open, matching aiScopeNodeSet
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"scoped": out, "always_scoped": defaults, "all_scoped": allScoped,
+		"memory_on": memOn,
 	})
 }
 
@@ -193,9 +198,15 @@ func (s *Server) aiScopeNodeSet(ctx context.Context, tenantID string) ([]string,
 			roots[n.ID] = true
 		}
 	}
-	for _, name := range alwaysScoped {
-		if n, gerr := s.Store.ChildByName(ctx, tenantID, "", name); gerr == nil {
-			roots[n.ID] = true
+	// Memory/ is scoped by default, but the user can switch it off
+	// (assistant_settings.memory_on — the settings surface's `memory`
+	// field). Fail OPEN on a read error: memory silently vanishing on a
+	// transient DB error would be indistinguishable from data loss.
+	if memOn, merr := s.Store.AssistantMemoryOn(ctx, tenantID); merr != nil || memOn {
+		for _, name := range alwaysScoped {
+			if n, gerr := s.Store.ChildByName(ctx, tenantID, "", name); gerr == nil {
+				roots[n.ID] = true
+			}
 		}
 	}
 	rootIDs := make([]string, 0, len(roots))

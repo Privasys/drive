@@ -308,6 +308,8 @@ func (s *Server) Handler(manifestPath string) http.Handler {
 	// MCP shim for the confidential-AI agent (§8.7 RAG-in-enclave).
 	mux.Handle("GET /api/v1/mcp/tools", s.auth(s.handleMCPList))
 	mux.Handle("POST /api/v1/mcp/tools/{tool}", s.auth(s.handleMCPCall))
+	mux.Handle("GET /api/v1/mcp/settings", s.auth(s.handleMCPSettingsGet))
+	mux.Handle("PUT /api/v1/mcp/settings", s.auth(s.handleMCPSettingsPut))
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /readiness", s.handleReadiness)
 	mux.HandleFunc("GET /status", s.handleStatus)
@@ -558,10 +560,22 @@ func (s *Server) verifyAttestedAssistant(r *http.Request) (*Principal, error) {
 		return nil, errors.New("attested caller is not the configured assistant enclave")
 	}
 	sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader))
-	if sub == "" {
+	if sub == "" && !isAssistantCatalogueRequest(r) {
 		return nil, errors.New("missing on-behalf-of subject")
 	}
 	return &Principal{Sub: sub, Via: viaAssistant}, nil
+}
+
+// isAssistantCatalogueRequest reports whether r is the static MCP tool
+// catalogue fetch (GET /api/v1/mcp/tools). The assistant enclave pulls the
+// catalogue on a cache-refresh timer, OUTSIDE any user request, so there is
+// no acting user to name — and the catalogue is a fixed list that reveals
+// nothing per-user. It is the only assistant request served without an
+// on-behalf-of subject; every tool call and the settings surface still
+// require one (the empty-sub principal fails canRead/PersonalTenantOf and
+// the explicit guards on those handlers).
+func isAssistantCatalogueRequest(r *http.Request) bool {
+	return r.Method == http.MethodGet && r.URL.Path == "/api/v1/mcp/tools"
 }
 
 func (s *Server) verifyAssistantEnclave(r *http.Request, tok string) (*Principal, error) {
@@ -573,7 +587,7 @@ func (s *Server) verifyAssistantEnclave(r *http.Request, tok string) (*Principal
 		return nil, errors.New("credential mismatch")
 	}
 	sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader))
-	if sub == "" {
+	if sub == "" && !isAssistantCatalogueRequest(r) {
 		return nil, errors.New("missing on-behalf-of subject")
 	}
 	return &Principal{Sub: sub, Via: viaAssistant}, nil

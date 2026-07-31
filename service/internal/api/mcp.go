@@ -59,9 +59,16 @@ var assistantMCPTools = []mcpTool{
 }
 
 // handleMCPList serves the assistant RAG catalogue in the privasys_http MCP
-// shape (GET /api/v1/mcp/tools).
+// shape (GET /api/v1/mcp/tools). The `settings` descriptor advertises the
+// per-user settings surface (mcpsettings.go) so chat clients render this
+// server's rich integration generically. Static by design: this route is
+// the one assistant request served WITHOUT an acting user (the enclave's
+// cache-refresh pull), so nothing per-user may appear here.
 func (s *Server) handleMCPList(w http.ResponseWriter, _ *http.Request, _ *Principal) {
-	writeJSON(w, http.StatusOK, map[string]any{"tools": assistantMCPTools})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tools":    assistantMCPTools,
+		"settings": assistantSettingsDescriptor,
+	})
 }
 
 // assistantToolHandler maps an MCP tool name to the underlying /tools/*
@@ -91,6 +98,12 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request, p *Princi
 	h := s.assistantToolHandler(tool)
 	if h == nil {
 		httpError(w, http.StatusNotFound, errors.New("unknown tool"))
+		return
+	}
+	// A subject-less assistant principal exists only for the catalogue
+	// route (isAssistantCatalogueRequest); a call always acts for a user.
+	if p.Sub == "" {
+		httpError(w, http.StatusUnauthorized, errors.New("missing on-behalf-of subject"))
 		return
 	}
 	t, err := s.Store.PersonalTenantOf(r.Context(), p.Sub)

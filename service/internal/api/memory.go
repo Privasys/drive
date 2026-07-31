@@ -57,6 +57,19 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request, p *Prin
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
+	// The user can switch memory off (settings surface). The assistant then
+	// gets an explicit "disabled" — not an error, not an empty folder — so
+	// the model knows the state rather than inferring an empty memory. The
+	// user's own reads (Drive UI) are unaffected.
+	if p.IsAssistant() {
+		if on, merr := s.Store.AssistantMemoryOn(r.Context(), tenantID); merr == nil && !on {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"mode": "disabled", "memories": []memoryFile{},
+				"note": "The user has switched memory off; do not cite remembered facts.",
+			})
+			return
+		}
+	}
 	root, err := s.Store.ChildByName(r.Context(), tenantID, "", memoryRoot)
 	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusOK, map[string]any{"mode": "full", "memories": []memoryFile{}})
