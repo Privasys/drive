@@ -39,11 +39,12 @@ type mintCall struct {
 
 // marketCatalogue is the fixture catalogue: two priced gov attributes, a
 // free one, and no entry at all for the self-asserted "name" a sharer
-// has always been able to require.
+// has always been able to require. The assurance strings are the registry's
+// own vocabulary, not the IdP's none/provider/gov ladder.
 const marketCatalogue = `{"attributes":[
-	{"key":"privasys:document_valid","namespace":"privasys","name":"document_valid","assurance":"gov","price_credits":30},
-	{"key":"privasys:family_name","namespace":"privasys","name":"family_name","assurance":"gov","price_credits":10},
-	{"key":"privasys:nickname","namespace":"privasys","name":"nickname","assurance":"self","price_credits":0}
+	{"key":"privasys:document_valid","namespace":"privasys","name":"document_valid","assurance":"gov_verified","price_credits":30},
+	{"key":"privasys:family_name","namespace":"privasys","name":"family_name","assurance":"gov_verified","price_credits":10},
+	{"key":"privasys:nickname","namespace":"privasys","name":"nickname","assurance":"self_asserted","price_credits":0}
 ]}`
 
 func newFakeMarket(t *testing.T) *fakeMarket {
@@ -437,6 +438,31 @@ func TestCanonicaliseAttributesLeavesAmbiguousNamesAlone(t *testing.T) {
 		t.Fatalf("attrs = %s", got)
 	}
 	if got := fmt.Sprint(paid); got != "[privasys:family_name]" {
+		t.Fatalf("paid = %s", got)
+	}
+}
+
+// Namespacing comes from the catalogue and nowhere else.
+//
+// The canonical referential (auth/shared/canonical-attributes.json) names the
+// `privasys:` spelling for the attributes Privasys issues, but Drive must not
+// derive from it: it covers one namespace, and a share may require an attribute
+// from any approved provider. Reconstructing the key as "privasys:"+name would
+// misprice a third-party attribute and invent keys for identity fields the
+// registry does not sell. This pins that: the same bare name resolves to
+// whatever namespace the catalogue puts it in, and an attribute absent from the
+// catalogue gains no namespace at all.
+func TestCanonicaliseAttributesTakesNamespacingFromTheCatalogue(t *testing.T) {
+	catalogue := []attrbilling.Attribute{
+		{Key: "acme:birthdate", Namespace: "acme", Name: "birthdate", PriceCredits: 5},
+	}
+	attrs, paid := canonicaliseAttributes(catalogue, []string{"birthdate", "document_number"})
+	// birthdate is privasys: in the canonical referential; here only acme
+	// sells it, and acme is what the sharer is charged for.
+	if got := fmt.Sprint(attrs); got != "[acme:birthdate document_number]" {
+		t.Fatalf("attrs = %s", got)
+	}
+	if got := fmt.Sprint(paid); got != "[acme:birthdate]" {
 		t.Fatalf("paid = %s", got)
 	}
 }

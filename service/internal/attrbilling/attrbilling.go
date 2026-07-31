@@ -25,10 +25,15 @@ import (
 // ("privasys:document_valid"): the reservation resolves attributes by
 // namespace, so a bare name is refused there and must never be sent.
 type Attribute struct {
-	Key          string `json:"key"`
-	Namespace    string `json:"namespace"`
-	Name         string `json:"name"`
-	Assurance    string `json:"assurance"` // gov | self
+	Key       string `json:"key"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	// Assurance is the provider's own declaration, passed through from the
+	// registry verbatim: "gov_verified" for a disclosure the identity-verifier
+	// certifies against a government document, "self_asserted" by default. It
+	// is not the none/provider/gov ladder the IdP uses on a token, and nothing
+	// here branches on it — Paid is what decides whether funding is needed.
+	Assurance    string `json:"assurance"`
 	PriceCredits int64  `json:"price_credits"`
 	Description  string `json:"description,omitempty"`
 }
