@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/Privasys/drive/service/internal/attrbilling"
+	"github.com/Privasys/drive/service/internal/attrref"
 	"github.com/Privasys/drive/service/internal/oidc"
 )
 
@@ -100,6 +102,17 @@ func (s *Server) marketFor(p *Principal) (*attrbilling.Client, error) {
 	return m, nil
 }
 
+// choiceError is a refusal aimed at the person choosing the attributes
+// rather than at the platform, so it answers 400: the share they asked
+// for cannot exist, and the fix is to choose differently.
+type choiceError struct{ msg string }
+
+func (e *choiceError) Error() string { return e.msg }
+
+func badChoice(format string, a ...any) error {
+	return &choiceError{msg: fmt.Sprintf(format, a...)}
+}
+
 // writeMarketError passes a control-plane refusal through with its own
 // status and message. Its refusals are addressed to the person choosing
 // the attributes ("unknown or unavailable attribute: x"), so flattening
@@ -110,7 +123,12 @@ func writeMarketError(w http.ResponseWriter, err error) {
 		http.Error(w, se.Body, se.Status)
 		return
 	}
-	if errors.Is(err, errNoMarket) || errors.Is(err, errNoPayer) {
+	var ce *choiceError
+	if errors.As(err, &ce) {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if errors.Is(err, errNoMarket) || errors.Is(err, errNoPayer) || errors.Is(err, errNoReferential) {
 		httpError(w, http.StatusPreconditionFailed, err)
 		return
 	}
@@ -118,7 +136,8 @@ func writeMarketError(w http.ResponseWriter, err error) {
 }
 
 // canonicaliseAttributes rewrites the sharer's chosen attributes into
-// the catalogue's own spelling and picks out the billable ones.
+// the catalogue's own spelling, picks out the billable ones, and records
+// which claim proves each requirement.
 //
 // The marketplace addresses an attribute by namespace and refuses a bare
 // name at reservation time, so a share must store the namespaced key
@@ -129,7 +148,21 @@ func writeMarketError(w http.ResponseWriter, err error) {
 // A bare name is only resolved when it is unambiguous across the
 // catalogue. Two providers may publish the same name, and guessing which
 // one the sharer meant would charge them for the wrong attribute.
-func canonicaliseAttributes(catalogue []attrbilling.Attribute, chosen []string) (attrs, paid []string) {
+//
+// Namespacing and price come from the CATALOGUE, which is the authority
+// and covers third-party providers. The referential is consulted for one
+// thing only: the assurance the sharer picked. A registry row is named
+// for the field the enclave meters, so "privasys:given_name" is the row
+// behind the passport key "given_name_id" and carries the same name as
+// the self-asserted "given_name" the holder types. Resolving by name
+// alone therefore sells the passport row to a sharer who asked for the
+// free one, and leaves the sharer who asked for the passport one with a
+// requirement any typed value satisfies. The referential is what tells
+// the two apart.
+//
+// proven maps a stored key to the claim that proves it, and is empty for
+// requirements a visitor may simply assert.
+func canonicaliseAttributes(ref *attrref.Referential, catalogue []attrbilling.Attribute, chosen []string) (attrs, paid []string, proven map[string]string, err error) {
 	byKey := make(map[string]attrbilling.Attribute, len(catalogue))
 	byName := make(map[string]attrbilling.Attribute, len(catalogue))
 	ambiguous := map[string]bool{}
@@ -141,59 +174,138 @@ func canonicaliseAttributes(catalogue []attrbilling.Attribute, chosen []string) 
 		}
 		byName[a.Name] = a
 	}
+	row := func(c string) (attrbilling.Attribute, bool) {
+		if a, ok := byKey[c]; ok {
+			return a, true
+		}
+		if ambiguous[c] {
+			return attrbilling.Attribute{}, false
+		}
+		a, ok := byName[c]
+		return a, ok
+	}
+	proven = map[string]string{}
 	seen := map[string]bool{}
 	for _, c := range chosen {
 		c = strings.TrimSpace(c)
 		if c == "" {
 			continue
 		}
-		a, known := byKey[c]
-		if !known && !ambiguous[c] {
-			a, known = byName[c]
-		}
-		key := c
-		if known {
-			key = a.Key
+		key, claim, price, err := resolveAttribute(ref, row, c)
+		if err != nil {
+			return nil, nil, nil, err
 		}
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
 		attrs = append(attrs, key)
-		if known && a.Paid() {
+		if price {
 			paid = append(paid, key)
 		}
-	}
-	return attrs, paid
-}
-
-// attributeClaim reads a disclosed attribute off a verified token.
-//
-// The marketplace addresses attributes by namespace
-// ("privasys:nationality") while the IdP mints the bare canonical claim,
-// so the namespace is dropped for the lookup. A false boolean returns
-// empty on purpose: "age_over_18: false" is an answer, not evidence.
-//
-// The "_id" spelling is tried first, because assurance is a property of
-// the key: a registry row names the field the enclave meters, and where
-// that field also has a self-asserted reading the IdP mints the
-// government-backed one under "<field>_id". Reading the bare claim first
-// would let a birth date the visitor typed satisfy a link the sharer
-// paid a passport ceremony for. Fields with no such reading
-// (document_valid, age_over_18) are minted bare and found by the
-// fallback.
-func attributeClaim(id *oidc.Identity, key string) string {
-	if id == nil || len(id.Claims) == 0 {
-		return ""
-	}
-	name := key
-	if _, after, found := strings.Cut(key, ":"); found {
-		name = after
-		if _, ok := id.Claims[name+"_id"]; ok {
-			name += "_id"
+		if claim != "" {
+			proven[key] = claim
 		}
 	}
-	switch v := id.Claims[name].(type) {
+	if len(proven) == 0 {
+		proven = nil
+	}
+	return attrs, paid, proven, nil
+}
+
+// resolveAttribute settles one chosen attribute: the key to store, the
+// claim that proves it ("" when a typed value is what was asked for), and
+// whether the marketplace charges for it.
+func resolveAttribute(ref *attrref.Referential, row func(string) (attrbilling.Attribute, bool), chosen string) (key, claim string, paid bool, err error) {
+	ca, canonical := ref.Lookup(chosen)
+	switch {
+	case canonical && ca.GovBacked():
+		// A government-backed key names its own registry row and is never
+		// resolved by name: the row is named for the metered field, which
+		// is also the self-asserted twin's name.
+		mk := ca.MarketplaceKey()
+		if mk == "" {
+			// A passport field the registry sells no disclosure for
+			// (document_number, sex). Free, but still proven: it comes off
+			// the token or it does not arrive.
+			return ca.Key, ca.Key, false, nil
+		}
+		a, ok := row(mk)
+		if !ok || a.Key != mk {
+			return "", "", false, badChoice("cannot require %q: the attribute marketplace does not offer %q", chosen, mk)
+		}
+		return a.Key, ca.Key, a.Paid(), nil
+	case canonical:
+		// A self-asserted key. It may still be namespaced, because a
+		// provider can sell the cheap reading, but never onto a
+		// government-backed row: that row belongs to this key's twin, and
+		// landing there bills the sharer for a ceremony they did not ask
+		// for and did not need.
+		a, ok := row(chosen)
+		if !ok || govRow(ref, a) {
+			return chosen, "", false, nil
+		}
+		if a.Paid() {
+			return a.Key, ca.Key, true, nil
+		}
+		return a.Key, "", false, nil
+	default:
+		// Unknown to the referential: a third-party namespace, or a
+		// spelling stored before this build. Namespacing still comes from
+		// the catalogue, and a priced disclosure is still proven.
+		a, ok := row(chosen)
+		if !ok {
+			return chosen, "", false, nil
+		}
+		if !a.Paid() {
+			return a.Key, "", false, nil
+		}
+		return a.Key, claimForRow(ref, a), true, nil
+	}
+}
+
+// govRow reports whether a catalogue row sells a government-backed
+// disclosure. The referential is asked first and is exact; a row it does
+// not cover (a third-party provider) is taken at the registry's own
+// declaration.
+func govRow(ref *attrref.Referential, a attrbilling.Attribute) bool {
+	if ca, ok := ref.ForMarketplaceKey(a.Key); ok {
+		return ca.GovBacked()
+	}
+	return a.Assurance == attrref.GovVerified
+}
+
+// claimForRow is the claim the IdP mints a paid disclosure under. The IdP
+// mints under the canonical key it was asked for, which for a registry row
+// is the key the referential maps back to ("privasys:birthdate" is
+// disclosed as "birthdate_id"). A row outside the referential has only its
+// own name to go on.
+func claimForRow(ref *attrref.Referential, a attrbilling.Attribute) string {
+	if ca, ok := ref.ForMarketplaceKey(a.Key); ok {
+		return ca.Key
+	}
+	if a.Name != "" {
+		return a.Name
+	}
+	if _, after, found := strings.Cut(a.Key, ":"); found {
+		return after
+	}
+	return a.Key
+}
+
+// attributeClaim reads one named claim off a verified token.
+//
+// The claim is the one the link recorded when it was created, so there is
+// no guessing here and deliberately no fallback: a link that requires the
+// passport reading of a birth date names "birthdate_id", and a visitor who
+// asked their own wallet for the bare "birthdate" instead has proven
+// nothing. A false boolean returns empty on purpose: "age_over_18: false"
+// is an answer, not evidence.
+func attributeClaim(id *oidc.Identity, claim string) string {
+	if id == nil || claim == "" || len(id.Claims) == 0 {
+		return ""
+	}
+	switch v := id.Claims[claim].(type) {
 	case string:
 		return strings.TrimSpace(v)
 	case bool:

@@ -92,6 +92,13 @@ Drive itself never calls a model.
     `POST /v1/tenants/{t}/links/{id}/billing-grant`. Attributes the
     catalogue does not price stay self-asserted, as does everything when
     no marketplace is configured (`oidc_client_id` + `mgmt_base_url`).
+    Assurance is a property of the attribute KEY, so `given_name` and
+    `given_name_id` are two requirements at two prices: the link records
+    which claim proves each one when it is created (`attribute_claims` on
+    preview and resolve), read once from the issuer's canonical
+    referential and frozen there, and the redeem path reads that claim and
+    no other. Requiring a government-backed attribute where none can be
+    bought is refused rather than downgraded.
   - `app:<mrtd>` third-party platform app authenticated by an
     Ed25519-signed AppGrant token bound to the wallet pubkey
 

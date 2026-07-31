@@ -35,6 +35,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/Privasys/drive/service/internal/api"
+	"github.com/Privasys/drive/service/internal/attrref"
 	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/objectstore"
@@ -153,15 +154,19 @@ func serve(args []string) error {
 
 	var verifier oidc.Verifier
 	var revoked *oidc.RevokedSet
+	issuer := env("OIDC_ISSUER", "https://privasys.id")
 	if *dev {
 		verifier = oidc.DevVerifier{}
 	} else {
-		issuer := env("OIDC_ISSUER", "https://privasys.id")
 		verifier = oidc.NewJWKSVerifier(issuer, os.Getenv("OIDC_AUDIENCE"))
 		if feed := env("OIDC_REVOKED_URL", issuer+"/sessions/revoked"); feed != "off" {
 			revoked = oidc.NewRevokedSet(feed, 0)
 		}
 	}
+	// The canonical attribute referential comes from the same issuer that
+	// mints the claims, which is the only place that agrees with itself on
+	// which key carries which assurance.
+	attrRef := attrref.New(env("ATTRIBUTE_REFERENTIAL_URL", issuer))
 
 	// Per-tenant vault MEKs need the manager-minted app identity, so the
 	// client only exists on the platform; off-platform tenants stay on
@@ -179,6 +184,7 @@ func serve(args []string) error {
 		MEK:      mek,
 		MEKs:     meks,
 		Revoked:  revoked,
+		AttrRef:  attrRef,
 		Platform: pf,
 		StateDir: *state,
 		DevMode:  *dev,

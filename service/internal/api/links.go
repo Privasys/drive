@@ -71,6 +71,22 @@ type linkMeta struct {
 	BillingGrant   string   `json:"billing_grant,omitempty"`
 	BillingExpires string   `json:"billing_expires,omitempty"` // RFC3339
 	BillingCredits int64    `json:"billing_credits,omitempty"`
+
+	// ProvenAttrs maps a required attribute, in the Attrs spelling, to the
+	// claim that proves it. Its presence is what makes a requirement
+	// PROVEN: everything else is a value the visitor may simply assert.
+	//
+	// It is resolved once, when the link is created, and never re-derived.
+	// A link outlives a deploy and outlives the catalogue it was priced
+	// against, so a link that meant "a birth date certified against a
+	// passport" must go on meaning that after the registry reprices, adds
+	// a self-asserted twin or renames a row. Recording it also means the
+	// redeem path reads one exact claim rather than guessing a spelling.
+	//
+	// Absent on links created before it existed; see provenClaims, which
+	// reads their meaning back off the referential rather than assuming
+	// the cheaper one.
+	ProvenAttrs map[string]string `json:"proven_attrs,omitempty"`
 }
 
 const (
@@ -226,15 +242,26 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Pri
 //     and is left self-asserted rather than failing the share.
 //
 // A marketplace that refuses to mint is different: that is a share the
-// sharer asked to pay for and could not, so it fails.
+// sharer asked to pay for and could not, so it fails. So is a sharer who
+// asked for a government-backed attribute on an instance that cannot buy
+// one: storing it would leave a requirement any typed value satisfies,
+// which is the opposite of what they asked for.
 func (s *Server) armLinkBilling(ctx context.Context, p *Principal, meta *linkMeta) (string, error) {
-	meta.PaidAttrs, meta.BillingGrant, meta.BillingExpires, meta.BillingCredits = nil, "", "", 0
+	meta.PaidAttrs, meta.ProvenAttrs = nil, nil
+	meta.BillingGrant, meta.BillingExpires, meta.BillingCredits = "", "", 0
 	if len(meta.Attrs) == 0 {
 		return "", nil
 	}
 	m := s.marketClient()
 	if m == nil || p.Bearer == "" {
+		if err := s.refuseUnbuyableAssurance(ctx, meta.Attrs, m != nil); err != nil {
+			return "", err
+		}
 		return billingUnavailable, nil
+	}
+	ref, err := s.AttrRef.Load(ctx)
+	if err != nil {
+		return "", err
 	}
 	catalogue, err := m.Catalogue(ctx, p.Bearer)
 	if err != nil {
@@ -243,8 +270,11 @@ func (s *Server) armLinkBilling(ctx context.Context, p *Principal, meta *linkMet
 	// Store the catalogue's spelling from here on: the reservation the
 	// recipient's sign-in triggers resolves attributes by namespace, so a
 	// share funded under a bare name would be refused at the till.
-	attrs, paid := canonicaliseAttributes(catalogue, meta.Attrs)
-	meta.Attrs = attrs
+	attrs, paid, proven, err := canonicaliseAttributes(ref, catalogue, meta.Attrs)
+	if err != nil {
+		return "", err
+	}
+	meta.Attrs, meta.ProvenAttrs = attrs, proven
 	if len(paid) == 0 {
 		return billingFree, nil
 	}
@@ -257,6 +287,94 @@ func (s *Server) armLinkBilling(ctx context.Context, p *Principal, meta *linkMet
 	meta.BillingExpires = g.ExpiresAt.UTC().Format(time.RFC3339)
 	meta.BillingCredits = g.QuotedCredits
 	return billingFunded, nil
+}
+
+// errNoReferential is the fail-closed answer to an instance that can bill
+// for attributes but cannot read what assurance each key carries.
+var errNoReferential = errors.New("the attribute referential is unreachable, so the assurance of the required attributes cannot be established")
+
+// refuseUnbuyableAssurance rejects a share whose sharer asked for a
+// government-backed attribute that this instance cannot buy: a
+// marketplace is configured but the caller holds no platform token to be
+// charged (a sealed-session sharer), or there is no marketplace at all.
+//
+// The attribute would otherwise be stored bare and unpaid, and a bare
+// requirement is one the visitor types in, so the sharer would get the
+// self-asserted answer they explicitly declined. Refusing names the
+// problem while they can still pick the free key instead.
+//
+// Where neither a marketplace nor an issuer is reachable, an off-platform
+// instance keeps what restricted links did before billing existed: a
+// self-asserted form, with nobody billed and nothing claimed to be proven.
+func (s *Server) refuseUnbuyableAssurance(ctx context.Context, chosen []string, haveMarket bool) error {
+	if s.AttrRef == nil {
+		if haveMarket {
+			return errNoReferential
+		}
+		return nil
+	}
+	ref, err := s.AttrRef.Load(ctx)
+	if err != nil {
+		if haveMarket {
+			return err
+		}
+		return nil
+	}
+	for _, c := range chosen {
+		if a, ok := ref.Lookup(strings.TrimSpace(c)); ok && a.GovBacked() {
+			return badChoice("cannot require %q here: a government-backed attribute is a paid disclosure, and %s", a.Key, whyNoPayer(haveMarket))
+		}
+	}
+	return nil
+}
+
+func whyNoPayer(haveMarket bool) string {
+	if haveMarket {
+		return "this share carries no platform token to charge"
+	}
+	return "this instance has no attribute marketplace"
+}
+
+// provenClaims is what each required attribute must be proven by, keyed
+// by the spelling the link stores.
+//
+// New links carry the answer (linkMeta.ProvenAttrs), frozen at creation.
+// A link created before that field existed carries only its paid set, and
+// a paid attribute is always proven, so the claim is read back off the
+// referential: "privasys:birthdate" is disclosed as "birthdate_id", while
+// "privasys:document_valid" has no self-asserted reading and stays bare.
+// That is a lookup, not a guess, and it preserves what those links have
+// always meant.
+//
+// A referential Drive cannot reach leaves a stored link's meaning
+// undecidable, so the redeem fails rather than falling back on the
+// cheaper reading.
+func (s *Server) provenClaims(ctx context.Context, meta *linkMeta) (map[string]string, error) {
+	if meta.ProvenAttrs != nil {
+		return meta.ProvenAttrs, nil
+	}
+	if len(meta.PaidAttrs) == 0 {
+		return nil, nil
+	}
+	ref, err := s.AttrRef.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(meta.PaidAttrs))
+	for _, k := range meta.PaidAttrs {
+		if ca, ok := ref.ForMarketplaceKey(k); ok {
+			out[k] = ca.Key
+			continue
+		}
+		// Outside the referential's namespace there is no twin to be told
+		// apart from, so the row's own name is the claim.
+		if _, after, found := strings.Cut(k, ":"); found {
+			out[k] = after
+			continue
+		}
+		out[k] = k
+	}
+	return out, nil
 }
 
 // billingStateOf reports where a stored link's funding stands now. A
@@ -378,9 +496,17 @@ type previewLinkResponse struct {
 	Mode               string   `json:"mode"`
 	RequiredAttributes []string `json:"required_attributes,omitempty"`
 	PaidAttributes     []string `json:"paid_attributes,omitempty"`
-	BillingGrant       string   `json:"billing_grant,omitempty"`
-	BillingState       string   `json:"billing_state,omitempty"`
-	BillingExpires     string   `json:"billing_grant_expires_at,omitempty"`
+	// AttributeClaims names, per required attribute, the canonical claim
+	// the visitor's sign-in has to disclose. The link stores the registry
+	// spelling ("privasys:birthdate"), which the IdP does not accept and
+	// which is not the key it mints the disclosure under ("birthdate_id"),
+	// so a client that asked with the stored spelling would request
+	// nothing and one that stripped the namespace would request the
+	// self-asserted twin. Absent on links created before it was recorded.
+	AttributeClaims map[string]string `json:"attribute_claims,omitempty"`
+	BillingGrant    string            `json:"billing_grant,omitempty"`
+	BillingState    string            `json:"billing_state,omitempty"`
+	BillingExpires  string            `json:"billing_grant_expires_at,omitempty"`
 }
 
 // handlePreviewLink serves the one thing a visitor needs BEFORE they
@@ -418,6 +544,7 @@ func (s *Server) handlePreviewLink(w http.ResponseWriter, r *http.Request) {
 		Mode:               meta.Mode,
 		RequiredAttributes: meta.Attrs,
 		PaidAttributes:     meta.PaidAttrs,
+		AttributeClaims:    meta.ProvenAttrs,
 		BillingState:       meta.billingStateOf(time.Now().UTC()),
 		BillingExpires:     meta.BillingExpires,
 	}
@@ -538,13 +665,15 @@ func (s *Server) handleResolveLink(w http.ResponseWriter, r *http.Request, p *Pr
 		"required_attributes": meta.Attrs,
 		// Which of them the visitor must have PROVEN (they come off the
 		// token, so a visitor who signed in without them has to sign in
-		// again rather than fill a form in).
-		"paid_attributes": meta.PaidAttrs,
-		"billing_state":   meta.billingStateOf(time.Now().UTC()),
-		"tenant_id":       g.TenantID,
-		"owner_name":      ownerName,
-		"already_granted": granted,
-		"request_status":  requestStatus,
+		// again rather than fill a form in), and the claim each one is
+		// proven by, which is what a step-up asks the wallet for.
+		"paid_attributes":  meta.PaidAttrs,
+		"attribute_claims": meta.ProvenAttrs,
+		"billing_state":    meta.billingStateOf(time.Now().UTC()),
+		"tenant_id":        g.TenantID,
+		"owner_name":       ownerName,
+		"already_granted":  granted,
+		"request_status":   requestStatus,
 		"node": map[string]any{
 			"id": n.ID, "name": n.Name, "kind": string(n.Kind), "size_bytes": n.PlainSize,
 		},
@@ -590,7 +719,12 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 		// Every required attribute must be presented, else no request is
 		// filed: a half-empty request would push an undecidable card at
 		// the owner. The front tells the visitor what is missing.
-		presented, missing := linkAttributeEvidence(p, meta, req.Attributes)
+		proven, err := s.provenClaims(r.Context(), meta)
+		if err != nil {
+			writeMarketError(w, err)
+			return
+		}
+		presented, missing := linkAttributeEvidence(p, meta, proven, req.Attributes)
 		if len(missing) > 0 {
 			writeJSON(w, http.StatusForbidden, map[string]any{
 				"error":              "missing required attributes: " + strings.Join(missing, ", "),
@@ -606,7 +740,7 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 			RequesterSub: p.Sub,
 			Scope:        joinScopeStrings(g.Scope),
 		}
-		err := s.Store.CreateLinkRequest(r.Context(), lr)
+		err = s.Store.CreateLinkRequest(r.Context(), lr)
 		if errors.Is(err, store.ErrDuplicateApproval) {
 			// Already requested; report the current pending state.
 			writeJSON(w, http.StatusOK, redeemResult("pending", g, n, ""))
@@ -746,25 +880,23 @@ func (s *Server) handleDecideLinkRequest(w http.ResponseWriter, r *http.Request,
 // linkAttributeEvidence collects what the visitor actually has for each
 // required attribute, and names the ones they do not.
 //
-// An attribute the sharer PAID for is read from the visitor's verified
-// token, where the IdP put it after disclosing it against a verified
-// credential, and a typed-in value for it is ignored: honouring one
-// would make the sharer's payment buy nothing. Everything else stays
-// self-asserted, which is what a restricted link has always asked for.
+// A PROVEN attribute is read from the visitor's verified token, from the
+// exact claim the link recorded when it was created, and a typed-in value
+// for it is ignored: honouring one would make the sharer's payment buy
+// nothing, and would let a visitor who asked their own wallet for the
+// self-asserted twin open a link that requires the passport reading.
+// Everything else stays self-asserted, which is what a restricted link
+// has always asked for.
 //
 // The returned map is the evidence that rides out to the sharer's wallet
 // in the notification (§7.6) and is never persisted here.
-func linkAttributeEvidence(p *Principal, meta *linkMeta, claimed map[string]string) (map[string]string, []string) {
-	paid := make(map[string]bool, len(meta.PaidAttrs))
-	for _, k := range meta.PaidAttrs {
-		paid[k] = true
-	}
+func linkAttributeEvidence(p *Principal, meta *linkMeta, proven map[string]string, claimed map[string]string) (map[string]string, []string) {
 	evidence := make(map[string]string, len(meta.Attrs))
 	var missing []string
 	for _, k := range meta.Attrs {
 		var v string
-		if paid[k] {
-			v = attributeClaim(p.ID, k)
+		if claim, mustProve := proven[k]; mustProve {
+			v = attributeClaim(p.ID, claim)
 		} else {
 			v = strings.TrimSpace(claimed[k])
 		}

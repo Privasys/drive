@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Privasys/drive/service/internal/attrbilling"
+	"github.com/Privasys/drive/service/internal/attrref"
 	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/oidc"
 )
@@ -37,15 +38,68 @@ type mintCall struct {
 	TTLSeconds int64    `json:"ttl_seconds"`
 }
 
-// marketCatalogue is the fixture catalogue: two priced gov attributes, a
-// free one, and no entry at all for the self-asserted "name" a sharer
-// has always been able to require. The assurance strings are the registry's
+// marketCatalogue is the fixture catalogue: priced gov attributes, a free
+// one, and no entry at all for the self-asserted "name" a sharer has
+// always been able to require. The assurance strings are the registry's
 // own vocabulary, not the IdP's none/provider/gov ladder.
+//
+// Every row is named for the field the ENCLAVE meters, which is what
+// makes this catalogue insufficient on its own: "privasys:given_name"
+// sells the passport reading, and its name is also the name of the
+// self-asserted key any holder can type.
 const marketCatalogue = `{"attributes":[
 	{"key":"privasys:document_valid","namespace":"privasys","name":"document_valid","assurance":"gov_verified","price_credits":30},
 	{"key":"privasys:family_name","namespace":"privasys","name":"family_name","assurance":"gov_verified","price_credits":10},
+	{"key":"privasys:given_name","namespace":"privasys","name":"given_name","assurance":"gov_verified","price_credits":10000},
+	{"key":"privasys:birthdate","namespace":"privasys","name":"birthdate","assurance":"gov_verified","price_credits":20},
 	{"key":"privasys:nickname","namespace":"privasys","name":"nickname","assurance":"self_asserted","price_credits":0}
 ]}`
+
+// canonicalReferential is the subset of auth/shared/canonical-attributes.json
+// the link tests exercise: three pairs, a government key with no
+// self-asserted twin, a government key the registry sells nothing for, and
+// two plain profile fields.
+const canonicalReferential = `{"attributes":[
+	{"key":"name","label":"Display Name","scope":"profile"},
+	{"key":"nickname","label":"Nickname","scope":"profile"},
+	{"key":"given_name","label":"First Name","scope":"profile","govKey":"given_name_id"},
+	{"key":"family_name","label":"Last Name","scope":"profile","govKey":"family_name_id"},
+	{"key":"birthdate","label":"Date of Birth","scope":"identity","assurance":"self_asserted","govKey":"birthdate_id"},
+	{"key":"given_name_id","label":"Given Names (ID)","scope":"identity","assurance":"gov_verified","certifiedField":"given_name","marketplace":{"key":"privasys:given_name","billable":true}},
+	{"key":"family_name_id","label":"Surname (ID)","scope":"identity","assurance":"gov_verified","certifiedField":"family_name","marketplace":{"key":"privasys:family_name","billable":true}},
+	{"key":"birthdate_id","label":"Date of Birth (ID)","scope":"identity","assurance":"gov_verified","certifiedField":"birthdate","marketplace":{"key":"privasys:birthdate","billable":true}},
+	{"key":"document_valid","label":"Valid Government ID","scope":"identity","assurance":"gov_verified","marketplace":{"key":"privasys:document_valid","billable":true}},
+	{"key":"document_number","label":"Passport Number","scope":"identity","assurance":"gov_verified"}
+]}`
+
+// newFakeReferential serves the canonical referential the way the IdP
+// does. A separate server from the marketplace on purpose: in production
+// the assurance of a key comes from the issuer that mints the claim, and
+// the price comes from the control plane, and confusing the two is how
+// the bug this fixture pins was written.
+func newFakeReferential(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/referential/canonical-attributes.json" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, canonicalReferential)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// testReferential parses the fixture for the resolution unit tests.
+func testReferential(t *testing.T) *attrref.Referential {
+	t.Helper()
+	ref, err := attrref.Parse([]byte(canonicalReferential))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ref
+}
 
 func newFakeMarket(t *testing.T) *fakeMarket {
 	t.Helper()
@@ -152,12 +206,14 @@ func (v claimsVerifier) Verify(ctx context.Context, token string) (*oidc.Identit
 	return id, nil
 }
 
-// billedServer is a Drive wired to a fake marketplace, configured with
-// the OAuth client its front end signs recipients in with.
+// billedServer is a Drive wired to a fake marketplace and the issuer's
+// referential, configured with the OAuth client its front end signs
+// recipients in with.
 func billedServer(t *testing.T) (*httptest.Server, *Server, *fakeMarket) {
 	t.Helper()
 	ts, srv := newTestServer(t)
 	market := newFakeMarket(t)
+	srv.AttrRef = attrref.New(newFakeReferential(t).URL)
 	srv.InstallConfig(&config.Config{
 		Mode:         config.ModeSovereign,
 		MgmtBaseURL:  market.URL,
@@ -432,13 +488,21 @@ func TestCanonicaliseAttributesLeavesAmbiguousNamesAlone(t *testing.T) {
 		{Key: "acme:family_name", Namespace: "acme", Name: "family_name", PriceCredits: 99},
 		{Key: "privasys:nickname", Namespace: "privasys", Name: "nickname", PriceCredits: 0},
 	}
-	attrs, paid := canonicaliseAttributes(catalogue,
+	attrs, paid, proven, err := canonicaliseAttributes(testReferential(t), catalogue,
 		[]string{"family_name", "privasys:family_name", "nickname", "name", "privasys:family_name"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := fmt.Sprint(attrs); got != "[family_name privasys:family_name privasys:nickname name]" {
 		t.Fatalf("attrs = %s", got)
 	}
 	if got := fmt.Sprint(paid); got != "[privasys:family_name]" {
 		t.Fatalf("paid = %s", got)
+	}
+	// The row the sharer named by key is the passport one, so the claim
+	// recorded for it is the certified spelling, not the row's name.
+	if proven["privasys:family_name"] != "family_name_id" {
+		t.Fatalf("proven = %v", proven)
 	}
 }
 
@@ -456,7 +520,11 @@ func TestCanonicaliseAttributesTakesNamespacingFromTheCatalogue(t *testing.T) {
 	catalogue := []attrbilling.Attribute{
 		{Key: "acme:birthdate", Namespace: "acme", Name: "birthdate", PriceCredits: 5},
 	}
-	attrs, paid := canonicaliseAttributes(catalogue, []string{"birthdate", "document_number"})
+	attrs, paid, proven, err := canonicaliseAttributes(testReferential(t), catalogue,
+		[]string{"birthdate", "document_number"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// birthdate is privasys: in the canonical referential; here only acme
 	// sells it, and acme is what the sharer is charged for.
 	if got := fmt.Sprint(attrs); got != "[acme:birthdate document_number]" {
@@ -464,6 +532,91 @@ func TestCanonicaliseAttributesTakesNamespacingFromTheCatalogue(t *testing.T) {
 	}
 	if got := fmt.Sprint(paid); got != "[acme:birthdate]" {
 		t.Fatalf("paid = %s", got)
+	}
+	// A passport field the registry sells no disclosure for is free and
+	// still proven: it comes off the token or it does not arrive.
+	if proven["document_number"] != "document_number" {
+		t.Fatalf("proven = %v", proven)
+	}
+}
+
+// The whole seam, end to end: the picker's key becomes a paid namespaced
+// requirement, and only the certified claim opens it.
+func TestGovernmentRequirementSurvivesTheVisitorsOwnSignIn(t *testing.T) {
+	ts, srv, _ := billedServer(t)
+	const owner, recipient = "user-1", "user-2"
+	tenantID, nodeID, _ := ownerTenantWithFile(t, ts.URL, owner)
+
+	link := createLink(t, ts.URL, tenantID, nodeID, owner,
+		`{"mode":"restricted","scope":["read"],"required_attributes":["birthdate_id"]}`)
+	if got := fmt.Sprint(link["required_attributes"]); got != "[privasys:birthdate]" {
+		t.Fatalf("required_attributes = %s", got)
+	}
+	if got := fmt.Sprint(link["paid_attributes"]); got != "[privasys:birthdate]" {
+		t.Fatalf("paid_attributes = %s", got)
+	}
+	redeemURL := fmt.Sprintf("%s/v1/links/%s/redeem", ts.URL, link["id"])
+
+	// The visitor asks their own wallet for the cheap reading instead.
+	srv.Verifier = claimsVerifier{bySub: map[string]map[string]any{
+		recipient: {"birthdate": "1990-01-01"},
+	}}
+	code, b := doReq(t, bearerReq(t, "POST", redeemURL, recipient,
+		`{"secret":"`+link["secret"].(string)+`"}`))
+	if code != http.StatusForbidden {
+		t.Fatalf("self-asserted twin: want 403, got %d %s", code, b)
+	}
+
+	// And again after disclosing what the link actually requires.
+	srv.Verifier = claimsVerifier{bySub: map[string]map[string]any{
+		recipient: {"birthdate": "1990-01-01", "birthdate_id": "1980-02-03"},
+	}}
+	code, b = doReq(t, bearerReq(t, "POST", redeemURL, recipient,
+		`{"secret":"`+link["secret"].(string)+`"}`))
+	if code != 200 {
+		t.Fatalf("certified redeem: %d %s", code, b)
+	}
+	// The wallet is told which claim to ask for, since neither the stored
+	// spelling nor the bare name would request it.
+	_, preview := previewLink(t, ts.URL, link["id"].(string), link["secret"].(string))
+	claims, _ := preview["attribute_claims"].(map[string]any)
+	if claims["privasys:birthdate"] != "birthdate_id" {
+		t.Fatalf("attribute_claims = %v", preview["attribute_claims"])
+	}
+}
+
+// A sharer with no account to charge cannot require a paid disclosure, and
+// must be told so rather than handed a link that asks a visitor to type
+// their date of birth into a box.
+func TestGovernmentAttributeRefusedWhenNobodyCanBeBilled(t *testing.T) {
+	ts, _, _ := billedServer(t)
+	const owner = "user-1"
+	tenantID, nodeID, _ := ownerTenantWithFile(t, ts.URL, owner)
+	// A sealed-session sharer: the relay asserts the sub and no platform
+	// token travels with it, so the marketplace has nobody to bill.
+	sealed := func(body string) (int, []byte) {
+		t.Helper()
+		req, err := http.NewRequest("POST",
+			fmt.Sprintf("%s/v1/tenants/%s/nodes/%s/links", ts.URL, tenantID, nodeID), strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Privasys-Sub", owner)
+		return doReq(t, req)
+	}
+
+	code, b := sealed(`{"mode":"restricted","scope":["read"],"required_attributes":["birthdate_id"]}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("unbuyable government requirement: want 400, got %d %s", code, b)
+	}
+	if !strings.Contains(string(b), "birthdate_id") {
+		t.Fatalf("refusal did not name the attribute: %d %s", code, b)
+	}
+	// The free reading of the same field is still offerable.
+	code, b = sealed(`{"mode":"restricted","scope":["read"],"required_attributes":["birthdate"]}`)
+	if code != 201 {
+		t.Fatalf("self-asserted share refused too: %d %s", code, b)
 	}
 }
 
@@ -491,31 +644,132 @@ func TestUnconfiguredInstanceKeepsAttributesSelfAsserted(t *testing.T) {
 	}
 }
 
-// A paid attribute is read from the government-backed claim, never its
-// self-asserted twin.
+// Picking the free reading of an attribute must not buy the passport one.
 //
-// Assurance is a property of the key: the registry row `privasys:birthdate`
-// names the field the enclave meters, and the IdP mints that disclosure as
-// `birthdate_id` because a bare `birthdate` is now whatever the holder typed.
-// A link whose sharer paid for a passport-certified date must not be opened by
-// a visitor who typed one, and a link stored before the split names the same
-// row, so this is the read path for old and new links alike.
-func TestPaidAttributeClaimPrefersTheGovernmentSpelling(t *testing.T) {
-	id := &oidc.Identity{Claims: map[string]any{
-		"birthdate":    "1990-01-01", // self-asserted, from the visitor's profile
-		"birthdate_id": "1980-02-03", // the enclave-signed disclosure
-		// A metered field with no self-asserted reading is minted bare.
-		"document_valid": true,
-	}}
-	if got := attributeClaim(id, "privasys:birthdate"); got != "1980-02-03" {
-		t.Errorf("privasys:birthdate read %q, want the certified value", got)
+// The registry row is named for the field the enclave meters, so
+// "privasys:given_name" carries the same name as the self-asserted
+// "given_name" a holder types into their own wallet. Resolving the chosen
+// key by name lands on that row and bills the sharer ten thousand credits
+// for a ceremony they neither asked for nor needed.
+func TestSelfAssertedKeyNeverResolvesOntoTheGovernmentRow(t *testing.T) {
+	catalogue := []attrbilling.Attribute{
+		{Key: "privasys:given_name", Namespace: "privasys", Name: "given_name", Assurance: "gov_verified", PriceCredits: 10000},
 	}
-	if got := attributeClaim(id, "privasys:document_valid"); got != "true" {
-		t.Errorf("privasys:document_valid read %q, want true", got)
+	attrs, paid, proven, err := canonicaliseAttributes(testReferential(t), catalogue, []string{"given_name"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A bare requirement is a self-asserted one and stays exactly that: it is
-	// what a restricted link asked for before billing existed.
-	if got := attributeClaim(id, "birthdate"); got != "1990-01-01" {
-		t.Errorf("bare birthdate read %q, want the self-asserted value", got)
+	if got := fmt.Sprint(attrs); got != "[given_name]" {
+		t.Fatalf("attrs = %s, want the self-asserted key kept bare", got)
+	}
+	if len(paid) != 0 {
+		t.Fatalf("paid = %v, want nothing: a typed-in first name costs nobody anything", paid)
+	}
+	if len(proven) != 0 {
+		t.Fatalf("proven = %v, want nothing: this is the reading the visitor asserts", proven)
+	}
+}
+
+// Picking the passport reading must buy it.
+//
+// "given_name_id" is not a catalogue key and never was: the registry sells
+// it as "privasys:given_name". Stored under its own spelling it matched no
+// row, so it was neither namespaced nor paid for, and an unpaid
+// requirement is one the visitor types in. The sharer asked for a passport
+// check and got a text box.
+func TestGovernmentKeyBecomesThePaidNamespacedRequirement(t *testing.T) {
+	catalogue := []attrbilling.Attribute{
+		{Key: "privasys:given_name", Namespace: "privasys", Name: "given_name", Assurance: "gov_verified", PriceCredits: 10000},
+	}
+	attrs, paid, proven, err := canonicaliseAttributes(testReferential(t), catalogue, []string{"given_name_id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(attrs); got != "[privasys:given_name]" {
+		t.Fatalf("attrs = %s, want the registry spelling", got)
+	}
+	if got := fmt.Sprint(paid); got != "[privasys:given_name]" {
+		t.Fatalf("paid = %s, want the sharer billed for the disclosure they chose", got)
+	}
+	if proven["privasys:given_name"] != "given_name_id" {
+		t.Fatalf("proven = %v, want the certified claim recorded", proven)
+	}
+
+	// A registry that does not offer the row is not a share to fall back
+	// from: the sharer would be left with a requirement anyone can type.
+	if _, _, _, err := canonicaliseAttributes(testReferential(t), nil, []string{"given_name_id"}); err == nil {
+		t.Fatal("an unbuyable government attribute was accepted")
+	}
+}
+
+// A link reads exactly the claim it recorded, and no other.
+//
+// The visitor drives their own sign-in, so they choose which attributes to
+// ask their wallet for. Asking for the self-asserted twin of what the link
+// requires used to work, because the claim lookup fell back to the bare
+// name when the "_id" one was absent: the visitor proved nothing, the
+// sharer paid for a ceremony that never happened, and the link opened.
+func TestRecordedClaimIsTheOnlyOneRead(t *testing.T) {
+	meta := &linkMeta{
+		Attrs:       []string{"privasys:birthdate", "name"},
+		PaidAttrs:   []string{"privasys:birthdate"},
+		ProvenAttrs: map[string]string{"privasys:birthdate": "birthdate_id"},
+	}
+	// The tamper: a token carrying only the reading the holder typed.
+	tampered := &Principal{ID: &oidc.Identity{Claims: map[string]any{"birthdate": "1990-01-01"}}}
+	_, missing := linkAttributeEvidence(tampered, meta, meta.ProvenAttrs, map[string]string{"name": "A Visitor"})
+	if got := fmt.Sprint(missing); got != "[privasys:birthdate]" {
+		t.Fatalf("missing = %s, want the certified date still outstanding", got)
+	}
+
+	// The same visitor after disclosing it properly. The self-asserted twin
+	// is still on the token and is still not what is read.
+	proper := &Principal{ID: &oidc.Identity{Claims: map[string]any{
+		"birthdate":    "1990-01-01",
+		"birthdate_id": "1980-02-03",
+	}}}
+	evidence, missing := linkAttributeEvidence(proper, meta, meta.ProvenAttrs, map[string]string{"name": "A Visitor"})
+	if len(missing) != 0 {
+		t.Fatalf("missing = %v", missing)
+	}
+	if evidence["privasys:birthdate"] != "1980-02-03" {
+		t.Fatalf("evidence = %v, want the certified value", evidence)
+	}
+	// A typed value for a proven requirement is ignored, not merged.
+	_, missing = linkAttributeEvidence(tampered, meta, meta.ProvenAttrs,
+		map[string]string{"name": "A Visitor", "privasys:birthdate": "1980-02-03"})
+	if got := fmt.Sprint(missing); got != "[privasys:birthdate]" {
+		t.Fatalf("missing = %s, want a typed value to buy nothing", got)
+	}
+}
+
+// A link stored before the claim was recorded keeps its meaning.
+//
+// Its Meta names the registry row and nothing else, which is ambiguous
+// between the two readings of the same field. It is read the safe way: the
+// referential maps the row back to the certified claim, so the passport
+// date is still what opens it, while a row with no self-asserted twin is
+// still found under its bare name.
+func TestStoredLinkWithoutRecordedClaimsKeepsTheGovernmentReading(t *testing.T) {
+	_, srv, _ := billedServer(t)
+	legacy := &linkMeta{
+		Attrs:     []string{"privasys:birthdate", "privasys:document_valid"},
+		PaidAttrs: []string{"privasys:birthdate", "privasys:document_valid"},
+	}
+	proven, err := srv.provenClaims(context.Background(), legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proven["privasys:birthdate"] != "birthdate_id" {
+		t.Fatalf("proven = %v, want the certified claim", proven)
+	}
+	if proven["privasys:document_valid"] != "document_valid" {
+		t.Fatalf("proven = %v, want document_valid found under its own name", proven)
+	}
+	typed := &Principal{ID: &oidc.Identity{Claims: map[string]any{
+		"birthdate": "1990-01-01", "document_valid": true,
+	}}}
+	if _, missing := linkAttributeEvidence(typed, legacy, proven, nil); fmt.Sprint(missing) != "[privasys:birthdate]" {
+		t.Fatalf("missing = %v, want the self-asserted date rejected", missing)
 	}
 }

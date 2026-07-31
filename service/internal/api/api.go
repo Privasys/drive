@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/Privasys/drive/service/internal/attrbilling"
+	"github.com/Privasys/drive/service/internal/attrref"
 	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/crypto"
 	"github.com/Privasys/drive/service/internal/deptls"
@@ -52,6 +53,14 @@ type Server struct {
 	// Revoked rejects tokens whose IdP session was revoked (long-lived
 	// API keys). Nil disables the check.
 	Revoked *oidc.RevokedSet
+
+	// AttrRef reads the IdP's canonical attribute referential, which is
+	// what tells a government-backed attribute key from the self-asserted
+	// twin that answers the same question for free. Nil where no issuer is
+	// configured, which is fail-closed everywhere an attribute can be
+	// billed: a share requiring one is refused rather than stored at an
+	// assurance nobody chose.
+	AttrRef *attrref.Client
 
 	// MEKs provisions and loads per-tenant vault-held MEKs. Nil
 	// disables vault-held tenant keys (tenants stay on the instance
