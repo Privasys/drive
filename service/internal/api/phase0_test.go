@@ -288,6 +288,71 @@ func TestTenantKeySwitchRewrapsContent(t *testing.T) {
 	}
 }
 
+// TestTenantKeyRevault proves the constellation-rotation recovery: the data
+// owner supplies their exported MEK, the enclave provisions a fresh key on
+// the (new) active constellation and re-wraps the content; a wrong key is
+// refused with nothing committed.
+func TestTenantKeyRevault(t *testing.T) {
+	oldMek := sha256.Sum256([]byte("old-constellation-mek"))
+	fake := &fakeMEKs{mek: oldMek[:]}
+	ts := newFullServer(t, func(s *Server) { s.MEKs = fake })
+
+	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	content := base64.StdEncoding.EncodeToString([]byte("survives the rotation"))
+	resp, body := doJSON(t, "POST", ts.URL+"/tools/write_file", devAuth,
+		fmt.Sprintf(`{"tenant_id":"%s","name":"keep.txt","content_base64":"%s"}`, tenant.ID, content))
+	if resp.StatusCode != 200 {
+		t.Fatalf("write: %d %s", resp.StatusCode, body)
+	}
+	var file struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(body, &file)
+
+	// Adopt the vault MEK (content re-wrapped under oldMek).
+	bundle := `"grant":"g","handle":"apps.privasys.org/x/data/y/mek/v1","constellation":{"endpoints":["v1:1","v2:2"],"mrenclave":"00","attestation_server":"as","threshold":2}`
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, "{"+bundle+"}")
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("switch: %d %s", resp.StatusCode, body)
+	}
+
+	// The constellation rotates: the provider now serves a DIFFERENT key
+	// (the fresh MEK on the new constellation); the old one is unreachable.
+	newMek := sha256.Sum256([]byte("new-constellation-mek"))
+	fake.mek = newMek[:]
+
+	// A wrong recovered key is refused and commits nothing.
+	wrong := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key/revault", devAuth,
+		fmt.Sprintf(`{%s,"recovered_mek_b64":"%s"}`, bundle, wrong))
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("wrong-key revault must 409: %d %s", resp.StatusCode, body)
+	}
+
+	// The right recovered key re-wraps the content onto the new MEK.
+	recovered := base64.StdEncoding.EncodeToString(oldMek[:])
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key/revault", devAuth,
+		fmt.Sprintf(`{%s,"recovered_mek_b64":"%s"}`, bundle, recovered))
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"revaulted"`) {
+		t.Fatalf("revault: %d %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, "POST", ts.URL+"/tools/read_file", devAuth,
+		fmt.Sprintf(`{"tenant_id":"%s","file_id":"%s"}`, tenant.ID, file.ID))
+	if resp.StatusCode != 200 {
+		t.Fatalf("post-revault read: %d %s", resp.StatusCode, body)
+	}
+	var out struct {
+		ContentBase64 string `json:"content_base64"`
+	}
+	_ = json.Unmarshal(body, &out)
+	if got, _ := base64.StdEncoding.DecodeString(out.ContentBase64); string(got) != "survives the rotation" {
+		t.Fatalf("post-revault content mismatch: %q", got)
+	}
+}
+
 func TestQuotaEnforcement(t *testing.T) {
 	// Configure a tiny quota, then prove writes are metered and the
 	// ceiling holds.

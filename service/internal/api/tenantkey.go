@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -211,5 +212,130 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"status": "provisioned", "handle": ref.Handle, "rewrapped_nodes": rewrapped,
+	})
+}
+
+type tenantKeyRevaultRequest struct {
+	tenantKeyRequest
+	// RecoveredMekB64 is the tenant's CURRENT MEK, exported by the data
+	// owner from the old constellation (`ExportKey` is owner-gated by an
+	// operation-bound WebAuthn step-up — the sovereign contract's
+	// walk-away right). Standard base64.
+	RecoveredMekB64 string `json:"recovered_mek_b64"`
+}
+
+// handleTenantKeyRevault moves a tenant's MEK to a NEW vault constellation
+// when the old one can no longer serve it (a constellation rotation the
+// per-tenant key could not ride). The data owner supplies their exported
+// MEK plus a fresh grant bundle for the active constellation; the enclave
+// provisions a NEW MEK there and atomically re-wraps every CEK from the
+// recovered key to the new one (same sweep as first-time provisioning).
+// The recovered key is proven correct by the sweep itself: any CEK that
+// fails to unwrap aborts the switch with nothing committed.
+func (s *Server) handleTenantKeyRevault(w http.ResponseWriter, r *http.Request, p *Principal) {
+	if !p.IsUser() {
+		httpError(w, http.StatusForbidden, errors.New("user principals only"))
+		return
+	}
+	if s.MEKs == nil {
+		httpError(w, http.StatusNotImplemented, errors.New("vault-held tenant keys are not available on this instance"))
+		return
+	}
+	t, err := s.Store.PersonalTenantOf(r.Context(), p.Sub)
+	if err != nil {
+		httpError(w, http.StatusNotFound, errors.New("no personal tenant"))
+		return
+	}
+	existing, _ := s.Store.TenantMekRef(r.Context(), t.ID)
+	if existing == "" {
+		httpError(w, http.StatusConflict, errors.New("tenant has no vault MEK; use POST /v1/me/tenant/key"))
+		return
+	}
+	var req tenantKeyRevaultRequest
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	recovered, err := base64.StdEncoding.DecodeString(req.RecoveredMekB64)
+	if err != nil || len(recovered) != 32 {
+		httpError(w, http.StatusBadRequest, errors.New("recovered_mek_b64 must be 32 bytes of base64"))
+		return
+	}
+	if req.Grant == "" || req.Handle == "" || len(req.Constellation.Endpoints) == 0 {
+		httpError(w, http.StatusBadRequest, errors.New("grant, handle and constellation.endpoints are required"))
+		return
+	}
+
+	bundle := vaultmek.Bundle{
+		Grant:        req.Grant,
+		Handle:       req.Handle,
+		Endpoints:    req.Constellation.Endpoints,
+		MrenclaveHex: req.Constellation.Mrenclave,
+		AttServer:    req.Constellation.AttestationServer,
+		AttToken:     req.AttestationToken,
+		Threshold:    req.Constellation.Threshold,
+	}
+	ref, err := s.MEKs.Provision(r.Context(), bundle)
+	if err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "exist") {
+			httpError(w, http.StatusBadGateway, err)
+			return
+		}
+		ref = vaultmek.Ref{
+			Handle: bundle.Handle, Endpoints: bundle.Endpoints,
+			MrenclaveHex: bundle.MrenclaveHex, AttServer: bundle.AttServer,
+			AttToken: bundle.AttToken, Threshold: bundle.Threshold,
+		}
+	}
+	newMek, err := s.MEKs.Load(r.Context(), ref)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	oldDEK, err := crypto.DeriveDEK(recovered, t.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	newDEK, err := crypto.DeriveDEK(newMek, t.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	newHMAC, err := crypto.DeriveNameHMACKey(newMek, t.ID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	rewrapped, err := s.Store.SwitchTenantKeys(r.Context(), t.ID, vaultmek.RefJSON(ref), func(n *store.Node) error {
+		n.NameHMAC = crypto.NameHMAC(newHMAC, n.Name)
+		if len(n.WrappedCEK) == 0 {
+			return nil
+		}
+		cek, uerr := crypto.UnwrapKey(oldDEK, n.WrappedCEK)
+		if uerr != nil {
+			return fmt.Errorf("recovered key does not open this tenant's content: %w", uerr)
+		}
+		wrapped, werr := crypto.WrapKey(newDEK, cek)
+		if werr != nil {
+			return werr
+		}
+		n.WrappedCEK = wrapped
+		return nil
+	})
+	if err != nil {
+		httpError(w, http.StatusConflict, err)
+		return
+	}
+
+	if cfg := s.CurrentConfig(); cfg != nil && cfg.Mode == config.ModeEscrowed {
+		if err := s.escrowWrapTenant(r.Context(), t.ID, newMek, p.Sub); err != nil {
+			httpError(w, http.StatusBadGateway, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "revaulted", "handle": ref.Handle, "rewrapped_nodes": rewrapped,
 	})
 }

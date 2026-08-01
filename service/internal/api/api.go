@@ -357,6 +357,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/me", s.auth(s.handleMe))
 	mux.Handle("POST /v1/me/tenant", s.auth(s.handleEnsurePersonalTenant))
 	mux.Handle("POST /v1/me/tenant/key", s.auth(s.handleTenantKey))
+	mux.Handle("POST /v1/me/tenant/key/revault", s.auth(s.handleTenantKeyRevault))
 	mux.Handle("GET /v1/shared", s.auth(s.handleSharedWithMe))
 	// Attribute marketplace, for the sharer choosing what to require.
 	mux.Handle("GET /v1/attributes", s.auth(s.handleAttributeCatalogue))
