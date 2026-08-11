@@ -20,6 +20,10 @@ type MEKProvider interface {
 	Provision(ctx context.Context, b vaultmek.Bundle) (vaultmek.Ref, error)
 	Load(ctx context.Context, ref vaultmek.Ref) ([]byte, error)
 	Unwrap(ctx context.Context, ref vaultmek.Ref, ciphertext, iv []byte) ([]byte, error)
+	// RefreshTees is the data owner's measurement approval: replace the
+	// key's pinned TEE profile with the grant's (the app's current
+	// measurement), authenticated as the key owner.
+	RefreshTees(ctx context.Context, ref vaultmek.Ref, grant, ownerBearer string) error
 }
 
 // ErrVaultKeyStale means the tenant's vault MEK could not be loaded
@@ -87,6 +91,11 @@ type tenantKeyRequest struct {
 		AttestationServer string   `json:"attestation_server"`
 		Threshold         int      `json:"threshold"`
 	} `json:"constellation"`
+	// OwnerToken carries the data owner's platform bearer when the
+	// request itself rides a transport with no Authorization header (a
+	// sealed session asserts the sub only). Used solely as the vault
+	// owner credential for a measurement approval.
+	OwnerToken string `json:"owner_token,omitempty"`
 }
 
 // handleTenantKey provisions (or re-arms) the caller's personal-tenant
@@ -118,11 +127,50 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 
 	if existing, _ := s.Store.TenantMekRef(r.Context(), t.ID); existing != "" {
 		handle, status, rerr := s.rearmTenantKey(r.Context(), t.ID, existing, req.AttestationToken)
-		if rerr != nil {
-			httpError(w, status, rerr)
+		if rerr == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "loaded", "handle": handle})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "loaded", "handle": handle})
+		// The vault refusing the enclave's identity against the key's
+		// principals means the app's measurement changed (an upgrade)
+		// and this data owner has not yet approved it. The owner is
+		// right here: with a fresh grant (which pins the CURRENT
+		// measurement) and their bearer, approve it in place — the
+		// vault authorises the tees update against the owner
+		// credential, so this works only for the key's own owner.
+		if vaultmek.PrincipalMismatch(rerr) {
+			bearer := p.Bearer
+			if bearer == "" {
+				bearer = req.OwnerToken
+			}
+			if req.Grant == "" || bearer == "" {
+				httpError(w, http.StatusConflict, errors.New(
+					"measurement_approval_required: the Drive app was upgraded; re-arm with a fresh grant bundle (and owner_token on a sealed session) to approve the new measurement for your key"))
+				return
+			}
+			ref, perr := vaultmek.ParseRef(existing)
+			if perr != nil {
+				httpError(w, http.StatusInternalServerError, perr)
+				return
+			}
+			if req.AttestationToken != "" {
+				ref.AttToken = req.AttestationToken
+			}
+			if aerr := s.MEKs.RefreshTees(r.Context(), ref, req.Grant, bearer); aerr != nil {
+				httpError(w, http.StatusBadGateway, aerr)
+				return
+			}
+			handle, status, rerr = s.rearmTenantKey(r.Context(), t.ID, existing, req.AttestationToken)
+			if rerr != nil {
+				httpError(w, status, rerr)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status": "loaded", "handle": handle, "measurement_approved": true,
+			})
+			return
+		}
+		httpError(w, status, rerr)
 		return
 	}
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
@@ -53,6 +54,7 @@ func (s *Server) Tools() http.Handler {
 	mux.Handle("POST /tools/get_bucket_cred", s.auth(s.toolGetBucketCred))
 	mux.Handle("POST /tools/delete_bucket_cred", s.auth(s.toolDeleteBucketCred))
 	mux.Handle("POST /tools/provision_org_mek", s.auth(s.toolProvisionOrgMEK))
+	mux.Handle("POST /tools/approve_org_mek_measurement", s.auth(s.toolApproveOrgMEKMeasurement))
 	mux.Handle("POST /tools/request_recovery", s.auth(s.toolRequestRecovery))
 	mux.Handle("POST /tools/approve_recovery", s.auth(s.toolApproveRecovery))
 	mux.Handle("POST /tools/recovery_status", s.auth(s.toolRecoveryStatus))
@@ -69,6 +71,53 @@ func (s *Server) Tools() http.Handler {
 // owner = the org admin); the enclave generates the key, Shamir-splits
 // it to the constellation and returns the ref JSON to put in the
 // configure org_mek_ref field.
+// toolApproveOrgMEKMeasurement is the instance operator's measurement
+// approval for MEK_org after an app upgrade: the tees profile pinned on
+// the org key no longer matches the running build, and only the org
+// key's OWNER may bless the new one. The caller supplies a fresh
+// key-creation grant (whose policy carries the app's current attested
+// profile); the vault authorises the update against the caller's
+// bearer, so a non-owner calling this achieves nothing. The tenant-key
+// analogue happens per data owner at re-arm.
+func (s *Server) toolApproveOrgMEKMeasurement(w http.ResponseWriter, r *http.Request, p *Principal) {
+	if !p.IsUser() || p.Via != viaBearer {
+		httpError(w, http.StatusForbidden, errors.New("a full bearer identity is required"))
+		return
+	}
+	cfg := s.CurrentConfig()
+	if cfg == nil || cfg.Mode != config.ModeEscrowed || cfg.OrgMEKRef == "" {
+		httpError(w, http.StatusConflict, errors.New("not an escrowed instance (no org master key configured)"))
+		return
+	}
+	if s.MEKs == nil {
+		httpError(w, http.StatusNotImplemented, errors.New("vault-held keys are not available on this instance"))
+		return
+	}
+	var req struct {
+		Grant string `json:"grant"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Grant == "" {
+		httpError(w, http.StatusBadRequest, errors.New("grant is required (it carries the current attested profile)"))
+		return
+	}
+	ref, err := vaultmek.ParseRef(cfg.OrgMEKRef)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.MEKs.RefreshTees(r.Context(), ref, req.Grant, p.Bearer); err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "approved", "handle": ref.Handle,
+	})
+}
+
 func (s *Server) toolProvisionOrgMEK(w http.ResponseWriter, r *http.Request, p *Principal) {
 	if !p.IsUser() || p.Via != viaBearer {
 		httpError(w, http.StatusForbidden, errors.New("a full bearer identity is required"))

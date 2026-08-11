@@ -165,6 +165,14 @@ func (c *Client) policy(mrenclaveHex, attServer, attToken string, nonce []byte) 
 // the manager mints a one-shot identity bound to the vault's challenge,
 // and the vault's quote is verified against the pinned MRENCLAVE.
 func (c *Client) dial(ctx context.Context, endpoint, mrenclaveHex, attServer, attToken string) (*vsdk.Client, error) {
+	return c.dialAs(ctx, endpoint, mrenclaveHex, attServer, attToken, "")
+}
+
+// dialAs is dial with an optional OIDC bearer attached to every request
+// on the connection — the owner-authenticated path (UpdatePolicy for a
+// measurement approval), where the vault authorises by the caller's
+// OIDC principal on top of the app's attested transport identity.
+func (c *Client) dialAs(ctx context.Context, endpoint, mrenclaveHex, attServer, attToken, bearer string) (*vsdk.Client, error) {
 	if c.minter == nil {
 		return nil, fmt.Errorf("vaultmek: no manager identity available (not running on the platform)")
 	}
@@ -176,11 +184,15 @@ func (c *Client) dial(ctx context.Context, endpoint, mrenclaveHex, attServer, at
 	if err != nil {
 		return nil, err
 	}
-	return vsdk.Dial(ctx, vsdk.VaultRegistration{ID: endpoint, Endpoint: endpoint, Status: "static"}, vsdk.DialOptions{
+	opts := vsdk.DialOptions{
 		Challenge:            nonce,
 		GetClientCertificate: c.minter.GetClientCertificate(),
 		VaultPolicy:          pol,
-	})
+	}
+	if bearer != "" {
+		opts.AuthToken = vsdk.StaticToken(bearer)
+	}
+	return vsdk.Dial(ctx, vsdk.VaultRegistration{ID: endpoint, Endpoint: endpoint, Status: "static"}, opts)
 }
 
 // Provision generates a fresh 256-bit MEK, splits it k-of-n across the

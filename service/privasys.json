@@ -867,6 +867,24 @@
             }
         },
         {
+            "name": "approve_org_mek_measurement",
+            "title": "Approve the app's new measurement for MEK_org (escrowed mode)",
+            "endpoint": "/tools/approve_org_mek_measurement",
+            "description": "Instance operator's measurement approval after an app upgrade: replaces the TEE profile pinned on MEK_org with the app's current attested profile, carried in a fresh key-creation grant. The vault authorises the update against the caller's bearer as the org key's owner, so only the instance operator can approve. Per-tenant keys are approved by each data owner at re-arm instead.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "grant": {
+                        "type": "string",
+                        "description": "A fresh IdP-signed key-creation grant; its policy carries the app's current attested profile."
+                    }
+                },
+                "required": [
+                    "grant"
+                ]
+            }
+        },
+        {
             "name": "request_recovery",
             "title": "Request tenant recovery (escrowed mode)",
             "endpoint": "/tools/request_recovery",

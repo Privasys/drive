@@ -214,6 +214,13 @@ func TestPersonalTenantAutoProvision(t *testing.T) {
 type fakeMEKs struct {
 	mek     []byte
 	loadErr error // when set, Load fails (simulates a stale attestation token)
+
+	// refreshed records RefreshTees calls (grant, bearer); when
+	// clearOnRefresh is set, a successful refresh clears loadErr — the
+	// measurement-approval self-heal.
+	refreshed      [][2]string
+	refreshErr     error
+	clearOnRefresh bool
 }
 
 func (f *fakeMEKs) Provision(_ context.Context, b vaultmek.Bundle) (vaultmek.Ref, error) {
@@ -224,6 +231,16 @@ func (f *fakeMEKs) Load(context.Context, vaultmek.Ref) ([]byte, error) {
 		return nil, f.loadErr
 	}
 	return f.mek, nil
+}
+func (f *fakeMEKs) RefreshTees(_ context.Context, _ vaultmek.Ref, grant, bearer string) error {
+	if f.refreshErr != nil {
+		return f.refreshErr
+	}
+	f.refreshed = append(f.refreshed, [2]string{grant, bearer})
+	if f.clearOnRefresh {
+		f.loadErr = nil
+	}
+	return nil
 }
 
 // Unwrap fakes the vault by XORing with a fixed pad (deterministic,
@@ -285,6 +302,63 @@ func TestTenantKeySwitchRewrapsContent(t *testing.T) {
 	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{}`)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"loaded"`) {
 		t.Fatalf("re-arm: %d %s", resp.StatusCode, body)
+	}
+}
+
+// TestMeasurementApprovalOnRearm proves the upgrade self-heal: when the
+// vault refuses the enclave's identity against the key's principals (an
+// app upgrade the data owner has not approved), a re-arm carrying a
+// fresh grant approves the new measurement with the owner's bearer and
+// loads the key in one round trip. Without a grant the caller gets a
+// distinct 409 so the wallet knows to fetch one; a non-principal
+// failure must NOT trigger an approval.
+func TestMeasurementApprovalOnRearm(t *testing.T) {
+	mek := sha256.Sum256([]byte("vault-held-tenant-mek"))
+	fake := &fakeMEKs{mek: mek[:], clearOnRefresh: true}
+	ts := newFullServer(t, func(s *Server) { s.MEKs = fake })
+
+	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	resp, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth,
+		`{"grant":"g","handle":"apps.privasys.org/x/data/y/mek/v1","constellation":{"endpoints":["v1:1","v2:2"],"mrenclave":"00","attestation_server":"as","threshold":2}}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("adopt: %d %s", resp.StatusCode, body)
+	}
+
+	// The app upgrades: the vault now refuses the enclave's identity.
+	fake.loadErr = errors.New("vaultmek: only 0/2 shares recovered: vault error: caller is not in policy.principals")
+
+	// A re-arm without a grant cannot approve — distinct 409.
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{}`)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "measurement_approval_required") {
+		t.Fatalf("grantless re-arm: want 409 measurement_approval_required, got %d %s", resp.StatusCode, body)
+	}
+	if len(fake.refreshed) != 0 {
+		t.Fatal("approval must not run without a grant")
+	}
+
+	// A re-arm WITH a fresh grant approves and loads in one round trip.
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh-grant"}`)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"measurement_approved":true`) {
+		t.Fatalf("approving re-arm: %d %s", resp.StatusCode, body)
+	}
+	if len(fake.refreshed) != 1 || fake.refreshed[0][0] != "fresh-grant" {
+		t.Fatalf("RefreshTees called with %v", fake.refreshed)
+	}
+	if fake.refreshed[0][1] == "" {
+		t.Fatal("owner bearer missing from the approval")
+	}
+
+	// A non-principal failure (stale token, vault down) must not
+	// trigger an approval attempt.
+	fake.loadErr = errors.New("vaultmek: dial v1:1: connection refused")
+	resp, _ = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"g2"}`)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("transport failure: want 502, got %d", resp.StatusCode)
+	}
+	if len(fake.refreshed) != 1 {
+		t.Fatal("approval ran on a non-principal failure")
 	}
 }
 
