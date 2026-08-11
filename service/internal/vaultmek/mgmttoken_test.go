@@ -24,7 +24,7 @@ type fakeMinter struct {
 	fail      bool
 }
 
-func (f *fakeMinter) mint(_ context.Context, challenge []byte) (*tls.Certificate, error) {
+func (f *fakeMinter) mint(_ context.Context, challenge, _ []byte) (*tls.Certificate, error) {
 	if f.fail {
 		return nil, context.DeadlineExceeded
 	}

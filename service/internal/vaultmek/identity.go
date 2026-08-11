@@ -35,10 +35,17 @@ func NewManagerMinter(managerURL, token string) *ManagerMinter {
 	}
 }
 
-func (m *ManagerMinter) mint(ctx context.Context, challenge []byte) (*tls.Certificate, error) {
-	body, err := json.Marshal(map[string]string{
+func (m *ManagerMinter) mint(ctx context.Context, challenge, channelBinder []byte) (*tls.Certificate, error) {
+	fields := map[string]string{
 		"challenge_b64": base64.StdEncoding.EncodeToString(challenge),
-	})
+	}
+	// The vault requires the client quote to commit to challenge ||
+	// binder (empty only on a non-TLS-1.3 handshake); mint without it
+	// and the vault refuses the identity.
+	if len(channelBinder) > 0 {
+		fields["binder_b64"] = base64.StdEncoding.EncodeToString(channelBinder)
+	}
+	body, err := json.Marshal(fields)
 	if err != nil {
 		return nil, err
 	}

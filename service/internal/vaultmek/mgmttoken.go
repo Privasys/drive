@@ -15,9 +15,11 @@ import (
 )
 
 // identityMinter is the slice of ManagerMinter the token refresher
-// needs (an interface so tests can inject a fake).
+// needs (an interface so tests can inject a fake). The channel binder
+// is nil on this path: the identity is presented in HTTP headers, not
+// in a TLS handshake, so there is no session to bind to.
 type identityMinter interface {
-	mint(ctx context.Context, challenge []byte) (*tls.Certificate, error)
+	mint(ctx context.Context, challenge, channelBinder []byte) (*tls.Certificate, error)
 }
 
 // MgmtTokenRefresher returns a TokenRefresher that fetches a fresh
@@ -84,7 +86,7 @@ func (c *Client) AppIdentityHeaders(ctx context.Context) (identityB64, challenge
 	if _, err := rand.Read(challenge[8:]); err != nil {
 		return "", "", err
 	}
-	cert, err := c.minter.mint(ctx, challenge)
+	cert, err := c.minter.mint(ctx, challenge, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("vaultmek: mint identity: %w", err)
 	}
@@ -113,7 +115,7 @@ func newMgmtRefresher(base string, m identityMinter, hc *http.Client, onMeta fun
 		if _, err := rand.Read(challenge[8:]); err != nil {
 			return "", 0, err
 		}
-		cert, err := m.mint(ctx, challenge)
+		cert, err := m.mint(ctx, challenge, nil)
 		if err != nil {
 			return "", 0, fmt.Errorf("vaultmek: mint identity for token refresh: %w", err)
 		}
