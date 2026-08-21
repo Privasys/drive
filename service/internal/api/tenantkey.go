@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/crypto"
@@ -24,7 +26,20 @@ type MEKProvider interface {
 	// key's pinned TEE profile with the grant's (the app's current
 	// measurement), authenticated as the key owner.
 	RefreshTees(ctx context.Context, ref vaultmek.Ref, grant, ownerBearer string) error
+	// Regenerate re-creates the tenant's key (same material) at the next
+	// handle generation under a fresh grant — the renewal for the vault's
+	// fixed expires_at, and the ride off a retiring constellation.
+	Regenerate(ctx context.Context, ref vaultmek.Ref, b vaultmek.Bundle) (vaultmek.Ref, error)
 }
+
+// mekRotateAfter is how old a tenant key's handle generation may grow
+// before a rearm opportunistically regenerates it. Vault key records
+// expire at a FIXED expires_at (90-day cap) that no operation extends, so
+// rotating well before expiry is the only renewal there is. Rotation keeps
+// the same material (no content re-wrap) and rides the fresh grant the
+// wallet already sends at each login. A constellation change on the
+// bundle also triggers, so keys move off retiring constellations.
+const mekRotateAfter = 30 * 24 * time.Hour
 
 // ErrVaultKeyStale means the tenant's vault MEK could not be loaded
 // (typically the stored attestation token expired since the last
@@ -81,6 +96,74 @@ func (s *Server) rearmTenantKey(ctx context.Context, tenantID, existingRef, attT
 	return ref.Handle, http.StatusOK, nil
 }
 
+// maybeRotateTenantKey opportunistically regenerates a tenant's vault key
+// at rearm (same material, next handle generation, the request's fresh
+// grant) when the current generation has aged past mekRotateAfter — or
+// when the bundle addresses a different constellation than the ref, so
+// the key rides off a retiring one before it strands. Best-effort: a
+// failure keeps the current ref and the login succeeds regardless; the
+// next login retries. A legacy ref (RotatedAt zero, minted before
+// rotation existed) is due immediately, which sweeps every existing
+// tenant onto the active constellation and the current 90-day policy at
+// their next login.
+func (s *Server) maybeRotateTenantKey(ctx context.Context, tenantID, existingRef string, req *tenantKeyRequest) (bool, string) {
+	if req.Grant == "" || len(req.Constellation.Endpoints) == 0 {
+		return false, ""
+	}
+	ref, err := vaultmek.ParseRef(existingRef)
+	if err != nil {
+		return false, ""
+	}
+	aged := ref.RotatedAt == 0 || time.Since(time.Unix(ref.RotatedAt, 0)) > mekRotateAfter
+	moved := ref.MrenclaveHex != req.Constellation.Mrenclave ||
+		!sameEndpointSet(ref.Endpoints, req.Constellation.Endpoints)
+	if !aged && !moved {
+		return false, ""
+	}
+	b := vaultmek.Bundle{
+		Grant:        req.Grant,
+		Endpoints:    req.Constellation.Endpoints,
+		MrenclaveHex: req.Constellation.Mrenclave,
+		AttServer:    req.Constellation.AttestationServer,
+		AttToken:     req.AttestationToken,
+		Threshold:    req.Constellation.Threshold,
+	}
+	newRef, rerr := s.MEKs.Regenerate(ctx, ref, b)
+	if rerr != nil {
+		log.Printf("tenantkey: rotation of %s skipped: %v", ref.Handle, rerr)
+		return false, ""
+	}
+	if serr := s.Store.SetTenantMekRef(ctx, tenantID, vaultmek.RefJSON(newRef)); serr != nil {
+		// The new generation exists on the vaults but the index still
+		// points at the old one; the old key stays valid, and the next
+		// login adopts the new generation (Regenerate verifies the
+		// material matches before adopting an existing handle).
+		log.Printf("tenantkey: rotated %s -> %s but persisting the ref failed: %v", ref.Handle, newRef.Handle, serr)
+		return false, ""
+	}
+	log.Printf("tenantkey: rotated %s -> %s (aged=%t constellation_changed=%t)", ref.Handle, newRef.Handle, aged, moved)
+	return true, newRef.Handle
+}
+
+// sameEndpointSet reports whether two endpoint lists name the same set,
+// order-insensitively.
+func sameEndpointSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, e := range a {
+		seen[e]++
+	}
+	for _, e := range b {
+		if seen[e] == 0 {
+			return false
+		}
+		seen[e]--
+	}
+	return true
+}
+
 type tenantKeyRequest struct {
 	Grant            string `json:"grant"`
 	Handle           string `json:"handle"`
@@ -128,7 +211,12 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 	if existing, _ := s.Store.TenantMekRef(r.Context(), t.ID); existing != "" {
 		handle, status, rerr := s.rearmTenantKey(r.Context(), t.ID, existing, req.AttestationToken)
 		if rerr == nil {
-			writeJSON(w, http.StatusOK, map[string]any{"status": "loaded", "handle": handle})
+			resp := map[string]any{"status": "loaded", "handle": handle}
+			if rotated, newHandle := s.maybeRotateTenantKey(r.Context(), t.ID, existing, &req); rotated {
+				resp["handle"] = newHandle
+				resp["rotated"] = true
+			}
+			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 		// The vault refusing the enclave's identity against the key's
@@ -165,9 +253,14 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 				httpError(w, status, rerr)
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{
+			resp := map[string]any{
 				"status": "loaded", "handle": handle, "measurement_approved": true,
-			})
+			}
+			if rotated, newHandle := s.maybeRotateTenantKey(r.Context(), t.ID, existing, &req); rotated {
+				resp["handle"] = newHandle
+				resp["rotated"] = true
+			}
+			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 		httpError(w, status, rerr)

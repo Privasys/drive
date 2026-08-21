@@ -10,10 +10,12 @@ package vaultmek
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +49,12 @@ type Ref struct {
 	AttServer    string   `json:"attestation_server"`
 	AttToken     string   `json:"attestation_token,omitempty"`
 	Threshold    int      `json:"threshold"`
+	// RotatedAt is when this handle generation was created (unix seconds).
+	// Vault key records expire at a FIXED expires_at (90-day cap, 30-day
+	// default; nothing extends it), so the only renewal is re-creating the
+	// same material at the next handle generation (Regenerate). Zero marks
+	// a legacy ref from before rotation existed: due immediately.
+	RotatedAt int64 `json:"rotated_at,omitempty"`
 }
 
 // RefJSON round-trips a Ref for the index column.
@@ -212,41 +220,109 @@ func (c *Client) Provision(ctx context.Context, b Bundle) (Ref, error) {
 	if _, err := rand.Read(mek); err != nil {
 		return Ref{}, err
 	}
-	shares, err := vsdk.ShamirSplit(mek, threshold, len(b.Endpoints))
-	if err != nil {
-		return Ref{}, fmt.Errorf("vaultmek: split: %w", err)
-	}
-	created := 0
-	for i, ep := range b.Endpoints {
-		vc, derr := c.dial(ctx, ep, b.MrenclaveHex, b.AttServer, b.AttToken)
-		if derr != nil {
-			err = fmt.Errorf("vaultmek: dial %s: %w", ep, derr)
-			break
-		}
-		_, cerr := vc.CreateKey(ctx, b.Handle, vsdk.ShareToBytes(shares[i]), b.Grant)
-		vc.Close()
-		if cerr != nil {
-			err = fmt.Errorf("vaultmek: create share on %s: %w", ep, cerr)
-			break
-		}
-		created++
-	}
-	if err != nil {
+	if err := c.createShares(ctx, b, b.Handle, mek, threshold); err != nil {
 		// Best-effort teardown of a partial create; the owner keeps
 		// DeleteKey, but the app TEE does not, so leftovers may need an
 		// owner-side delete. Report the underlying error regardless.
 		return Ref{}, err
 	}
-	_ = created
 	ref := Ref{
 		Handle: b.Handle, Endpoints: b.Endpoints,
 		MrenclaveHex: b.MrenclaveHex, AttServer: b.AttServer,
 		AttToken: b.AttToken, Threshold: threshold,
+		RotatedAt: time.Now().Unix(),
 	}
 	c.mu.Lock()
 	c.meks[b.Handle] = mek
 	c.mu.Unlock()
 	return ref, nil
+}
+
+// createShares Shamir-splits secret and creates one share per endpoint at
+// handle under the bundle's grant. Used by both Provision (fresh material)
+// and Regenerate (existing material at the next handle generation).
+func (c *Client) createShares(ctx context.Context, b Bundle, handle string, secret []byte, threshold int) error {
+	shares, err := vsdk.ShamirSplit(secret, threshold, len(b.Endpoints))
+	if err != nil {
+		return fmt.Errorf("vaultmek: split: %w", err)
+	}
+	for i, ep := range b.Endpoints {
+		vc, derr := c.dial(ctx, ep, b.MrenclaveHex, b.AttServer, b.AttToken)
+		if derr != nil {
+			return fmt.Errorf("vaultmek: dial %s: %w", ep, derr)
+		}
+		_, cerr := vc.CreateKey(ctx, handle, vsdk.ShareToBytes(shares[i]), b.Grant)
+		vc.Close()
+		if cerr != nil {
+			return fmt.Errorf("vaultmek: create share on %s: %w", ep, cerr)
+		}
+	}
+	return nil
+}
+
+// NextGeneration bumps the trailing generation segment of a key handle
+// (".../mek/v1" -> ".../mek/v2").
+func NextGeneration(handle string) (string, error) {
+	i := strings.LastIndex(handle, "/v")
+	if i < 0 {
+		return "", fmt.Errorf("vaultmek: handle %q has no /v<N> generation suffix", handle)
+	}
+	n, err := strconv.Atoi(handle[i+2:])
+	if err != nil || n < 1 {
+		return "", fmt.Errorf("vaultmek: handle %q has no /v<N> generation suffix", handle)
+	}
+	return handle[:i+2] + strconv.Itoa(n+1), nil
+}
+
+// Regenerate re-creates a tenant's key — SAME material — at the next handle
+// generation, under a fresh grant, on the constellation the bundle
+// addresses. This is the only renewal a vault key has: expires_at is fixed
+// at CreateKey (90-day cap, 30-day default) and no operation extends it, so
+// rotating the handle restarts the clock without re-wrapping any content;
+// a bundle from a newer constellation also moves the key off a retiring
+// one. The old record is left to age out on its TTL (the app TEE holds no
+// DeleteKey; until then it doubles as a fallback).
+func (c *Client) Regenerate(ctx context.Context, ref Ref, b Bundle) (Ref, error) {
+	if len(b.Endpoints) == 0 || b.Grant == "" {
+		return Ref{}, fmt.Errorf("vaultmek: regenerate: grant and endpoints are required")
+	}
+	mek, err := c.Load(ctx, ref)
+	if err != nil {
+		return Ref{}, fmt.Errorf("vaultmek: regenerate: load current key: %w", err)
+	}
+	newHandle, err := NextGeneration(ref.Handle)
+	if err != nil {
+		return Ref{}, err
+	}
+	threshold := b.Threshold
+	if threshold <= 0 || threshold > len(b.Endpoints) {
+		threshold = (len(b.Endpoints) + 1) / 2
+	}
+	newRef := Ref{
+		Handle: newHandle, Endpoints: b.Endpoints,
+		MrenclaveHex: b.MrenclaveHex, AttServer: b.AttServer,
+		AttToken: b.AttToken, Threshold: threshold,
+		RotatedAt: time.Now().Unix(),
+	}
+	if cerr := c.createShares(ctx, b, newHandle, mek, threshold); cerr != nil {
+		// A crash after a previous full create but before the index commit
+		// leaves the new generation on the vaults with no local ref. Adopt
+		// it only if it reconstructs to the SAME material (a partial earlier
+		// create mixed with this attempt's shares would not).
+		if strings.Contains(strings.ToLower(cerr.Error()), "exist") {
+			if got, lerr := c.loadOnce(ctx, newRef, b.AttToken); lerr == nil && subtle.ConstantTimeCompare(got, mek) == 1 {
+				c.mu.Lock()
+				c.meks[newHandle] = mek
+				c.mu.Unlock()
+				return newRef, nil
+			}
+		}
+		return Ref{}, cerr
+	}
+	c.mu.Lock()
+	c.meks[newHandle] = mek
+	c.mu.Unlock()
+	return newRef, nil
 }
 
 // Unwrap decrypts a payload sealed under a vault Aes256GcmKey (a

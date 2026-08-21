@@ -221,6 +221,11 @@ type fakeMEKs struct {
 	refreshed      [][2]string
 	refreshErr     error
 	clearOnRefresh bool
+
+	// regenerated records Regenerate results (the new handles); regenErr
+	// makes Regenerate fail (rotation must then be skipped silently).
+	regenerated []string
+	regenErr    error
 }
 
 func (f *fakeMEKs) Provision(_ context.Context, b vaultmek.Bundle) (vaultmek.Ref, error) {
@@ -232,6 +237,22 @@ func (f *fakeMEKs) Load(context.Context, vaultmek.Ref) ([]byte, error) {
 	}
 	return f.mek, nil
 }
+func (f *fakeMEKs) Regenerate(_ context.Context, ref vaultmek.Ref, b vaultmek.Bundle) (vaultmek.Ref, error) {
+	if f.regenErr != nil {
+		return vaultmek.Ref{}, f.regenErr
+	}
+	h, err := vaultmek.NextGeneration(ref.Handle)
+	if err != nil {
+		return vaultmek.Ref{}, err
+	}
+	f.regenerated = append(f.regenerated, h)
+	return vaultmek.Ref{
+		Handle: h, Endpoints: b.Endpoints, MrenclaveHex: b.MrenclaveHex,
+		AttServer: b.AttServer, AttToken: b.AttToken, Threshold: b.Threshold,
+		RotatedAt: time.Now().Unix(),
+	}, nil
+}
+
 func (f *fakeMEKs) RefreshTees(_ context.Context, _ vaultmek.Ref, grant, bearer string) error {
 	if f.refreshErr != nil {
 		return f.refreshErr
@@ -359,6 +380,72 @@ func TestMeasurementApprovalOnRearm(t *testing.T) {
 	}
 	if len(fake.refreshed) != 1 {
 		t.Fatal("approval ran on a non-principal failure")
+	}
+}
+
+// TestTenantKeyRearmRotatesAgedKey proves the expiry bridge: vault key
+// records carry a fixed expires_at nothing can extend, so a rearm whose
+// bundle is complete regenerates an aged (or legacy, RotatedAt-zero) key
+// at the next handle generation with the SAME material — and a
+// constellation change on the bundle triggers regardless of age, so keys
+// ride off retiring constellations. Failures must never break the login.
+func TestTenantKeyRearmRotatesAgedKey(t *testing.T) {
+	mek := sha256.Sum256([]byte("vault-held-tenant-mek"))
+	fake := &fakeMEKs{mek: mek[:]}
+	ts := newFullServer(t, func(s *Server) { s.MEKs = fake })
+
+	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	bundle := `"grant":"g","handle":"apps.privasys.org/x/data/y/mek/v1","constellation":{"endpoints":["v1:1","v2:2"],"mrenclave":"00","attestation_server":"as","threshold":2}`
+	resp, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, "{"+bundle+"}")
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("provision: %d %s", resp.StatusCode, body)
+	}
+
+	// The fake's Provision leaves RotatedAt zero (the legacy ref shape),
+	// so the first full-bundle rearm is due immediately: same material,
+	// next generation.
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, "{"+bundle+"}")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"rotated":true`) ||
+		!strings.Contains(string(body), "mek/v2") {
+		t.Fatalf("legacy rearm must rotate to v2: %d %s", resp.StatusCode, body)
+	}
+	if len(fake.regenerated) != 1 || !strings.HasSuffix(fake.regenerated[0], "/mek/v2") {
+		t.Fatalf("Regenerate calls: %v", fake.regenerated)
+	}
+
+	// Freshly rotated + same constellation: the next rearm must NOT rotate.
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, "{"+bundle+"}")
+	if resp.StatusCode != http.StatusOK || strings.Contains(string(body), `"rotated"`) {
+		t.Fatalf("fresh key must not rotate: %d %s", resp.StatusCode, body)
+	}
+	if len(fake.regenerated) != 1 {
+		t.Fatalf("unexpected extra rotation: %v", fake.regenerated)
+	}
+
+	// A constellation change triggers even on a fresh key.
+	moved := strings.Replace("{"+bundle+"}", `"mrenclave":"00"`, `"mrenclave":"11"`, 1)
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, moved)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"rotated":true`) ||
+		!strings.Contains(string(body), "mek/v3") {
+		t.Fatalf("constellation change must rotate to v3: %d %s", resp.StatusCode, body)
+	}
+
+	// A rotation failure is silent: the login still succeeds on the
+	// current generation.
+	fake.regenErr = errors.New("vault unreachable")
+	aged := strings.Replace(moved, `"mrenclave":"11"`, `"mrenclave":"22"`, 1)
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, aged)
+	if resp.StatusCode != http.StatusOK || strings.Contains(string(body), `"rotated"`) ||
+		!strings.Contains(string(body), "mek/v3") {
+		t.Fatalf("failed rotation must keep the login working on v3: %d %s", resp.StatusCode, body)
+	}
+
+	// A grantless rearm (no bundle) never rotates.
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{}`)
+	if resp.StatusCode != http.StatusOK || strings.Contains(string(body), `"rotated"`) {
+		t.Fatalf("grantless rearm must not rotate: %d %s", resp.StatusCode, body)
 	}
 }
 
