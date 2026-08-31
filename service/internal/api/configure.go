@@ -94,7 +94,9 @@ type configureRequest struct {
 	OrgMEKRef *string                `json:"org_mek_ref"`
 	Recovery  *config.RecoveryPolicy `json:"recovery"`
 	// Assistant-enclave RAG gate (§8.7 RAG-in-enclave): the interim shared
-	// secret and the (recorded, not-yet-enforced) confidential-AI measurement.
+	// secret and the accepted assistant workload set — a comma-separated
+	// list of app ids (OID 3.6) or code hashes (OID 3.2), one entry per
+	// assistant enclave (confidential-ai, the Privasys Harness).
 	AssistantEnclaveToken       *string `json:"assistant_enclave_token"`
 	AssistantEnclaveMeasurement *string `json:"assistant_enclave_measurement"`
 }

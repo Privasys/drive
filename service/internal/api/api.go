@@ -586,10 +586,9 @@ func (s *Server) verifyAttestedAssistant(r *http.Request) (*Principal, error) {
 	if !strings.EqualFold(strings.TrimSpace(r.Header.Get(peerVerifiedHeader)), "true") {
 		return nil, errors.New("caller is not an attested peer")
 	}
-	want := strings.ToLower(strings.TrimSpace(cfg.AssistantEnclaveMeasurement))
 	appID := strings.ToLower(strings.TrimSpace(r.Header.Get(peerAppIDHeader)))
 	digest := strings.ToLower(strings.TrimSpace(r.Header.Get(peerImageDigestHeader)))
-	if want == "" || (want != appID && want != digest) {
+	if !assistantMeasurementAllowed(cfg.AssistantEnclaveMeasurement, appID, digest) {
 		return nil, errors.New("attested caller is not the configured assistant enclave")
 	}
 	sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader))
@@ -597,6 +596,27 @@ func (s *Server) verifyAttestedAssistant(r *http.Request) (*Principal, error) {
 		return nil, errors.New("missing on-behalf-of subject")
 	}
 	return &Principal{Sub: sub, Via: viaAssistant}, nil
+}
+
+// assistantMeasurementAllowed reports whether the verified peer (its app id,
+// OID 3.6, or its code hash, OID 3.2) matches the configured assistant set.
+// The config value is a comma-separated list — one Drive instance can accept
+// several assistant enclaves (confidential-ai for chat RAG, the Privasys
+// Harness for agent sessions) without a schema change; a single value keeps
+// its historical meaning. Empty entries are skipped; an empty config
+// disables the path (the caller checks that first via the enabled gate).
+func assistantMeasurementAllowed(configured, appID, digest string) bool {
+	appID = strings.ToLower(strings.TrimSpace(appID))
+	digest = strings.ToLower(strings.TrimSpace(digest))
+	for _, want := range strings.FieldsFunc(configured, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		want = strings.ToLower(want)
+		if (appID != "" && want == appID) || (digest != "" && want == digest) {
+			return true
+		}
+	}
+	return false
 }
 
 // isAssistantCatalogueRequest reports whether r is the static MCP tool
