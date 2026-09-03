@@ -1,36 +1,18 @@
 # Privasys Drive — TDX-attested per-tenant file storage.
 #
 # Reproducible OCI image; pin its `@sha256:...` digest when deploying.
-# Built on the Privasys RA-TLS Go fork (-tags ratls) so the service can
-# open mutual RA-TLS connections to the vault constellation for
-# per-tenant MEKs. The fork is fetched from its public release and the
-# two modules behind the go.mod `replace` directives (ra-tls-clients,
+# Builds on upstream Go (RA-TLS v2 needs no patched TLS stack). The two
+# modules behind the go.mod `replace` directives (ra-tls-clients,
 # enclave-vaults-client) are cloned + pinned, so the image builds from
 # this repo alone (build context = service/). Bump the ARGs when the
-# siblings move.
-# v0.5.2: CertificateRequestInfo.RATLSChannelBinder — required so the
-# vault client identity can commit to the live session's channel binder.
-ARG GO_RATLS_VERSION=privasys-v0.5.2-go1.26.5
+# siblings move (they must point at RA-TLS v2 commits).
 ARG RA_TLS_CLIENTS_REF=7d5418ef675141c2380ac01e45a65e7788b8ba7e
 ARG ENCLAVE_VAULTS_CLIENT_REF=7cfea6e33ff809d0a13d0303726b79329ea1ae60
 
-FROM alpine:3.21 AS toolchain
-ARG GO_RATLS_VERSION
-RUN apk add --no-cache curl
-RUN curl -fsSL \
-    "https://github.com/Privasys/go/releases/download/${GO_RATLS_VERSION}/go-ratls-${GO_RATLS_VERSION}-linux-amd64.tar.gz" \
-    -o /tmp/go-ratls.tar.gz && \
-    mkdir /go-ratls && \
-    tar xzf /tmp/go-ratls.tar.gz -C /go-ratls --strip-components=1 && \
-    rm /tmp/go-ratls.tar.gz
-
-FROM alpine:3.21 AS builder
+FROM golang:1.26-alpine AS builder
 ARG RA_TLS_CLIENTS_REF
 ARG ENCLAVE_VAULTS_CLIENT_REF
 RUN apk add --no-cache git musl-dev ca-certificates
-COPY --from=toolchain /go-ratls /go-ratls
-ENV GOROOT=/go-ratls
-ENV PATH="/go-ratls/bin:$PATH"
 ENV GOPROXY=https://proxy.golang.org,direct
 
 # The replace-directive targets, cloned + pinned.
@@ -58,7 +40,7 @@ RUN sed -i \
       -e 's|\.\./\.\./platform/ra-tls-clients/go|/siblings/ra-tls-clients/go|' \
       -e 's|\.\./\.\./platform/enclave-vaults-client/go|/siblings/enclave-vaults-client/go|' \
       go.mod && \
-    CGO_ENABLED=0 go build -tags ratls \
+    CGO_ENABLED=0 go build \
         -trimpath \
         -ldflags="-s -w -X main.version=${VERSION}" \
         -o /drive \
