@@ -1,79 +1,55 @@
 package vaultmek
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"time"
+	"strings"
+
+	"enclave-os-mini/clients/go/ratls"
 )
 
-// ManagerMinter requests one-shot vault client identities from the in-TD
-// manager. The measured manager is the platform's sole identity minter:
-// a certificate it stamps with this app's id (OID 3.6) is trustworthy by
-// construction, and the vault authorises the app by that id. Mutual
-// RA-TLS binds the quote to the vault's per-connection challenge, so a
-// fresh certificate is minted per connection.
+// ManagerMinter holds this app's manager-minted RA-TLS v2 client identity
+// and produces its evidence on demand. The measured manager is the
+// platform's sole identity minter: a certificate it stamps with this app's
+// id (OID 4.1) is trustworthy by construction, and the vault authorises the
+// app by that id. The identity carries no evidence; a quote committing to
+// its key is produced per connection (mutual RA-TLS v2) or per control-plane
+// call (header flow), so the certificate itself can be long-lived.
 type ManagerMinter struct {
-	url   string
-	token string
-	hc    *http.Client
+	id *ratls.EgressIdentity
 }
 
-// NewManagerMinter builds a minter for the manager mint endpoint (e.g.
-// http://localhost:9443/api/v1/vault-identity) authenticated with the
-// per-app mint token the launcher injected.
+// NewManagerMinter builds a minter for the in-TD manager. managerURL may be
+// the manager base URL or the legacy mint endpoint
+// (.../api/v1/vault-identity); token is the per-app mint token the launcher
+// injected.
 func NewManagerMinter(managerURL, token string) *ManagerMinter {
-	return &ManagerMinter{
-		url:   managerURL,
-		token: token,
-		hc:    &http.Client{Timeout: 15 * time.Second},
-	}
+	return &ManagerMinter{id: ratls.NewEgressIdentity(managerBase(managerURL), token)}
 }
 
-func (m *ManagerMinter) mint(ctx context.Context, challenge, channelBinder []byte) (*tls.Certificate, error) {
-	fields := map[string]string{
-		"challenge_b64": base64.StdEncoding.EncodeToString(challenge),
-	}
-	// The vault requires the client quote to commit to challenge ||
-	// binder (empty only on a non-TLS-1.3 handshake); mint without it
-	// and the vault refuses the identity.
-	if len(channelBinder) > 0 {
-		fields["binder_b64"] = base64.StdEncoding.EncodeToString(channelBinder)
-	}
-	body, err := json.Marshal(fields)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.token)
-	resp, err := m.hc.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("vaultmek: ask manager to mint identity: %w", err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("vaultmek: manager mint %s: %s", resp.Status, string(data))
-	}
-	var out struct {
-		CertPEM string `json:"cert_pem"`
-		KeyPEM  string `json:"key_pem"`
-	}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("vaultmek: decode mint response: %w", err)
-	}
-	cert, err := tls.X509KeyPair([]byte(out.CertPEM), []byte(out.KeyPEM))
-	if err != nil {
-		return nil, fmt.Errorf("vaultmek: parse minted certificate: %w", err)
-	}
-	return &cert, nil
+// managerBase strips the legacy mint path so an environment still pointing
+// at .../api/v1/vault-identity reaches the manager's identity endpoints.
+func managerBase(managerURL string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(managerURL, "/"), "/api/v1/vault-identity")
+}
+
+// GetClientCertificate returns the TLS GetClientCertificate callback: the
+// cached manager-minted identity. Evidence for it is produced per connection
+// by ClientEvidence.
+func (m *ManagerMinter) GetClientCertificate() func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	return m.id.GetClientCertificate
+}
+
+// ClientEvidence quotes the presented identity for one connection when the
+// vault requires it (client_evidence: required).
+func (m *ManagerMinter) ClientEvidence() ratls.ClientEvidenceSource {
+	return m.id.ClientEvidence
+}
+
+// headerIdentity returns the identity leaf (DER) and a quote proving it for
+// the given 32-byte challenge, the credential of the control plane's
+// app-identity gate (the quote commits to the leaf key, the challenge and
+// ratls.HeaderIdentityHctx).
+func (m *ManagerMinter) headerIdentity(_ context.Context, challenge []byte) (der, quote []byte, err error) {
+	return m.id.HeaderEvidence(challenge)
 }

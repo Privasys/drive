@@ -3,7 +3,6 @@ package vaultmek
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -12,14 +11,15 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"enclave-os-mini/clients/go/ratls"
 )
 
-// identityMinter is the slice of ManagerMinter the token refresher
-// needs (an interface so tests can inject a fake). The channel binder
-// is nil on this path: the identity is presented in HTTP headers, not
-// in a TLS handshake, so there is no session to bind to.
+// identityMinter is the slice of ManagerMinter the token refresher needs
+// (an interface so tests can inject a fake): the identity leaf plus a quote
+// committing to it and the given challenge (header flow, RA-TLS v2).
 type identityMinter interface {
-	mint(ctx context.Context, challenge, channelBinder []byte) (*tls.Certificate, error)
+	headerIdentity(ctx context.Context, challenge []byte) (der, quote []byte, err error)
 }
 
 // MgmtTokenRefresher returns a TokenRefresher that fetches a fresh
@@ -71,30 +71,39 @@ func (c *Client) AttestationCredentials(ctx context.Context) (server, token stri
 	return server, token, nil
 }
 
-// AppIdentityHeaders mints a fresh challenge-bound identity leaf and
-// returns the header pair (base64 DER, base64 challenge) that
-// authenticates one control-plane call behind the app-identity gate.
-// The challenge follows the freshness contract: first 8 bytes are
-// big-endian unix seconds, the rest anti-replay randomness. Errors
+// AppIdentityHeaders returns the header triple (base64 identity DER, base64
+// challenge, base64 quote) that authenticates one control-plane call behind
+// the app-identity gate. The 32-byte challenge follows the freshness
+// contract: first 8 bytes are big-endian unix seconds, the rest anti-replay
+// randomness; the quote commits to the leaf key and the challenge. Errors
 // off-platform (no manager identity).
-func (c *Client) AppIdentityHeaders(ctx context.Context) (identityB64, challengeB64 string, err error) {
+func (c *Client) AppIdentityHeaders(ctx context.Context) (identityB64, challengeB64, evidenceB64 string, err error) {
 	if c.minter == nil {
-		return "", "", fmt.Errorf("vaultmek: no manager identity available (not running on the platform)")
+		return "", "", "", fmt.Errorf("vaultmek: no manager identity available (not running on the platform)")
 	}
-	challenge := make([]byte, 16)
+	challenge, err := freshChallenge()
+	if err != nil {
+		return "", "", "", err
+	}
+	der, quote, err := c.minter.headerIdentity(ctx, challenge)
+	if err != nil {
+		return "", "", "", fmt.Errorf("vaultmek: mint identity: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(der),
+		base64.StdEncoding.EncodeToString(challenge),
+		base64.StdEncoding.EncodeToString(quote), nil
+}
+
+// freshChallenge builds a 32-byte app-identity challenge: 8 bytes big-endian
+// unix seconds (trustworthy once the quote commits to the challenge) followed
+// by 24 random bytes.
+func freshChallenge() ([]byte, error) {
+	challenge := make([]byte, ratls.ContextLen)
 	binary.BigEndian.PutUint64(challenge[:8], uint64(time.Now().Unix()))
 	if _, err := rand.Read(challenge[8:]); err != nil {
-		return "", "", err
+		return nil, err
 	}
-	cert, err := c.minter.mint(ctx, challenge, nil)
-	if err != nil {
-		return "", "", fmt.Errorf("vaultmek: mint identity: %w", err)
-	}
-	if len(cert.Certificate) == 0 {
-		return "", "", fmt.Errorf("vaultmek: minted identity has no leaf")
-	}
-	return base64.StdEncoding.EncodeToString(cert.Certificate[0]),
-		base64.StdEncoding.EncodeToString(challenge), nil
+	return challenge, nil
 }
 
 // newMgmtRefresher builds the refresher against base (scheme://host)
@@ -107,27 +116,21 @@ func newMgmtRefresher(base string, m identityMinter, hc *http.Client, onMeta fun
 	}
 	url := strings.TrimRight(base, "/") + "/api/v1/keyvaults/operated"
 	return func(ctx context.Context) (string, int64, error) {
-		// The control plane's freshness contract: the first 8 bytes of
-		// the challenge are big-endian unix seconds (trustworthy once the
-		// quote binds the challenge), the rest anti-replay randomness.
-		challenge := make([]byte, 16)
-		binary.BigEndian.PutUint64(challenge[:8], uint64(time.Now().Unix()))
-		if _, err := rand.Read(challenge[8:]); err != nil {
+		challenge, err := freshChallenge()
+		if err != nil {
 			return "", 0, err
 		}
-		cert, err := m.mint(ctx, challenge, nil)
+		der, quote, err := m.headerIdentity(ctx, challenge)
 		if err != nil {
 			return "", 0, fmt.Errorf("vaultmek: mint identity for token refresh: %w", err)
-		}
-		if len(cert.Certificate) == 0 {
-			return "", 0, fmt.Errorf("vaultmek: minted identity has no leaf")
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return "", 0, err
 		}
-		req.Header.Set("X-Privasys-App-Identity", base64.StdEncoding.EncodeToString(cert.Certificate[0]))
+		req.Header.Set("X-Privasys-App-Identity", base64.StdEncoding.EncodeToString(der))
 		req.Header.Set("X-Privasys-App-Challenge", base64.StdEncoding.EncodeToString(challenge))
+		req.Header.Set("X-Privasys-App-Evidence", base64.StdEncoding.EncodeToString(quote))
 		resp, err := hc.Do(req)
 		if err != nil {
 			return "", 0, fmt.Errorf("vaultmek: token refresh: %w", err)

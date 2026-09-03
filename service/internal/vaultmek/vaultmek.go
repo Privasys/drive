@@ -28,13 +28,13 @@ import (
 // handle to create, and the constellation addressing from the control
 // plane's data-keys/grant response.
 type Bundle struct {
-	Grant            string   `json:"grant"`
-	Handle           string   `json:"handle"`
-	Endpoints        []string `json:"endpoints"`
-	MrenclaveHex     string   `json:"mrenclave"`
-	AttServer        string   `json:"attestation_server"`
-	AttToken         string   `json:"attestation_token"`
-	Threshold        int      `json:"threshold"`
+	Grant        string   `json:"grant"`
+	Handle       string   `json:"handle"`
+	Endpoints    []string `json:"endpoints"`
+	MrenclaveHex string   `json:"mrenclave"`
+	AttServer    string   `json:"attestation_server"`
+	AttToken     string   `json:"attestation_token"`
+	Threshold    int      `json:"threshold"`
 }
 
 // Ref is what the index persists per tenant (on the sealed volume):
@@ -154,7 +154,7 @@ func (c *Client) refreshToken(ctx context.Context) (string, error) {
 	return tok, nil
 }
 
-func (c *Client) policy(mrenclaveHex, attServer, attToken string, nonce []byte) (*ratls.VerificationPolicy, error) {
+func (c *Client) policy(mrenclaveHex, attServer, attToken string) (*ratls.VerificationPolicy, error) {
 	mre, err := hex.DecodeString(mrenclaveHex)
 	if err != nil || len(mre) != 32 {
 		return nil, fmt.Errorf("vaultmek: vault mrenclave must be 32 bytes of hex")
@@ -162,16 +162,14 @@ func (c *Client) policy(mrenclaveHex, attServer, attToken string, nonce []byte) 
 	return &ratls.VerificationPolicy{
 		TEE:               ratls.TeeTypeSGX,
 		MRENCLAVE:         mre,
-		ReportData:        ratls.ReportDataChallengeResponse,
-		Nonce:             nonce,
 		QuoteVerification: &ratls.QuoteVerificationConfig{Endpoint: attServer, Token: attToken},
 	}, nil
 }
 
-// dial opens an app-identity RA-TLS connection to one vault endpoint:
-// a fresh client nonce puts the vault in bidirectional-challenge mode,
-// the manager mints a one-shot identity bound to the vault's challenge,
-// and the vault's quote is verified against the pinned MRENCLAVE.
+// dial opens an app-identity RA-TLS v2 connection to one vault endpoint:
+// the vault's evidence is requested after the handshake in challenge mode
+// and verified against the pinned MRENCLAVE, and the manager-minted
+// identity is presented with a quote bound to this connection.
 func (c *Client) dial(ctx context.Context, endpoint, mrenclaveHex, attServer, attToken string) (*vsdk.Client, error) {
 	return c.dialAs(ctx, endpoint, mrenclaveHex, attServer, attToken, "")
 }
@@ -184,17 +182,13 @@ func (c *Client) dialAs(ctx context.Context, endpoint, mrenclaveHex, attServer, 
 	if c.minter == nil {
 		return nil, fmt.Errorf("vaultmek: no manager identity available (not running on the platform)")
 	}
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	pol, err := c.policy(mrenclaveHex, attServer, attToken, nonce)
+	pol, err := c.policy(mrenclaveHex, attServer, attToken)
 	if err != nil {
 		return nil, err
 	}
 	opts := vsdk.DialOptions{
-		Challenge:            nonce,
 		GetClientCertificate: c.minter.GetClientCertificate(),
+		ClientEvidence:       c.minter.ClientEvidence(),
 		VaultPolicy:          pol,
 	}
 	if bearer != "" {

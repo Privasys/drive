@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -17,21 +16,21 @@ import (
 	"time"
 )
 
-// fakeMinter returns a self-signed leaf; it records the challenge it
-// was asked to bind.
+// fakeMinter returns a self-signed leaf and a placeholder quote; it records
+// the challenge it was asked to bind.
 type fakeMinter struct {
 	challenge []byte
 	fail      bool
 }
 
-func (f *fakeMinter) mint(_ context.Context, challenge, _ []byte) (*tls.Certificate, error) {
+func (f *fakeMinter) headerIdentity(_ context.Context, challenge []byte) ([]byte, []byte, error) {
 	if f.fail {
-		return nil, context.DeadlineExceeded
+		return nil, nil, context.DeadlineExceeded
 	}
 	f.challenge = append([]byte(nil), challenge...)
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
@@ -41,9 +40,9 @@ func (f *fakeMinter) mint(_ context.Context, challenge, _ []byte) (*tls.Certific
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
+	return der, []byte("fake-quote"), nil
 }
 
 // TestMgmtRefresher_FetchesToken checks the refresher presents the

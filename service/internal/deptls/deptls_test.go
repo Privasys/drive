@@ -10,7 +10,7 @@ import (
 func TestParseDependencySet(t *testing.T) {
 	good := `{"entries":[{"app_id":"a8eb1c97-38b5-4ba4-bf32-e5f922217f71",
 		"measurements":[{"tdx":{"mrtd":"aa","rtmr1":"bb","rtmr2":"cc"}}],
-		"required_oids":[{"OID":"1.3.6.1.4.1.65230.3.2","ExpectedValue":"c2hh"}]}]}`
+		"required_oids":[{"OID":"1.3.6.1.4.1.65230.4.2","ExpectedValue":"c2hh"}]}]}`
 	set, err := ParseDependencySet(good)
 	if err != nil {
 		t.Fatal(err)

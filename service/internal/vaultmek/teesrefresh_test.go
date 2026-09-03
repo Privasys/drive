@@ -13,7 +13,7 @@ func grantJWT(t *testing.T, payload string) string {
 }
 
 func TestTeesFromGrant(t *testing.T) {
-	payload := `{"scope":"apps.privasys.org/x","policy":{"principals":{"owner":{"Oidc":{"issuer":"https://privasys.id","sub":"u1"}},"tees":[{"Tee":{"name":"app:drive / TDX","measurements":[{"Tdx":{"mrtd":"aa","rtmr1":"bb","rtmr2":"cc"}}],"required_oids":[{"oid":"1.3.6.1.4.1.65230.3.2","value":"dd"}]}}]}}}`
+	payload := `{"scope":"apps.privasys.org/x","policy":{"principals":{"owner":{"Oidc":{"issuer":"https://privasys.id","sub":"u1"}},"tees":[{"Tee":{"name":"app:drive / TDX","measurements":[{"Tdx":{"mrtd":"aa","rtmr1":"bb","rtmr2":"cc"}}],"required_oids":[{"oid":"1.3.6.1.4.1.65230.4.2","value":"dd"}]}}]}}}`
 	tees, err := TeesFromGrant(grantJWT(t, payload))
 	if err != nil {
 		t.Fatalf("TeesFromGrant: %v", err)

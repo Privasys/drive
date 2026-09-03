@@ -19,9 +19,10 @@ import (
 	"time"
 )
 
-// IdentityHeaders supplies fresh attested app-identity headers
-// (base64 leaf DER + base64 challenge) for one control-plane call.
-type IdentityHeaders func(ctx context.Context) (identityB64, challengeB64 string, err error)
+// IdentityHeaders supplies fresh attested app-identity headers (base64 leaf
+// DER, base64 challenge, base64 quote proving the leaf for that challenge)
+// for one control-plane call.
+type IdentityHeaders func(ctx context.Context) (identityB64, challengeB64, evidenceB64 string, err error)
 
 // Client posts notifications to the control plane.
 type Client struct {
@@ -47,7 +48,7 @@ func New(baseURL string, headers IdentityHeaders) *Client {
 // behind sub. Payload values must be JSON-serialisable; the IdP seals
 // the whole object to the wallet's registered key.
 func (c *Client) Notify(ctx context.Context, sub, typ string, payload map[string]any) error {
-	idB64, chB64, err := c.Headers(ctx)
+	idB64, chB64, evB64, err := c.Headers(ctx)
 	if err != nil {
 		return fmt.Errorf("notify: identity: %w", err)
 	}
@@ -63,6 +64,7 @@ func (c *Client) Notify(ctx context.Context, sub, typ string, payload map[string
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Privasys-App-Identity", idB64)
 	req.Header.Set("X-Privasys-App-Challenge", chB64)
+	req.Header.Set("X-Privasys-App-Evidence", evB64)
 	resp, err := c.HC.Do(req)
 	if err != nil {
 		return fmt.Errorf("notify: %w", err)

@@ -11,40 +11,31 @@ package deptls
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	ratls "enclave-os-mini/clients/go/ratls"
 )
 
-// egressClientCert returns the GetClientCertificate callback that presents
-// this container's attested client cert on the RA-TLS dial, so a callee
-// running ingress mutual RA-TLS can verify WHO is calling (app-id +
-// measurement) instead of trusting a bearer token. The manager mints the
-// cert per connection, bound to the callee-provided channel binder. Returns
-// nil when the manager identity is unavailable (off-platform, tests, or a
-// non-ratls build) — the dial then stays server-auth only, which a callee
-// that does NOT require a client cert still accepts. Never fatal: a callee
-// that DOES require one will reject the certless handshake, which is the
-// correct fail-closed behaviour.
-func egressClientCert() func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+// egressIdentity returns this container's manager-minted RA-TLS v2 client
+// identity, presented on the dependency dial so a callee running ingress
+// mutual RA-TLS can verify WHO is calling (app id + measurement) instead of
+// trusting a bearer token. The identity carries no evidence; the manager
+// quotes it per connection when the callee requires client evidence. Nil
+// off platform (no manager to mint from), which leaves the dial server-auth
+// only: a callee that does NOT require a client identity still accepts it,
+// and one that DOES rejects the handshake, the correct fail-closed outcome.
+func egressIdentity() *ratls.EgressIdentity {
 	mgrURL := os.Getenv("PRIVASYS_MANAGER_URL")
 	if mgrURL == "" {
 		return nil
 	}
-	_, getCert, err := ratls.EgressClientCert(mgrURL, os.Getenv("PRIVASYS_CONTAINER_TOKEN"))
-	if err != nil {
-		log.Printf("deptls: egress client identity unavailable, dialling server-auth only: %v", err)
-		return nil
-	}
-	return getCert
+	return ratls.NewEgressIdentity(mgrURL, os.Getenv("PRIVASYS_CONTAINER_TOKEN"))
 }
 
 // CredentialSource supplies the attestation-server endpoint and a
@@ -84,93 +75,59 @@ func ParseDependencySet(raw string) (ratls.DependencySet, error) {
 // allowDebugImages permits dev-profile enclave images and must stay
 // false in production.
 func NewHTTPClient(set ratls.DependencySet, creds CredentialSource, allowDebugImages bool) *http.Client {
-	// Built once and reused across connections: the callback mints a fresh
-	// per-connection cert bound to each handshake's channel binder. Nil off
-	// platform (server-auth-only dial).
-	getClientCert := egressClientCert()
-	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, _, err := net.SplitHostPort(addr)
+	// Built once and reused across connections; nil off platform
+	// (server-auth-only dial).
+	id := egressIdentity()
+	dial := func(ctx context.Context, _, addr string) (net.Conn, error) {
+		host, portStr, err := net.SplitHostPort(addr)
 		if err != nil {
-			host = addr
+			host, portStr = addr, "443"
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, fmt.Errorf("deptls: port %q: %w", portStr, err)
 		}
 		server, token, err := creds(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("deptls: attestation credentials: %w", err)
 		}
-		nd := &net.Dialer{Timeout: 15 * time.Second}
-		raw, err := nd.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		conf := &tls.Config{
+		// Challenge mode (the default): the peer's evidence is requested after
+		// the handshake and bound to this connection's exporter value, so a
+		// replayed quote cannot pass. Connect advertises the RA-TLS ALPN marker
+		// that routes the gateway onto the splice path (pure L4 to the enclave)
+		// and http/1.1 for the transport below.
+		opts := &ratls.Options{
 			ServerName: host,
-			// RA-TLS certificates are self-signed by design; trust is
-			// established by the quote check below, never by web PKI.
-			InsecureSkipVerify: true,
-			// The marker routes the gateway onto the splice path (pure
-			// L4 to the enclave); http/1.1 lets the enclave's TLS
-			// server negotiate a real protocol. No h2: the transport
-			// below speaks HTTP/1.1.
-			NextProtos: []string{ratls.RATLSALPNProto, "http/1.1"},
-			// Mutual leg: present our attested client cert when the callee
-			// requests one (ingress mutual RA-TLS). Nil off platform, which
-			// leaves the dial server-auth only.
-			GetClientCertificate: getClientCert,
+			Timeout:    15 * time.Second,
 		}
-
-		// Challenge mode. A fresh nonce per connection makes the peer bind its
-		// quote to THIS handshake, so a replayed certificate cannot pass. It is
-		// also what causes BOTH ends to derive a channel binder: without the
-		// challenge the callee derives none, our egress certificate cannot be
-		// bound to the session, and a callee running ingress mutual RA-TLS
-		// rejects us outright ("missing or undecodable channel binder").
-		nonce := make([]byte, 32)
-		if _, err := rand.Read(nonce); err != nil {
-			raw.Close()
-			return nil, fmt.Errorf("deptls: nonce: %w", err)
+		if id != nil {
+			// Mutual leg: present our manager-minted identity, quoted for this
+			// connection when the callee requires it (ingress mutual RA-TLS).
+			opts.GetClientCertificate = id.GetClientCertificate
+			opts.ClientEvidence = id.ClientEvidence
 		}
-		if err := ratls.SetClientHelloChallenge(conf, nonce); err != nil {
-			raw.Close()
+		cli, err := ratls.Connect(host, port, opts)
+		if err != nil {
 			return nil, fmt.Errorf("deptls: %w", err)
 		}
-
-		tc := tls.Client(raw, conf)
-		if err := tc.HandshakeContext(ctx); err != nil {
-			raw.Close()
-			return nil, err
-		}
-
-		// Verify AFTER the handshake, not in VerifyPeerCertificate: the
-		// channel binder only exists once the key schedule is complete, and
-		// challenge-mode report_data folds it. No application data has been
-		// written yet, and any failure closes the connection here, so nothing
-		// is ever sent to an unverified peer.
-		st := tc.ConnectionState()
-		if len(st.PeerCertificates) == 0 {
-			tc.Close()
-			return nil, errors.New("deptls: peer sent no certificate")
-		}
-		binder := ratls.ChannelBinder(tc)
-		if len(binder) == 0 {
-			tc.Close()
-			return nil, errors.New("deptls: no channel binder derived (peer did not answer the RA-TLS challenge)")
-		}
-		info, err := ratls.VerifyRaTlsCertBound(st.PeerCertificates[0], &ratls.VerificationPolicy{
+		// Verify before the connection carries any application data: any
+		// failure closes it here, so nothing is ever sent to an unverified
+		// peer. Web PKI is intentionally replaced (the peer's authority IS its
+		// quote); the Privasys intermediate signs the leaf.
+		info, err := cli.VerifyCertificate(&ratls.VerificationPolicy{
 			TEE:               ratls.TeeTypeTDX,
-			ReportData:        ratls.ReportDataChallengeResponse,
-			Nonce:             nonce,
 			QuoteVerification: &ratls.QuoteVerificationConfig{Endpoint: server, Token: token},
 			AllowDebugImages:  allowDebugImages,
-		}, binder)
+		})
 		if err != nil {
-			tc.Close()
+			cli.Close()
 			return nil, fmt.Errorf("deptls: peer attestation failed: %w", err)
 		}
 		if err := matchPinned(info, set); err != nil {
-			tc.Close()
+			cli.Close()
 			return nil, err
 		}
-		return tc, nil
+		return cli.Conn(), nil
 	}
 	return &http.Client{
 		Transport: &http.Transport{
@@ -183,9 +140,9 @@ func NewHTTPClient(set ratls.DependencySet, creds CredentialSource, allowDebugIm
 }
 
 // matchPinned enforces the pin against a verified peer certificate.
-// A peer that advertises the management app-id OID goes through the
-// ordinary top-level gate (entry selected by the peer's app id). A
-// standing workload certificate carries only the 3.1-3.4 workload OIDs,
+// A peer that advertises the app-id OID (4.1) goes through the ordinary
+// top-level gate (entry selected by the peer's app id). A standing
+// workload certificate without an app id carries only the other workload OIDs,
 // so with a single pinned entry the entry is selected by construction —
 // this client dials exactly one dependency — and matched in full
 // (measurements + required OIDs). Multiple entries without a peer
