@@ -6,8 +6,8 @@
 # enclave-vaults-client) are cloned + pinned, so the image builds from
 # this repo alone (build context = service/). Bump the ARGs when the
 # siblings move (they must point at RA-TLS v2 commits).
-ARG RA_TLS_CLIENTS_REF=7d5418ef675141c2380ac01e45a65e7788b8ba7e
-ARG ENCLAVE_VAULTS_CLIENT_REF=7cfea6e33ff809d0a13d0303726b79329ea1ae60
+ARG RA_TLS_CLIENTS_REF=c6c63216dc5a0915569826e3ba2c1efdf44de6b0
+ARG ENCLAVE_VAULTS_CLIENT_REF=23a24d9016fb81def9d755acf21d03836c700274
 
 FROM golang:1.26-alpine AS builder
 ARG RA_TLS_CLIENTS_REF
