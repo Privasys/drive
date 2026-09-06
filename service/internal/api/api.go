@@ -414,6 +414,9 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}/sections/{sectionID}", s.auth(s.handleReadSection))
 	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/acl", s.auth(s.handleSetNodeACL))
 	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/permissions", s.auth(s.handleNodePermissions))
+	// Wallet-facing capability endpoint: the ownership boundary is derived
+	// from the authenticated user, so this route carries no tenant.
+	mux.Handle("POST /v1/capabilities", s.auth(s.handleCreateCapability))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/grants/{grantID}", s.auth(s.handleRevokeGrant))
 	// Share links: owner mints/lists on a node (revoke reuses the grant
