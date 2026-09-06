@@ -1007,7 +1007,7 @@ func TestAppGrantScopeAndSubtree(t *testing.T) {
 	}
 	pk := base64.RawStdEncoding.EncodeToString(pub)
 	resp, body := doJSON(t, "POST", ts.URL+"/v1/tenants/"+tenant.ID+"/nodes/"+folder.ID+"/grants", devAuth,
-		fmt.Sprintf(`{"subject":"app:deadbeef","scope":["read"],"binding_pubkey":"%s"}`, pk))
+		fmt.Sprintf(`{"subject":"app:%s","scope":["read"],"binding_pubkey":"%s"}`, testAppID, pk))
 	if resp.StatusCode != 201 {
 		t.Fatalf("create grant: %d %s", resp.StatusCode, body)
 	}
@@ -1082,6 +1082,98 @@ func TestAppGrantScopeAndSubtree(t *testing.T) {
 	resp, _ = doJSON(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/files/"+inFolder, "AppGrant "+badTok, "")
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("forged appgrant: %d", resp.StatusCode)
+	}
+}
+
+// testAppID is a syntactically valid app id (OID 3.6 hex) for grant fixtures.
+const testAppID = "0123456789abcdef0123456789abcdef"
+
+// TestAppGrantAttestedCallerMustMatchSubject proves the belt on top of the
+// key binding: a caller that arrives with an enclave-os-verified peer
+// identity must be the app the grant was approved for. Without peer
+// headers the key-only check stands (unattested callers keep working); an
+// app-id or code-hash subject matches its own header; any other attested
+// app is refused even though it holds the right key; and a malformed
+// subject is refused at creation rather than admitted-but-unmatchable.
+func TestAppGrantAttestedCallerMustMatchSubject(t *testing.T) {
+	ts := newFullServer(t, nil)
+
+	_, body := doJSON(t, "POST", ts.URL+"/v1/tenants", devAuth, `{"kind":"user","name":"a"}`)
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	_, body = doJSON(t, "POST", ts.URL+"/v1/tenants/"+tenant.ID+"/folders", devAuth, `{"name":"agent"}`)
+	var folder struct{ ID string }
+	_ = json.Unmarshal(body, &folder)
+
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	pk := base64.RawStdEncoding.EncodeToString(pub)
+	mint := func(subject string) (grantID, auth string) {
+		resp, body := doJSON(t, "POST", ts.URL+"/v1/tenants/"+tenant.ID+"/nodes/"+folder.ID+"/grants", devAuth,
+			fmt.Sprintf(`{"subject":"%s","scope":["read"],"binding_pubkey":"%s"}`, subject, pk))
+		if resp.StatusCode != 201 {
+			t.Fatalf("create grant %s: %d %s", subject, resp.StatusCode, body)
+		}
+		var g struct{ ID string }
+		_ = json.Unmarshal(body, &g)
+		tok, err := grants.MintToken(priv, grants.Envelope{
+			Iss: "drive.privasys.org", Aud: "privasys-drive",
+			Sub: tenant.ID, Node: folder.ID, Scope: []grants.Scope{grants.ScopeRead},
+			JTI: g.ID, Iat: time.Now().Unix(), Exp: time.Now().Add(5 * time.Minute).Unix(),
+			PK: pk,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g.ID, "AppGrant " + tok
+	}
+	list := func(auth string, peer map[string]string) int {
+		req, _ := http.NewRequest("POST", ts.URL+"/tools/list_folder",
+			strings.NewReader(fmt.Sprintf(`{"tenant_id":"%s","folder_id":"%s"}`, tenant.ID, folder.ID)))
+		req.Header.Set("Authorization", auth)
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range peer {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Malformed subjects are refused at creation (the case, dashes and prefix
+	// are normalised; the length and hex-ness are not negotiable).
+	resp, _ := doJSON(t, "POST", ts.URL+"/v1/tenants/"+tenant.ID+"/nodes/"+folder.ID+"/grants", devAuth,
+		fmt.Sprintf(`{"subject":"app:deadbeef","scope":["read"],"binding_pubkey":"%s"}`, pk))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed app subject accepted: %d", resp.StatusCode)
+	}
+
+	// An app-id subject, created in dashed uppercase, is stored canonical.
+	dashed := "app:01234567-89AB-CDEF-0123-456789ABCDEF"
+	_, byID := mint(dashed)
+	if got := list(byID, nil); got != 200 {
+		t.Fatalf("unattested caller with valid grant: %d", got)
+	}
+	if got := list(byID, map[string]string{peerVerifiedHeader: "true", peerAppIDHeader: testAppID}); got != 200 {
+		t.Fatalf("attested caller matching app id: %d", got)
+	}
+	if got := list(byID, map[string]string{peerVerifiedHeader: "true", peerAppIDHeader: "01234567-89ab-cdef-0123-456789abcdef"}); got != 200 {
+		t.Fatalf("attested caller with dashed app id header: %d", got)
+	}
+	if got := list(byID, map[string]string{peerVerifiedHeader: "true", peerAppIDHeader: "ffffffffffffffffffffffffffffffff"}); got != http.StatusUnauthorized {
+		t.Fatalf("attested caller from ANOTHER app holding the right key must be refused: %d", got)
+	}
+
+	// A code-hash subject matches the peer image digest header instead.
+	digest := strings.Repeat("ab", 32)
+	_, byDigest := mint("app:" + digest)
+	if got := list(byDigest, map[string]string{peerVerifiedHeader: "true", peerImageDigestHeader: digest}); got != 200 {
+		t.Fatalf("attested caller matching code hash: %d", got)
+	}
+	if got := list(byDigest, map[string]string{peerVerifiedHeader: "true", peerAppIDHeader: testAppID}); got != http.StatusUnauthorized {
+		t.Fatalf("code-hash grant presented by an attested caller with a different digest: %d", got)
 	}
 }
 

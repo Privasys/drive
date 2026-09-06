@@ -27,11 +27,38 @@ import (
 
 // Subject prefixes used in the `subject` column.
 const (
-	SubjectUser      = "subject:"  // followed by OIDC sub
-	SubjectLink      = "link"      // sentinel — no further data
-	SubjectApp       = "app:"      // followed by hex-encoded MRTD measurement
+	SubjectUser = "subject:" // followed by OIDC sub
+	SubjectLink = "link"     // sentinel — no further data
+	// SubjectApp is followed by the approved workload's identity in lowercase
+	// hex: its app id (OID 3.6, 32 chars) by preference, or its code hash
+	// (OID 3.2, 64 chars). Rows written before this convention may carry a
+	// 96-char MRTD. The subject is provenance for display and audit; the
+	// credential is BindingPubkey. It is additionally enforced against the
+	// enclave-os-verified peer identity when a caller dials with an attested
+	// client cert — an MRTD-form subject can never satisfy that check, since
+	// the peer headers carry the app id and code hash, not the host MRTD.
+	SubjectApp       = "app:"
 	SubjectAssistant = "assistant" // sentinel — the Drive AI Tool (§8.7 AI scope)
 )
+
+// NormaliseAppSubject returns the canonical identity payload of an app
+// subject (lowercase hex, dashes stripped, with or without the "app:"
+// prefix on input): 32 hex chars for an app id, 64 for a code hash, 96 for
+// a legacy MRTD. It returns "" for anything else, so a malformed subject is
+// refused at creation rather than silently never matching a caller.
+func NormaliseAppSubject(subject string) string {
+	s := strings.TrimPrefix(subject, SubjectApp)
+	s = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), "-", "")
+	switch len(s) {
+	case 32, 64, 96:
+	default:
+		return ""
+	}
+	if _, err := hex.DecodeString(s); err != nil {
+		return ""
+	}
+	return s
+}
 
 // Scope flags. Stored as a comma-joined string for portability.
 type Scope string

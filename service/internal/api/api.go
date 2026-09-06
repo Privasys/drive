@@ -469,7 +469,7 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 			next(w, r, &Principal{Sub: id.Sub, Via: viaBearer, ID: id,
 				Bearer: strings.TrimPrefix(h, "Bearer ")})
 		case strings.HasPrefix(h, "AppGrant "):
-			p, err := s.verifyAppGrant(r.Context(), strings.TrimSpace(strings.TrimPrefix(h, "AppGrant ")))
+			p, err := s.verifyAppGrant(r, strings.TrimSpace(strings.TrimPrefix(h, "AppGrant ")))
 			if err != nil {
 				http.Error(w, "invalid app grant: "+err.Error(), http.StatusUnauthorized)
 				return
@@ -509,7 +509,20 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 // the embedded key), envelope validity window and audience, then the
 // persisted grant row — active, same tenant/node, and the signing key
 // matches the one the grant was bound to at creation.
-func (s *Server) verifyAppGrant(ctx context.Context, tok string) (*Principal, error) {
+//
+// The key is the credential. A grant is a holder-of-key capability whose
+// binding the data owner fixed at approval time, after verifying the
+// recipient enclave: the wallet is the attestation-verification point and
+// Drive the enforcement point, which is why the subject string alone is
+// never what admits a caller. When the caller ALSO arrives over an attested
+// client cert, enclave-os republishes its verified identity as
+// X-Privasys-Peer-* (stripped from every unverified request, so unforgeable
+// inside the enclave) and the grant's subject must name that workload — a
+// key that leaked to another app, or a grant approved for one app and
+// presented by another, is refused. An unattested caller keeps the
+// key-only check; the attested check is a belt on top of the braces.
+func (s *Server) verifyAppGrant(r *http.Request, tok string) (*Principal, error) {
+	ctx := r.Context()
 	env, err := grants.ParseToken(tok)
 	if err != nil {
 		return nil, err
@@ -544,6 +557,14 @@ func (s *Server) verifyAppGrant(ctx context.Context, tok string) (*Principal, er
 	presented, err := decodePubkey(env.PK)
 	if err != nil || !bytes.Equal(bound, presented) {
 		return nil, errors.New("signing key does not match the grant binding")
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get(peerVerifiedHeader)), "true") {
+		want := grants.NormaliseAppSubject(g.Subject)
+		appID := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(r.Header.Get(peerAppIDHeader))), "-", "")
+		digest := strings.ToLower(strings.TrimSpace(r.Header.Get(peerImageDigestHeader)))
+		if want == "" || (want != appID && want != digest) {
+			return nil, errors.New("attested caller is not the app this grant was approved for")
+		}
 	}
 	return &Principal{Sub: g.Subject, Via: viaAppGrant, Grant: g, Env: env}, nil
 }
@@ -1145,9 +1166,21 @@ func (s *Server) handleCreateGrant(w http.ResponseWriter, r *http.Request, p *Pr
 		http.Error(w, "subject required", http.StatusBadRequest)
 		return
 	}
-	if strings.HasPrefix(req.Subject, grants.SubjectApp) && req.BindingPubkey == "" {
-		http.Error(w, "app grants require binding_pubkey", http.StatusBadRequest)
-		return
+	if strings.HasPrefix(req.Subject, grants.SubjectApp) {
+		if req.BindingPubkey == "" {
+			http.Error(w, "app grants require binding_pubkey", http.StatusBadRequest)
+			return
+		}
+		// The subject names the approved workload and is matched against
+		// the attested peer identity on the data plane, so it must be a form
+		// enclave-os republishes: the app id (OID 3.6) by preference, or a
+		// code hash (OID 3.2). Normalised here so that match is exact.
+		id := grants.NormaliseAppSubject(req.Subject)
+		if id == "" {
+			http.Error(w, "app grant subject must be app:<app id hex> (a 64-hex code hash is also accepted)", http.StatusBadRequest)
+			return
+		}
+		req.Subject = grants.SubjectApp + id
 	}
 	g := &grants.Grant{
 		TenantID:      tenantID,
