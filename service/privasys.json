@@ -885,6 +885,40 @@
             }
         },
         {
+            "name": "grep",
+            "title": "Search file contents (grep)",
+            "endpoint": "/tools/grep",
+            "description": "Search the text of every file under a folder for a regular expression and return matching lines with their path (relative to the root) and line number, like ripgrep. Patterns are RE2 syntax: no look-around, no back-references (ripgrep's default engine is a superset, so anything RE2 accepts behaves the same). Runs inside the enclave over decrypted streams; nothing is written to disk. Refuses with SEARCH_RAW_OUTPUT_OVERFLOW when the search would scan more than 256 MiB in one call: narrow it with include or a smaller root. Follow up with stat_path / read_file to open a hit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "The tenant whose drive to search." },
+                    "root": { "type": "string", "description": "Folder node id to search under (the granted folder). Empty for the drive root." },
+                    "pattern": { "type": "string", "description": "RE2 regular expression." },
+                    "include": { "type": "string", "description": "Optional glob limiting which files are searched, e.g. *.go or src/**/*.ts (a pattern without / matches the file name at any depth)." },
+                    "max_matches": { "type": "integer", "description": "Stop after this many matching lines (default 250).", "default": 250 },
+                    "max_line_bytes": { "type": "integer", "description": "Match on at most this many bytes of a line and truncate the reported text (default 2000, max 65536).", "default": 2000 }
+                },
+                "required": ["tenant_id", "pattern"]
+            }
+        },
+        {
+            "name": "glob",
+            "title": "Find files by name pattern (glob)",
+            "endpoint": "/tools/glob",
+            "description": "List file paths under a folder that match a glob, newest first: * and ? within a segment, ** for any number of folders, e.g. **/*.md or src/**/test_*.py. A pattern without / matches the file name at any depth. Paths are relative to the root and can be opened with stat_path.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tenant_id": { "type": "string", "description": "The tenant whose drive to search." },
+                    "root": { "type": "string", "description": "Folder node id to search under. Empty for the drive root." },
+                    "pattern": { "type": "string", "description": "Glob pattern." },
+                    "max_results": { "type": "integer", "description": "Cap on returned paths (default 100).", "default": 100 }
+                },
+                "required": ["tenant_id", "pattern"]
+            }
+        },
+        {
             "name": "drain_local_objects",
             "title": "Move objects from the sealed volume to the configured bucket",
             "endpoint": "/actions/drain_local_objects",

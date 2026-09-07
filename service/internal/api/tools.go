@@ -55,6 +55,9 @@ func (s *Server) Tools() http.Handler {
 	mux.Handle("POST /tools/delete_bucket_cred", s.auth(s.toolDeleteBucketCred))
 	mux.Handle("POST /tools/provision_org_mek", s.auth(s.toolProvisionOrgMEK))
 	mux.Handle("POST /tools/approve_org_mek_measurement", s.auth(s.toolApproveOrgMEKMeasurement))
+	// D6: search over RPC for tool-grade grep/glob under a granted root.
+	mux.Handle("POST /tools/grep", s.auth(s.toolGrep))
+	mux.Handle("POST /tools/glob", s.auth(s.toolGlob))
 	mux.Handle("POST /tools/request_recovery", s.auth(s.toolRequestRecovery))
 	mux.Handle("POST /tools/approve_recovery", s.auth(s.toolApproveRecovery))
 	mux.Handle("POST /tools/recovery_status", s.auth(s.toolRecoveryStatus))

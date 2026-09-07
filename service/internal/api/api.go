@@ -91,6 +91,10 @@ type Server struct {
 	drain     *drainStatus
 	drainOnce sync.Once
 
+	// searchSem bounds concurrent grep searches per instance (D6).
+	searchSem     chan struct{}
+	searchSemOnce sync.Once
+
 	// nodeWriteMu serialises tier-B content writes per node (key
 	// tenant+node → *sync.Mutex). A file's manifest lives at a fixed key,
 	// so the rev check, the manifest write and the row update must be one
@@ -1006,9 +1010,14 @@ func (s *Server) recordAccess(p *Principal, tenantID, nodeID, ctxKind string, by
 		return
 	}
 	event := "view"
-	if ctxKind == "download" {
+	switch {
+	case ctxKind == "download":
 		event = "download"
-	} else if !p.IsUser() {
+	case ctxKind == "search":
+		// D8: bytes carries bytes_scanned — compute Drive did for the
+		// caller — attributed to the grant subject or user.
+		event = "search"
+	case !p.IsUser():
 		event = "tool"
 	}
 	s.bg.Add(1)
