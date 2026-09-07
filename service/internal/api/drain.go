@@ -65,7 +65,10 @@ func (s *Server) handleDrainLocalObjects(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusAccepted, s.drainSnapshot())
 		return
 	}
-	*st = drainStatus{State: "running", Started: time.Now().UTC()}
+	// Reset field by field: assigning a struct literal over *st would also
+	// overwrite the mutex we are holding (fatal "unlock of unlocked mutex").
+	st.State, st.Copied, st.Skipped, st.Failed, st.Bytes = "running", 0, 0, 0, 0
+	st.Message, st.Started, st.Finished = "", time.Now().UTC(), time.Time{}
 	st.mu.Unlock()
 
 	s.bg.Add(1)

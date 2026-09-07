@@ -200,6 +200,30 @@ func TestDrainActionRoutesAreTopLevel(t *testing.T) {
 	if st != http.StatusConflict {
 		t.Fatalf("drain on a local backend: want 409, got %d %s", st, b)
 	}
+
+	// With a bucket configured the action starts the copy and reports it.
+	// (The handler once reset the status by assigning a struct literal over
+	// the held mutex, which crashed the process on the first real drain.)
+	var srv2 *Server
+	ts2 := newFullServer(t, func(s *Server) { srv2 = s })
+	srv2.objectMu.Lock()
+	srv2.Backend = notLocal{srv2.Backend}
+	srv2.objectMu.Unlock()
+	st, b, _ = rawReq(t, "POST", ts2.URL+"/actions/drain_local_objects", devAuth, "{}", nil)
+	if st != http.StatusAccepted || !strings.Contains(string(b), `"state":"running"`) {
+		t.Fatalf("drain on a bucket: want 202 running, got %d %s", st, b)
+	}
+	srv2.bg.Wait()
+	st, b, _ = rawReq(t, "GET", ts2.URL+"/actions/drain_local_objects/status", devAuth, "", nil)
+	if st != 200 || !strings.Contains(string(b), `"state":"done"`) {
+		t.Fatalf("drain status after run: %d %s", st, b)
+	}
+	// A second run is allowed once the first finished (the reset path again).
+	st, _, _ = rawReq(t, "POST", ts2.URL+"/actions/drain_local_objects", devAuth, "{}", nil)
+	if st != http.StatusAccepted {
+		t.Fatalf("second drain: want 202, got %d", st)
+	}
+	srv2.bg.Wait()
 }
 
 // Point 1: the drain copies every local object into the target, skips what
@@ -235,3 +259,7 @@ func TestDrainCopiesLocalObjects(t *testing.T) {
 		}
 	}
 }
+
+// notLocal hides the concrete *LocalBackend so the drain handler treats the
+// instance store as a bucket.
+type notLocal struct{ objectstore.Backend }
