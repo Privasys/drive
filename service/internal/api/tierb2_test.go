@@ -186,6 +186,22 @@ func TestD5SubtreeChangesAndLongPoll(t *testing.T) {
 	}
 }
 
+// The drain is a manifest ACTION: it must be reachable at the top-level
+// /actions/... paths through the full server, not only inside /v1. On an
+// instance whose backend is still local the action is refused (409), and
+// the status tool answers idle.
+func TestDrainActionRoutesAreTopLevel(t *testing.T) {
+	ts := newFullServer(t, nil)
+	st, b, _ := rawReq(t, "GET", ts.URL+"/actions/drain_local_objects/status", devAuth, "", nil)
+	if st != 200 || !strings.Contains(string(b), `"state":"idle"`) {
+		t.Fatalf("status route: %d %s", st, b)
+	}
+	st, b, _ = rawReq(t, "POST", ts.URL+"/actions/drain_local_objects", devAuth, "{}", nil)
+	if st != http.StatusConflict {
+		t.Fatalf("drain on a local backend: want 409, got %d %s", st, b)
+	}
+}
+
 // Point 1: the drain copies every local object into the target, skips what
 // is already there, and reports counts.
 func TestDrainCopiesLocalObjects(t *testing.T) {

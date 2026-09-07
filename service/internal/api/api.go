@@ -343,6 +343,13 @@ func (s *Server) Handler(manifestPath string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", s.Routes())
 	mux.Handle("/tools/", s.Tools())
+	// Manifest actions live at the top level (the manifest contract's
+	// /actions/<name> + /actions/<name>/status), NOT under /v1: the first
+	// cut registered them inside the /v1 sub-mux and the runtime answered
+	// 404 for the drain. Point 1 (bucket move): drain the sealed-volume
+	// object store into the configured bucket — owner action + status.
+	mux.Handle("POST /actions/drain_local_objects", s.auth(s.handleDrainLocalObjects))
+	mux.Handle("GET /actions/drain_local_objects/status", s.auth(s.handleDrainStatus))
 	// MCP shim for the confidential-AI agent (§8.7 RAG-in-enclave).
 	mux.Handle("GET /api/v1/mcp/tools", s.auth(s.handleMCPList))
 	mux.Handle("POST /api/v1/mcp/tools/{tool}", s.auth(s.handleMCPCall))
@@ -439,10 +446,6 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/path", s.auth(s.handleStatPath))
 	mux.Handle("PUT /v1/tenants/{tenantID}/path", s.auth(s.handleWritePath))
 	mux.HandleFunc("GET /v1/grants/mine", s.handleGrantsMine)
-	// Point 1 (bucket move): drain the sealed-volume object store into the
-	// configured bucket. Owner action + status, per the manifest contract.
-	mux.Handle("POST /actions/drain_local_objects", s.auth(s.handleDrainLocalObjects))
-	mux.Handle("GET /actions/drain_local_objects/status", s.auth(s.handleDrainStatus))
 
 	mux.Handle("POST /v1/capabilities", s.auth(s.handleCreateCapability))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))
