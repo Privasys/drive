@@ -141,7 +141,7 @@ func (s *Store) SwitchTenantKeys(ctx context.Context, tenantID, mekRef string, r
 
 	rows, err := tx.QueryContext(ctx, s.q(
 		`SELECT id, tenant_id, parent_id, kind, name, name_hmac, mime_hint, plain_size,
-		        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at
+		        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at, rev
 		 FROM nodes WHERE tenant_id = ?`), tenantID)
 	if err != nil {
 		return 0, err
@@ -356,29 +356,59 @@ func (s *Store) CreateNode(ctx context.Context, n *Node, actor string) error {
 // its bytes were rewritten in place (e.g. a transcript append). Records a
 // 'update' change and bumps updated_at.
 func (s *Store) UpdateNodeContent(ctx context.Context, tenantID, id string, wrappedCEK, merkleRoot []byte, manifestRef string, plainSize int64, actor string) error {
+	_, err := s.UpdateNodeContentCond(ctx, tenantID, id, wrappedCEK, merkleRoot, manifestRef, plainSize, actor, -1)
+	return err
+}
+
+// UpdateNodeContentCond replaces a file node's content pointers, bumps its
+// rev and records an 'update' change. When ifRev >= 0 the write is
+// conditional: it applies only if the node's current rev equals ifRev, else
+// it returns ErrStale (the D1 If-Match fence, so two writers cannot silently
+// clobber one file). Returns the node's new rev.
+func (s *Store) UpdateNodeContentCond(ctx context.Context, tenantID, id string, wrappedCEK, merkleRoot []byte, manifestRef string, plainSize int64, actor string, ifRev int64) (int64, error) {
+	cond := ""
+	args := []any{
+		nullableBytes(wrappedCEK), nullableBytes(merkleRoot), nullableString(manifestRef),
+		plainSize, tenantID, id,
+	}
+	if ifRev >= 0 {
+		cond = " AND rev = ?"
+		args = append(args, ifRev)
+	}
 	res, err := s.DB.ExecContext(ctx, s.q(
 		`UPDATE nodes SET wrapped_cek = ?, merkle_root = ?, manifest_ref = ?,
-		        plain_size = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE tenant_id = ? AND id = ?`),
-		nullableBytes(wrappedCEK), nullableBytes(merkleRoot), nullableString(manifestRef),
-		plainSize, tenantID, id)
+		        plain_size = ?, updated_at = CURRENT_TIMESTAMP, rev = rev + 1
+		 WHERE tenant_id = ? AND id = ?`+cond),
+		args...)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+		// Distinguish "no such node" from "rev did not match" so the caller
+		// can answer 404 vs 412.
+		if _, gerr := s.GetNode(ctx, tenantID, id); gerr != nil {
+			return 0, ErrNotFound
+		}
+		if ifRev >= 0 {
+			return 0, ErrStale
+		}
+		return 0, ErrNotFound
 	}
 	_, _ = s.DB.ExecContext(ctx, s.q(
 		`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'update', ?)`),
 		tenantID, id, actor)
-	return nil
+	n, gerr := s.GetNode(ctx, tenantID, id)
+	if gerr != nil {
+		return 0, gerr
+	}
+	return n.Rev, nil
 }
 
 // GetNode returns the node with the given id within a tenant.
 func (s *Store) GetNode(ctx context.Context, tenantID, id string) (*Node, error) {
 	row := s.DB.QueryRowContext(ctx, s.q(
 		`SELECT id, tenant_id, parent_id, kind, name, name_hmac, mime_hint, plain_size,
-		        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at
+		        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at, rev
 		 FROM nodes WHERE tenant_id = ? AND id = ?`),
 		tenantID, id)
 	return scanNode(row)
@@ -394,13 +424,13 @@ func (s *Store) ListChildren(ctx context.Context, tenantID, parentID string) ([]
 	if parentID == "" {
 		rows, err = s.DB.QueryContext(ctx, s.q(
 			`SELECT id, tenant_id, parent_id, kind, name, name_hmac, mime_hint, plain_size,
-			        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at
+			        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at, rev
 			 FROM nodes WHERE tenant_id = ? AND parent_id IS NULL ORDER BY kind, name`),
 			tenantID)
 	} else {
 		rows, err = s.DB.QueryContext(ctx, s.q(
 			`SELECT id, tenant_id, parent_id, kind, name, name_hmac, mime_hint, plain_size,
-			        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at
+			        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at, rev
 			 FROM nodes WHERE tenant_id = ? AND parent_id = ? ORDER BY kind, name`),
 			tenantID, parentID)
 	}
@@ -503,7 +533,7 @@ func (s *Store) ListSubtreeFiles(ctx context.Context, tenantID, rootID string) (
 func (s *Store) ListTenantFiles(ctx context.Context, tenantID string) ([]*Node, error) {
 	rows, err := s.DB.QueryContext(ctx, s.q(
 		`SELECT id, tenant_id, parent_id, kind, name, name_hmac, mime_hint, plain_size,
-		        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at
+		        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at, rev
 		 FROM nodes WHERE tenant_id = ? AND kind = 'file'`), tenantID)
 	if err != nil {
 		return nil, err
@@ -816,7 +846,7 @@ func scanNode(r scanRow) (*Node, error) {
 	)
 	if err := r.Scan(&n.ID, &n.TenantID, &parent, &kind, &n.Name, &n.NameHMAC, &mimeHint,
 		&n.PlainSize, &wrappedCEK, &manifestRef, &merkleRoot, &aclOverride,
-		&n.CreatedAt, &n.UpdatedAt); err != nil {
+		&n.CreatedAt, &n.UpdatedAt, &n.Rev); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

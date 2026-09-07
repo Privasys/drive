@@ -87,6 +87,13 @@ type Server struct {
 	backendsOnce sync.Once
 	backends     *tenantBackends
 
+	// nodeWriteMu serialises tier-B content writes per node (key
+	// tenant+node → *sync.Mutex). A file's manifest lives at a fixed key,
+	// so the rev check, the manifest write and the row update must be one
+	// critical section: without it a refused (stale) writer could still
+	// overwrite the manifest that a winning writer just committed.
+	nodeWriteMu sync.Map
+
 	// objectMu guards Backend (the instance object store), which the
 	// configure flow can swap when the owner sets object_backend. objectKey
 	// dedupes rebuilds when the object config is unchanged.
@@ -416,6 +423,14 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/permissions", s.auth(s.handleNodePermissions))
 	// Wallet-facing capability endpoint: the ownership boundary is derived
 	// from the authenticated user, so this route carries no tenant.
+	// Tier B (plans/drive-as-remote-disk.md): revision-fenced content
+	// replace (D1), path addressing (D2), and grant lookup by key (D7).
+	// Range reads (D4) ride the existing download route.
+	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/content", s.auth(s.handleReplaceContent))
+	mux.Handle("GET /v1/tenants/{tenantID}/path", s.auth(s.handleStatPath))
+	mux.Handle("PUT /v1/tenants/{tenantID}/path", s.auth(s.handleWritePath))
+	mux.HandleFunc("GET /v1/grants/mine", s.handleGrantsMine)
+
 	mux.Handle("POST /v1/capabilities", s.auth(s.handleCreateCapability))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/grants/{grantID}", s.auth(s.handleRevokeGrant))
@@ -942,6 +957,13 @@ func (s *Server) quotaLimit() int64 {
 func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	fileID := r.PathValue("fileID")
+
+	// D4: a Range request decrypts only the covering chunks and answers 206.
+	if rangeHdr := r.Header.Get("Range"); rangeHdr != "" {
+		s.serveRange(w, r, p, tenantID, fileID, rangeHdr)
+		return
+	}
+
 	n, rc, status, err := s.openFile(r.Context(), p, tenantID, fileID)
 	if err != nil {
 		httpError(w, status, err)
@@ -951,6 +973,8 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request, p *P
 	if n.MimeHint != "" {
 		w.Header().Set("Content-Type", n.MimeHint)
 	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("ETag", strconv.Quote(strconv.FormatInt(n.Rev, 10)))
 	w.Header().Set("Content-Length", strconv.FormatInt(n.PlainSize, 10))
 	w.Header().Set("X-Drive-Merkle-Root", hex.EncodeToString(n.MerkleRoot))
 	start := time.Now()
@@ -1041,27 +1065,9 @@ func (s *Server) handleTenantMetrics(w http.ResponseWriter, r *http.Request, p *
 }
 
 func (s *Server) openFile(ctx context.Context, p *Principal, tenantID, fileID string) (*store.Node, io.ReadCloser, int, error) {
-	if !s.allowNode(ctx, p, tenantID, fileID, grants.ScopeRead) {
-		return nil, nil, http.StatusForbidden, errors.New("forbidden")
-	}
-	n, err := s.Store.GetNode(ctx, tenantID, fileID)
+	n, bk, dek, status, err := s.fileReadCtx(ctx, p, tenantID, fileID)
 	if err != nil {
-		return nil, nil, storeErrorStatus(err), err
-	}
-	if n.Kind != store.NodeFile {
-		return nil, nil, http.StatusBadRequest, errors.New("not a file")
-	}
-	mek, err := s.tenantMEK(ctx, tenantID)
-	if err != nil {
-		return nil, nil, http.StatusBadGateway, err
-	}
-	dek, err := crypto.DeriveDEK(mek, tenantID)
-	if err != nil {
-		return nil, nil, http.StatusInternalServerError, err
-	}
-	bk, err := s.backendFor(ctx, tenantID)
-	if err != nil {
-		return nil, nil, http.StatusBadGateway, err
+		return nil, nil, status, err
 	}
 	_, rc, err := manifest.Read(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
 	if err != nil {
@@ -1476,13 +1482,17 @@ type nodeJSON struct {
 	// RFC3339 (the Modified column).
 	CreatedBy string `json:"created_by,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
+	// Rev is the node's revision token (D1): the value to send back as
+	// If-Match on a conditional write, and a directory's version. Always
+	// present (0 is a valid rev for a freshly created node).
+	Rev int64 `json:"rev"`
 }
 
 func nodeView(n *store.Node) nodeJSON {
 	v := nodeJSON{
 		ID: n.ID, TenantID: n.TenantID, Kind: string(n.Kind),
 		Name: n.Name, MimeHint: n.MimeHint, PlainSize: n.PlainSize,
-		ManifestRef: n.ManifestRef,
+		ManifestRef: n.ManifestRef, Rev: n.Rev,
 	}
 	if !n.UpdatedAt.IsZero() {
 		v.UpdatedAt = n.UpdatedAt.UTC().Format(time.RFC3339)

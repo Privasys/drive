@@ -302,3 +302,111 @@ func Delete(
 	}
 	return backend.Delete(ctx, manifestKey(tenantID, fileID))
 }
+
+// ReadMeta opens a file's sealed manifest and returns it (plaintext size,
+// chunk size, chunk table) plus the unwrapped CEK, without streaming any
+// content. It is the cheap half of Read: a caller that only needs the size,
+// or that will fetch a byte range, avoids decrypting the whole file.
+func ReadMeta(ctx context.Context, backend objectstore.Backend, dek []byte, tenantID, fileID string, wrappedCEK []byte) (Manifest, []byte, error) {
+	cek, err := crypto.UnwrapKey(dek, wrappedCEK)
+	if err != nil {
+		return Manifest{}, nil, fmt.Errorf("manifest: unwrap CEK: %w", err)
+	}
+	rc, err := backend.GetChunk(ctx, manifestKey(tenantID, fileID))
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	defer rc.Close()
+	manBlob, err := io.ReadAll(rc)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	if len(manBlob) < crypto.NonceSize {
+		return Manifest{}, nil, errors.New("manifest: short manifest blob")
+	}
+	manBytes, err := crypto.Open(cek, manBlob[:crypto.NonceSize], manBlob[crypto.NonceSize:], manifestAAD(fileID))
+	if err != nil {
+		return Manifest{}, nil, fmt.Errorf("manifest: open manifest: %w", err)
+	}
+	var man Manifest
+	if err := json.Unmarshal(manBytes, &man); err != nil {
+		return Manifest{}, nil, err
+	}
+	if man.Version != currentVersion {
+		return Manifest{}, nil, fmt.Errorf("manifest: unsupported version %d", man.Version)
+	}
+	return man, cek, nil
+}
+
+// ReadRange streams length plaintext bytes starting at offset, decrypting only
+// the chunks that cover the range (D4). A negative or zero length means "to
+// the end". offset past the end yields an empty stream. The plaintext never
+// touches a disk; only the covering chunks are fetched and opened.
+func ReadRange(ctx context.Context, backend objectstore.Backend, dek []byte, tenantID, fileID string, wrappedCEK []byte, offset, length int64) (io.ReadCloser, int64, error) {
+	man, cek, err := ReadMeta(ctx, backend, dek, tenantID, fileID, wrappedCEK)
+	if err != nil {
+		return nil, 0, err
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= man.PlainSize {
+		return io.NopCloser(bytes.NewReader(nil)), 0, nil
+	}
+	end := man.PlainSize // exclusive
+	if length > 0 && offset+length < end {
+		end = offset + length
+	}
+	chunkPlain := int64(man.ChunkSize)
+	if chunkPlain <= 0 {
+		chunkPlain = int64(crypto.MaxChunkSize)
+	}
+	first := offset / chunkPlain
+	last := (end - 1) / chunkPlain
+	total := end - offset
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		for idx := first; idx <= last; idx++ {
+			if int(idx) >= len(man.Chunks) {
+				pw.CloseWithError(fmt.Errorf("manifest: chunk %d beyond manifest", idx))
+				return
+			}
+			c := man.Chunks[idx]
+			ct, err := readChunk(ctx, backend, tenantID, c)
+			if err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			nonce, err := hex.DecodeString(c.Nonce)
+			if err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			pt, err := crypto.Open(cek, nonce, ct, chunkAAD(fileID, c.Index))
+			if err != nil {
+				pw.CloseWithError(fmt.Errorf("manifest: open chunk %d: %w", c.Index, err))
+				return
+			}
+			lo := int64(0)
+			if idx == first {
+				lo = offset - first*chunkPlain
+			}
+			hi := int64(len(pt))
+			if idx == last {
+				if h := end - last*chunkPlain; h < hi {
+					hi = h
+				}
+			}
+			if lo < 0 || lo > int64(len(pt)) || hi < lo || hi > int64(len(pt)) {
+				pw.CloseWithError(fmt.Errorf("manifest: range slice out of bounds"))
+				return
+			}
+			if _, err := pw.Write(pt[lo:hi]); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+		}
+	}()
+	return pr, total, nil
+}

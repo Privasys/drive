@@ -77,6 +77,14 @@ type Node struct {
 	ACLOverride []byte // optional jsonb blob (raw bytes)
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// Rev is a monotonic revision token, bumped on every content or
+	// metadata change of this node, and on a folder when a direct child is
+	// added, removed or moved in or out. It is the ETag / If-Match fence
+	// for conditional writes (two enclaves cannot silently clobber one
+	// file) and the directory version a filesystem client needs. A counter,
+	// not the Merkle root: the root does not change on rename or move, and
+	// folders have none.
+	Rev int64
 }
 
 // Errors returned by Store.
@@ -85,6 +93,10 @@ var (
 	ErrConflict     = errors.New("store: conflict")
 	ErrForbidden    = errors.New("store: forbidden")
 	ErrInvalidInput = errors.New("store: invalid input")
+	// ErrStale is returned by a conditional write whose If-Match rev did not
+	// match the node's current rev (D1). The caller answers 412 with the
+	// current rev so a client can re-read and retry.
+	ErrStale = errors.New("store: stale revision")
 )
 
 // Store wraps a *sql.DB plus the per-driver dialect.
@@ -237,6 +249,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		// far of the total, so the UI can show a real bar. 0/0 until known.
 		`ALTER TABLE nodes ADD COLUMN index_chunks_done INTEGER DEFAULT 0`,
 		`ALTER TABLE nodes ADD COLUMN index_chunks_total INTEGER DEFAULT 0`,
+		// D1: monotonic per-node revision token (ETag / If-Match fence).
+		`ALTER TABLE nodes ADD COLUMN rev BIGINT NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, col); err != nil {
 			msg := strings.ToLower(err.Error())

@@ -484,3 +484,34 @@ func ParseToken(tok string) (*Envelope, error) {
 
 // PubkeyThumbprint returns hex(SHA-256(pk)) for use as a stable id.
 func PubkeyThumbprint(pk []byte) string { sum := sha256.Sum256(pk); return hex.EncodeToString(sum[:]) }
+
+// ListForBindingKey returns the active app grants bound to the given base64
+// Ed25519 public key, across all tenants (D7). An app that holds only its
+// sealed key can rediscover every folder it was granted, so it need not
+// persist a pointer to each grant. The caller authenticates by proving that
+// key and its attested app id, the same identity the data plane checks.
+func (r *Repo) ListForBindingKey(ctx context.Context, bindingPubkey string) ([]*Grant, error) {
+	rows, err := r.DB.QueryContext(ctx, r.q(
+		`SELECT id, tenant_id, node_id, subject, scope, created_by, created_at,
+		        expires_at, revoked_at, binding_pubkey, meta
+		 FROM grants
+		 WHERE binding_pubkey = ? AND subject LIKE 'app:%' AND revoked_at IS NULL
+		 ORDER BY created_at DESC`),
+		bindingPubkey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	now := r.NowFn()
+	var out []*Grant
+	for rows.Next() {
+		g, serr := scanGrant(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		if g.IsActive(now) {
+			out = append(out, g)
+		}
+	}
+	return out, rows.Err()
+}
