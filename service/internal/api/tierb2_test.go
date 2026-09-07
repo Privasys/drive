@@ -218,6 +218,11 @@ func TestDrainActionRoutesAreTopLevel(t *testing.T) {
 	if st != 200 || !strings.Contains(string(b), `"state":"done"`) {
 		t.Fatalf("drain status after run: %d %s", st, b)
 	}
+	// The action runner polls status tools with POST, like any tool.
+	st, b, _ = rawReq(t, "POST", ts2.URL+"/actions/drain_local_objects/status", devAuth, "{}", nil)
+	if st != 200 || !strings.Contains(string(b), `"state":"done"`) {
+		t.Fatalf("drain status via POST: %d %s", st, b)
+	}
 	// A second run is allowed once the first finished (the reset path again).
 	st, _, _ = rawReq(t, "POST", ts2.URL+"/actions/drain_local_objects", devAuth, "{}", nil)
 	if st != http.StatusAccepted {
