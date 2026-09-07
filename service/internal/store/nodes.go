@@ -345,10 +345,12 @@ func (s *Store) CreateNode(ctx context.Context, n *Node, actor string) error {
 		}
 		return err
 	}
-	_, _ = s.DB.ExecContext(ctx, s.q(
-		`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'create', ?)`),
-		n.TenantID, n.ID, actor,
-	)
+	parentID := ""
+	if n.ParentID.Valid {
+		parentID = n.ParentID.String
+	}
+	s.recordChange(ctx, s.DB, n.TenantID, n.ID, "create", actor, parentID, n.Name, string(n.Kind), n.Rev)
+	s.bumpRev(ctx, s.DB, n.TenantID, parentID)
 	return nil
 }
 
@@ -394,13 +396,15 @@ func (s *Store) UpdateNodeContentCond(ctx context.Context, tenantID, id string, 
 		}
 		return 0, ErrNotFound
 	}
-	_, _ = s.DB.ExecContext(ctx, s.q(
-		`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'update', ?)`),
-		tenantID, id, actor)
 	n, gerr := s.GetNode(ctx, tenantID, id)
 	if gerr != nil {
 		return 0, gerr
 	}
+	parentID := ""
+	if n.ParentID.Valid {
+		parentID = n.ParentID.String
+	}
+	s.recordChange(ctx, s.DB, tenantID, id, "update", actor, parentID, n.Name, string(n.Kind), n.Rev)
 	return n.Rev, nil
 }
 
@@ -452,48 +456,67 @@ func (s *Store) ListChildren(ctx context.Context, tenantID, parentID string) ([]
 // DeleteNode removes a single node (and its descendants for folders).
 // actor is recorded on the change feed for attribution.
 func (s *Store) DeleteNode(ctx context.Context, tenantID, id, actor string) error {
+	top, err := s.GetNode(ctx, tenantID, id)
+	if err != nil {
+		return err
+	}
+	topParent := ""
+	if top.ParentID.Valid {
+		topParent = top.ParentID.String
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	// Recursive descent.
-	queue := []string{id}
-	var visited []string
+	// Recursive descent, carrying the facts a change row keeps for a node
+	// that will no longer exist (where it was, what it was called).
+	type gone struct {
+		id, parent, name, kind string
+		rev                    int64
+	}
+	queue := []gone{{top.ID, topParent, top.Name, string(top.Kind), top.Rev}}
+	var visited []gone
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
 		visited = append(visited, cur)
 		rows, err := tx.QueryContext(ctx, s.q(
-			`SELECT id FROM nodes WHERE tenant_id = ? AND parent_id = ?`),
-			tenantID, cur)
+			`SELECT id, name, kind, rev FROM nodes WHERE tenant_id = ? AND parent_id = ?`),
+			tenantID, cur.id)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
-			var cid string
-			if err := rows.Scan(&cid); err != nil {
+			g := gone{parent: cur.id}
+			if err := rows.Scan(&g.id, &g.name, &g.kind, &g.rev); err != nil {
 				rows.Close()
 				return err
 			}
-			queue = append(queue, cid)
+			queue = append(queue, g)
 		}
 		rows.Close()
 	}
-	for _, nid := range visited {
+	for _, g := range visited {
 		if _, err := tx.ExecContext(ctx, s.q(
 			`DELETE FROM nodes WHERE tenant_id = ? AND id = ?`),
-			tenantID, nid); err != nil {
+			tenantID, g.id); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, s.q(
-			`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'delete', ?)`),
-			tenantID, nid, actor); err != nil {
+			`INSERT INTO changes(tenant_id, node_id, op, actor, parent_id, name, kind, rev)
+			 VALUES (?, ?, 'delete', ?, ?, ?, ?, ?)`),
+			tenantID, g.id, actor, g.parent, g.name, g.kind, g.rev); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// The parent folder changed (a direct child left).
+	s.bumpRev(ctx, s.DB, tenantID, topParent)
+	return nil
 }
 
 // ListSubtreeFiles returns every file node in the subtree rooted at rootID
@@ -600,7 +623,7 @@ func (s *Store) MoveNode(ctx context.Context, tenantID, id, newParentID, actor s
 		}
 	}
 	res, err := s.DB.ExecContext(ctx, s.q(
-		`UPDATE nodes SET parent_id = ?, updated_at = ? WHERE tenant_id = ? AND id = ?`),
+		`UPDATE nodes SET parent_id = ?, updated_at = ?, rev = rev + 1 WHERE tenant_id = ? AND id = ?`),
 		nullableString(newParentID), Now(), tenantID, id)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -611,9 +634,10 @@ func (s *Store) MoveNode(ctx context.Context, tenantID, id, newParentID, actor s
 	if aff, _ := res.RowsAffected(); aff == 0 {
 		return ErrNotFound
 	}
-	_, _ = s.DB.ExecContext(ctx, s.q(
-		`INSERT INTO changes(tenant_id, node_id, op, actor) VALUES (?, ?, 'move', ?)`),
-		tenantID, id, actor)
+	s.recordChange(ctx, s.DB, tenantID, id, "move", actor, newParentID, n.Name, string(n.Kind), n.Rev+1)
+	// Both folders changed: one lost a direct child, one gained it.
+	s.bumpRev(ctx, s.DB, tenantID, cur)
+	s.bumpRev(ctx, s.DB, tenantID, newParentID)
 	return nil
 }
 
@@ -801,6 +825,34 @@ type ChangeRow struct {
 	Op       string
 	Actor    string
 	At       time.Time
+	// D5: captured at write time so a subscriber can update its index from
+	// the row alone, and so a delete still says where the node was.
+	ParentID string
+	Name     string
+	Kind     string
+	Rev      int64
+}
+
+// recordChange appends one change row with the node facts of the moment.
+func (s *Store) recordChange(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, tenantID, nodeID, op, actor, parentID, name, kind string, rev int64) {
+	_, _ = exec.ExecContext(ctx, s.q(
+		`INSERT INTO changes(tenant_id, node_id, op, actor, parent_id, name, kind, rev)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+		tenantID, nodeID, op, actor, parentID, name, kind, rev)
+}
+
+// bumpRev increments a node's rev (a folder when a direct child is added,
+// removed or moved in or out). A no-op for the tenant root ("").
+func (s *Store) bumpRev(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, tenantID, id string) {
+	if id == "" {
+		return
+	}
+	_, _ = exec.ExecContext(ctx, s.q(
+		`UPDATE nodes SET rev = rev + 1 WHERE tenant_id = ? AND id = ?`), tenantID, id)
 }
 
 // ListChanges returns changes for a tenant strictly above sinceSeq (use
@@ -810,7 +862,7 @@ func (s *Store) ListChanges(ctx context.Context, tenantID string, sinceSeq int64
 		limit = 100
 	}
 	rows, err := s.DB.QueryContext(ctx, s.q(
-		`SELECT seq, tenant_id, node_id, op, actor, at FROM changes
+		`SELECT seq, tenant_id, node_id, op, actor, at, parent_id, name, kind, rev FROM changes
 		 WHERE tenant_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`),
 		tenantID, sinceSeq, limit)
 	if err != nil {
@@ -820,7 +872,8 @@ func (s *Store) ListChanges(ctx context.Context, tenantID string, sinceSeq int64
 	var out []ChangeRow
 	for rows.Next() {
 		var c ChangeRow
-		if err := rows.Scan(&c.Seq, &c.TenantID, &c.NodeID, &c.Op, &c.Actor, &c.At); err != nil {
+		if err := rows.Scan(&c.Seq, &c.TenantID, &c.NodeID, &c.Op, &c.Actor, &c.At,
+			&c.ParentID, &c.Name, &c.Kind, &c.Rev); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

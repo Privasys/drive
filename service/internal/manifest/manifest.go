@@ -357,22 +357,24 @@ func ReadRange(ctx context.Context, backend objectstore.Backend, dek []byte, ten
 	if length > 0 && offset+length < end {
 		end = offset + length
 	}
-	chunkPlain := int64(man.ChunkSize)
-	if chunkPlain <= 0 {
-		chunkPlain = int64(crypto.MaxChunkSize)
-	}
-	first := offset / chunkPlain
-	last := (end - 1) / chunkPlain
 	total := end - offset
 	pr, pw := io.Pipe()
 	go func() {
 		defer pw.Close()
-		for idx := first; idx <= last; idx++ {
-			if int(idx) >= len(man.Chunks) {
-				pw.CloseWithError(fmt.Errorf("manifest: chunk %d beyond manifest", idx))
-				return
+		// Chunk boundaries are not uniform once a file has been appended to
+		// (the last chunk before an append may be short), so walk the
+		// per-chunk plaintext lengths rather than dividing by ChunkSize.
+		pos := int64(0)
+		for _, c := range man.Chunks {
+			plen := c.PlainLen()
+			cstart, cend := pos, pos+plen
+			pos = cend
+			if cend <= offset {
+				continue
 			}
-			c := man.Chunks[idx]
+			if cstart >= end {
+				break
+			}
 			ct, err := readChunk(ctx, backend, tenantID, c)
 			if err != nil {
 				pw.CloseWithError(err)
@@ -388,19 +390,17 @@ func ReadRange(ctx context.Context, backend objectstore.Backend, dek []byte, ten
 				pw.CloseWithError(fmt.Errorf("manifest: open chunk %d: %w", c.Index, err))
 				return
 			}
-			lo := int64(0)
-			if idx == first {
-				lo = offset - first*chunkPlain
-			}
-			hi := int64(len(pt))
-			if idx == last {
-				if h := end - last*chunkPlain; h < hi {
-					hi = h
-				}
-			}
-			if lo < 0 || lo > int64(len(pt)) || hi < lo || hi > int64(len(pt)) {
-				pw.CloseWithError(fmt.Errorf("manifest: range slice out of bounds"))
+			if int64(len(pt)) != plen {
+				pw.CloseWithError(fmt.Errorf("manifest: chunk %d plaintext length %d, expected %d", c.Index, len(pt), plen))
 				return
+			}
+			lo := int64(0)
+			if offset > cstart {
+				lo = offset - cstart
+			}
+			hi := plen
+			if end < cend {
+				hi = end - cstart
 			}
 			if _, err := pw.Write(pt[lo:hi]); err != nil {
 				pw.CloseWithError(err)

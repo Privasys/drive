@@ -251,6 +251,13 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE nodes ADD COLUMN index_chunks_total INTEGER DEFAULT 0`,
 		// D1: monotonic per-node revision token (ETag / If-Match fence).
 		`ALTER TABLE nodes ADD COLUMN rev BIGINT NOT NULL DEFAULT 0`,
+		// D5: change rows carry what a subscriber needs to update its
+		// index without a second call per row (and what a deleted node
+		// can no longer answer).
+		`ALTER TABLE changes ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE changes ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE changes ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE changes ADD COLUMN rev BIGINT NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, col); err != nil {
 			msg := strings.ToLower(err.Error())

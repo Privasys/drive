@@ -885,6 +885,36 @@
             }
         },
         {
+            "name": "drain_local_objects",
+            "title": "Move objects from the sealed volume to the configured bucket",
+            "endpoint": "/actions/drain_local_objects",
+            "role": "action",
+            "description": "After object_backend has been switched to a bucket, copy every sealed chunk and manifest still on the instance volume into that bucket, key for key (opaque ciphertext; nothing is decrypted). Idempotent: objects the bucket already holds are skipped, so it is safe to re-run after a partial copy. Nothing is deleted from the volume. Refused while the instance backend is still local.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            },
+            "x-privasys": {
+                "progress": {
+                    "tool": "drain_local_objects_status",
+                    "stateField": "state",
+                    "messageField": "message",
+                    "terminal": { "success": ["done"], "failure": ["failed"] }
+                }
+            }
+        },
+        {
+            "name": "drain_local_objects_status",
+            "title": "Object drain progress",
+            "endpoint": "/actions/drain_local_objects/status",
+            "role": "status",
+            "description": "Progress of the volume-to-bucket object copy: state (idle | running | done | failed), objects copied and skipped, bytes moved, last error.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
             "name": "request_recovery",
             "title": "Request tenant recovery (escrowed mode)",
             "endpoint": "/tools/request_recovery",

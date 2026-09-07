@@ -87,6 +87,10 @@ type Server struct {
 	backendsOnce sync.Once
 	backends     *tenantBackends
 
+	// drain is the state of the drain_local_objects owner action.
+	drain     *drainStatus
+	drainOnce sync.Once
+
 	// nodeWriteMu serialises tier-B content writes per node (key
 	// tenant+node → *sync.Mutex). A file's manifest lives at a fixed key,
 	// so the rev check, the manifest write and the row update must be one
@@ -427,9 +431,14 @@ func (s *Server) Routes() http.Handler {
 	// replace (D1), path addressing (D2), and grant lookup by key (D7).
 	// Range reads (D4) ride the existing download route.
 	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/content", s.auth(s.handleReplaceContent))
+	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/append", s.auth(s.handleAppendContent))
 	mux.Handle("GET /v1/tenants/{tenantID}/path", s.auth(s.handleStatPath))
 	mux.Handle("PUT /v1/tenants/{tenantID}/path", s.auth(s.handleWritePath))
 	mux.HandleFunc("GET /v1/grants/mine", s.handleGrantsMine)
+	// Point 1 (bucket move): drain the sealed-volume object store into the
+	// configured bucket. Owner action + status, per the manifest contract.
+	mux.Handle("POST /actions/drain_local_objects", s.auth(s.handleDrainLocalObjects))
+	mux.Handle("GET /actions/drain_local_objects/status", s.auth(s.handleDrainStatus))
 
 	mux.Handle("POST /v1/capabilities", s.auth(s.handleCreateCapability))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))
@@ -448,7 +457,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/links/{linkID}/redeem", s.auth(s.handleRedeemLink))
 	mux.Handle("GET /v1/tenants/{tenantID}/link-requests", s.auth(s.handleListLinkRequests))
 	mux.Handle("POST /v1/tenants/{tenantID}/link-requests/{reqID}/{decision}", s.auth(s.handleDecideLinkRequest))
-	mux.Handle("GET /v1/tenants/{tenantID}/changes", s.auth(s.handleChanges))
+	mux.Handle("GET /v1/tenants/{tenantID}/changes", s.auth(s.handleChangesV2))
 	mux.Handle("GET /v1/tenants/{tenantID}/quota", s.auth(s.handleQuota))
 	mux.Handle("GET /v1/tenants/{tenantID}/audit", s.auth(s.handleAudit))
 	mux.Handle("POST /v1/tenants/{tenantID}/recover", s.auth(s.handleRecoverTenant))

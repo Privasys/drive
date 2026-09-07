@@ -295,22 +295,33 @@ func (s *Server) handleAppendTurn(w http.ResponseWriter, r *http.Request, p *Pri
 		writeStoreError(w, err)
 		return
 	}
-	existing, err := s.readNodeBytes(r.Context(), tenantID, tr.ID)
+	// D3: append only the new turn. The one thing the old read-modify-write
+	// knew that an append does not is whether the transcript already ends
+	// in a newline; a one-byte range read answers that at constant cost.
+	payload := line + "\n"
+	if tr.PlainSize > 0 {
+		n, bk, dek, status, cerr := s.fileReadCtx(r.Context(), p, tenantID, tr.ID)
+		if cerr != nil {
+			httpError(w, status, cerr)
+			return
+		}
+		rc, _, rerr := manifest.ReadRange(r.Context(), bk, dek, tenantID, n.ID, n.WrappedCEK, tr.PlainSize-1, 1)
+		if rerr != nil {
+			httpError(w, http.StatusInternalServerError, rerr)
+			return
+		}
+		last, _ := io.ReadAll(rc)
+		rc.Close()
+		if len(last) == 1 && last[0] != '\n' {
+			payload = "\n" + payload
+		}
+	}
+	newRev, size, status, err := s.appendNodeContent(r.Context(), p, tenantID, tr.ID, []byte(payload), -1)
 	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	buf := bytes.NewBuffer(existing)
-	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
-		buf.WriteByte('\n')
-	}
-	buf.WriteString(line)
-	buf.WriteByte('\n')
-	if _, status, err := s.overwriteFile(r.Context(), p, tenantID, tr.ID, buf.Bytes()); err != nil {
 		httpError(w, status, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"transcript_id": tr.ID, "bytes": buf.Len()})
+	writeJSON(w, http.StatusOK, map[string]any{"transcript_id": tr.ID, "bytes": size, "rev": newRev})
 }
 
 // handleListConversations lists the conversation directories with their
