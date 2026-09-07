@@ -1,15 +1,26 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/store"
 )
+
+// appDataRoot is the one folder in a personal Drive that apps may be granted
+// into. Every capability lands at AppData/<app folder>/: the root of a user's
+// Drive stays theirs however many apps they approve, and the storage gauge
+// can break AppData down by app. First-party Drive roots ("Chat
+// conversations", "Memory") are Drive's own features, not app grants, and
+// live where they always did.
+const appDataRoot = "AppData"
 
 // The wallet-facing capability endpoint.
 //
@@ -197,10 +208,11 @@ func (s *Server) handleCreateCapability(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	if strings.TrimSpace(body.Folder) == "" {
-		http.Error(w, "request.folder required", http.StatusBadRequest)
-		return
-	}
+	// The app's folder name: the label the holder approved on the wallet screen
+	// (the app's resource_label, forwarded as request.folder), else the app's
+	// display name as the control plane knows it, else the app id. Never a path:
+	// the app is confined to its one folder under AppData.
+	label := sanitiseFolderName(body.Folder)
 
 	// The boundary, derived. Not read from anywhere in the request.
 	tenant, err := s.Store.PersonalTenantOf(r.Context(), p.Sub)
@@ -209,11 +221,26 @@ func (s *Server) handleCreateCapability(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	node, status, err := s.ensureFolder(r, p, tenant.ID, strings.TrimSpace(body.Folder))
+	if label == "" {
+		if cfg := s.CurrentConfig(); cfg != nil && cfg.MgmtBaseURL != "" {
+			label = sanitiseFolderName(resolveAppDisplayName(r.Context(), cfg.MgmtBaseURL, appID))
+		}
+	}
+	if label == "" {
+		label = "app-" + appID[:8]
+	}
+
+	appData, status, err := s.ensureChild(r, p, tenant.ID, "", appDataRoot)
 	if err != nil {
 		httpError(w, status, err)
 		return
 	}
+	node, status, err := s.appFolder(r, p, tenant.ID, appData.ID, label, appID)
+	if err != nil {
+		httpError(w, status, err)
+		return
+	}
+	path := appDataRoot + "/" + node.Name
 
 	g := &grants.Grant{
 		TenantID:      tenant.ID,
@@ -222,7 +249,7 @@ func (s *Server) handleCreateCapability(w http.ResponseWriter, r *http.Request, 
 		Scope:         scope,
 		CreatedBy:     p.Sub,
 		BindingPubkey: req.BindingPubkey,
-		Meta:          capabilityMeta(req, node.Name),
+		Meta:          capabilityMeta(req, path, appID),
 	}
 	if req.ExpiresUnix > 0 {
 		t := time.Unix(req.ExpiresUnix, 0).UTC()
@@ -237,20 +264,22 @@ func (s *Server) handleCreateCapability(w http.ResponseWriter, r *http.Request, 
 		CapabilityID: g.ID,
 		Nonce:        req.Nonce,
 		ExpiresUnix:  req.ExpiresUnix,
-		// Opaque to the wallet; the app needs these to address Drive.
+		// Opaque to the wallet; the app needs these to address Drive. The path
+		// is informational, so the app can tell the user where it writes.
 		ServiceResult: map[string]string{
 			"tenant_id": tenant.ID,
 			"node_id":   node.ID,
 			"grant_id":  g.ID,
+			"path":      path,
 		},
 	})
 }
 
-// ensureFolder returns the named folder at the tenant root, creating it only if
-// it is absent. Idempotent so a re-approval does not produce a second folder,
-// and so the "already exists" case is not an error the holder has to interpret.
-func (s *Server) ensureFolder(r *http.Request, p *Principal, tenantID, name string) (*store.Node, int, error) {
-	kids, err := s.Store.ListChildren(r.Context(), tenantID, "")
+// ensureChild returns the named folder under parentID ("" = tenant root),
+// creating it only if it is absent. Idempotent so a re-approval does not
+// produce a second folder.
+func (s *Server) ensureChild(r *http.Request, p *Principal, tenantID, parentID, name string) (*store.Node, int, error) {
+	kids, err := s.Store.ListChildren(r.Context(), tenantID, parentID)
 	if err != nil {
 		return nil, storeErrorStatus(err), err
 	}
@@ -259,16 +288,106 @@ func (s *Server) ensureFolder(r *http.Request, p *Principal, tenantID, name stri
 			return n, http.StatusOK, nil
 		}
 	}
-	return s.createFolder(r.Context(), p, tenantID, "", name)
+	return s.createFolder(r.Context(), p, tenantID, parentID, name)
+}
+
+// appFolder returns the app's folder under AppData, bound to that app id. A
+// folder is reused only when a grant on it already names this app (a
+// re-approval, including after a revoke); a folder of the same name that
+// belongs to another app, or that the user made themselves, is never handed
+// over: the app gets "<label> (<8 hex of its id>)" instead. Two apps can share
+// a label, and a label is what the holder approved, so the name is a UX fact
+// and the app id is the identity.
+func (s *Server) appFolder(r *http.Request, p *Principal, tenantID, parentID, label, appID string) (*store.Node, int, error) {
+	kids, err := s.Store.ListChildren(r.Context(), tenantID, parentID)
+	if err != nil {
+		return nil, storeErrorStatus(err), err
+	}
+	for _, name := range []string{label, label + " (" + appID[:8] + ")"} {
+		var existing *store.Node
+		for _, n := range kids {
+			if n.Kind == store.NodeFolder && n.Name == name {
+				existing = n
+				break
+			}
+		}
+		if existing == nil {
+			return s.createFolder(r.Context(), p, tenantID, parentID, name)
+		}
+		owned, err := s.Grants.ListForNode(r.Context(), tenantID, existing.ID)
+		if err != nil {
+			return nil, http.StatusInternalServerError, err
+		}
+		for _, g := range owned {
+			if g.Subject == grants.SubjectApp+appID {
+				return existing, http.StatusOK, nil
+			}
+		}
+	}
+	return nil, http.StatusConflict, errors.New("the app's folder name is already taken in AppData")
+}
+
+// sanitiseFolderName turns a requested label into one folder name: no path
+// separators, no dot-names, bounded length. Empty when nothing usable remains,
+// so the caller falls back rather than creating a folder called "..".
+func sanitiseFolderName(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.NewReplacer("/", "-", "\\", "-", "\x00", "").Replace(s)
+	s = strings.TrimLeft(s, ".")
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > 100 {
+		s = strings.TrimSpace(string(r[:100]))
+	}
+	// A name made only of separators and punctuation ("../" → "-") is not a
+	// name; require something a person could recognise.
+	if !strings.ContainsFunc(s, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) {
+		return ""
+	}
+	return s
+}
+
+// resolveAppDisplayName asks the control plane's public resolve endpoint for
+// the app's display name (falling back to its canonical name). Best effort:
+// any failure returns "" and the caller falls back, so an unreachable control
+// plane never blocks an approval the holder already made.
+func resolveAppDisplayName(ctx context.Context, mgmtBaseURL, appID string) string {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	u := strings.TrimRight(mgmtBaseURL, "/") + "/api/v1/apps/" + url.PathEscape(appID) + "/resolve"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var out struct {
+		DisplayName string `json:"display_name"`
+		Name        string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ""
+	}
+	if strings.TrimSpace(out.DisplayName) != "" {
+		return out.DisplayName
+	}
+	return out.Name
 }
 
 // capabilityMeta is what a later "apps with access to my Drive" list shows.
 // Populated rather than left empty, since an unexplained grant in that list is
 // worse than no list.
-func capabilityMeta(req capabilityRequest, folder string) string {
+func capabilityMeta(req capabilityRequest, path, appID string) string {
 	m := map[string]string{
 		"kind":   capabilityKindStorageFolder,
-		"folder": folder,
+		"folder": path,
+		"app_id": appID,
 		"via":    "wallet-capability",
 	}
 	if req.Nonce != "" {
