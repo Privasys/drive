@@ -26,7 +26,7 @@ const appDataRoot = "AppData"
 //
 // An attested app asks a user for a scoped, revocable capability on a resource
 // the user owns; the wallet verifies who is asking, renders it, captures the
-// decision and POSTs here. See plans/wallet-resource-capabilities.md.
+// decision and POSTs here.
 //
 // Drive owns everything the wallet deliberately does not know: which tenant is
 // the user's, whether the folder exists, and how a grant is minted. The wallet
