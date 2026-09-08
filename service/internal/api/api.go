@@ -468,6 +468,10 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/tenants/{tenantID}/link-requests/{reqID}/{decision}", s.auth(s.handleDecideLinkRequest))
 	mux.Handle("GET /v1/tenants/{tenantID}/changes", s.auth(s.handleChangesV2))
 	mux.Handle("GET /v1/tenants/{tenantID}/quota", s.auth(s.handleQuota))
+	// Apps with access (user model): the app grants on this tenant.
+	mux.Handle("GET /v1/tenants/{tenantID}/apps", s.auth(s.handleListApps))
+	// Workspace snapshot export: the working tree rebuilt from its manifest.
+	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/workspace.zip", s.auth(s.handleWorkspaceZip))
 	mux.Handle("GET /v1/tenants/{tenantID}/audit", s.auth(s.handleAudit))
 	mux.Handle("POST /v1/tenants/{tenantID}/recover", s.auth(s.handleRecoverTenant))
 	mux.Handle("POST /v1/tenants/{tenantID}/recover/{recoveryID}/approve", s.auth(s.handleApproveRecovery))
@@ -852,6 +856,7 @@ func (s *Server) mapNodesWithIndex(ctx context.Context, tenantID string, ns []*s
 		out[i].IndexChunksTotal = m.ChunksTotal
 		out[i].CreatedBy = m.CreatedBy
 	}
+	s.annotateWorkspaces(ctx, tenantID, out)
 	return out
 }
 
@@ -1284,6 +1289,12 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request, p *Principa
 	}
 	limit := s.quotaLimit()
 	out := map[string]any{"used_bytes": used, "limit_bytes": limit, "unlimited": limit == 0}
+	if top, apps := s.quotaBreakdown(r.Context(), tenantID); top != nil {
+		out["breakdown"] = top
+		if apps != nil {
+			out["apps"] = apps
+		}
+	}
 	if limit > 0 {
 		out["remaining_bytes"] = max64(0, limit-used)
 	}
@@ -1508,6 +1519,10 @@ type nodeJSON struct {
 	// Rev is the node's revision token (D1): the value to send back as
 	// If-Match on a conditional write, and a directory's version. Always
 	// present (0 is a valid rev for a freshly created node).
+	// WorkspaceManifestID is set on a folder that holds a workspace snapshot
+	// (`.workspace.json` beside `.blobs/`): the front renders it as one item
+	// and reads the manifest by this id. See workspace.go.
+	WorkspaceManifestID string `json:"workspace_manifest_id,omitempty"`
 	Rev int64 `json:"rev"`
 }
 

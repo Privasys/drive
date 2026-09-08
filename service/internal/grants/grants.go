@@ -515,3 +515,30 @@ func (r *Repo) ListForBindingKey(ctx context.Context, bindingPubkey string) ([]*
 	}
 	return out, rows.Err()
 }
+
+// ListAppGrantsForTenant returns the active grants held by apps (subject
+// "app:<id>") in a tenant, newest first: the "apps with access to my Drive"
+// list. People-to-people shares and links are not included.
+func (r *Repo) ListAppGrantsForTenant(ctx context.Context, tenantID string) ([]*Grant, error) {
+	rows, err := r.DB.QueryContext(ctx, r.q(
+		`SELECT id, tenant_id, node_id, subject, scope, created_by, created_at,
+		        expires_at, revoked_at, binding_pubkey, meta
+		 FROM grants WHERE tenant_id = ? AND subject LIKE 'app:%' AND revoked_at IS NULL ORDER BY created_at DESC`),
+		tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	now := r.NowFn()
+	var out []*Grant
+	for rows.Next() {
+		g, serr := scanGrant(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		if g.IsActive(now) {
+			out = append(out, g)
+		}
+	}
+	return out, rows.Err()
+}
