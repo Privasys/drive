@@ -67,6 +67,21 @@
                         "label": "Chat model (digests)"
                     }
                 },
+                "rerank_model": {
+                    "type": "string",
+                    "description": "Fleet reranker model behind /v1/rerank (same host + pin as embeddings). When set, semantic search recalls up to 50 candidates by vector and returns the reranker's top hits; empty keeps vector order. Mutable.",
+                    "x-privasys": {
+                    "label": "Rerank model"
+                    }
+                },
+                "summarise_on_ingest": {
+                    "type": "boolean",
+                    "description": "Generate one-line section summaries and a document description with the chat model when a file is indexed. Sends file plaintext to the pinned fleet at ingestion time, not only at query time; disclosed via /status. A folder opts out with PUT .../nodes/{id}/summaries {\"enabled\": false}. Needs chat_model.",
+                    "default": false,
+                    "x-privasys": {
+                    "label": "Summarise sections on ingest"
+                    }
+                },
                 "embeddings_api_key": {
                     "type": "string",
                     "description": "Bearer for the embeddings endpoint.",
@@ -195,6 +210,21 @@
                         "description": "Fleet chat model for conversation digests and summaries (same host + pin as embeddings). Empty disables Drive-side generation.",
                         "x-privasys": {
                             "label": "Chat model (digests)"
+                        }
+                    },
+                    "rerank_model": {
+                        "type": "string",
+                        "description": "Fleet reranker model behind /v1/rerank (same host + pin as embeddings). When set, semantic search recalls up to 50 candidates by vector and returns the reranker's top hits; empty keeps vector order. Mutable.",
+                        "x-privasys": {
+                        "label": "Rerank model"
+                        }
+                    },
+                    "summarise_on_ingest": {
+                        "type": "boolean",
+                        "description": "Generate one-line section summaries and a document description with the chat model when a file is indexed. Sends file plaintext to the pinned fleet at ingestion time, not only at query time; disclosed via /status. A folder opts out with PUT .../nodes/{id}/summaries {\"enabled\": false}. Needs chat_model.",
+                        "default": false,
+                        "x-privasys": {
+                        "label": "Summarise sections on ingest"
                         }
                     },
                     "embeddings_api_key": {
@@ -1077,7 +1107,7 @@
             "name": "search_semantic",
             "title": "Semantic search (agentic RAG)",
             "endpoint": "/tools/search_semantic",
-            "description": "Search a tenant's drive semantically over the in-enclave embeddings index. Every hit carries provenance: node_id, section_id, section_path (title chain) and char range, so a consumer can cite which files and which parts of them an answer used. Follow up with get_doc_tree to see a file's structure, read_section for a whole section, or read_file for the full content.",
+            "description": "Search a tenant's drive semantically over the in-enclave embeddings index; with a rerank model configured the vector candidates are re-ordered by the fleet cross-encoder (reranked: true in the response, score = relevance in [0,1]). Every hit carries provenance: node_id, section_id, section_path (title chain) and char range, so a consumer can cite which files and which parts of them an answer used. Follow up with get_doc_tree to see a file's structure, read_section for a whole section, or read_file for the full content.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

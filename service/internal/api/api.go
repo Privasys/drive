@@ -434,6 +434,7 @@ func (s *Server) Routes() http.Handler {
 	// the agentic retrieval legs (doc tree, whole-section reads).
 	mux.Handle("GET /v1/tenants/{tenantID}/search", s.auth(s.handleSearch))
 	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/indexing", s.auth(s.handleSetIndexing))
+	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/summaries", s.auth(s.handleSetSummaries))
 	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}/tree", s.auth(s.handleDocTree))
 	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}/sections/{sectionID}", s.auth(s.handleReadSection))
 	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/acl", s.auth(s.handleSetNodeACL))
@@ -1527,7 +1528,7 @@ type nodeJSON struct {
 	// (`.workspace.json` beside `.blobs/`): the front renders it as one item
 	// and reads the manifest by this id. See workspace.go.
 	WorkspaceManifestID string `json:"workspace_manifest_id,omitempty"`
-	Rev int64 `json:"rev"`
+	Rev                 int64  `json:"rev"`
 }
 
 func nodeView(n *store.Node) nodeJSON {

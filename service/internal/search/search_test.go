@@ -149,14 +149,34 @@ func cosine(a, b []float32) float64 {
 // --- Indexer flow with fakes -------------------------------------------
 
 type fakeOps struct {
-	status      map[string]string
-	secs        map[string][]SectionSpec
-	rows        map[string][]EmbeddingRowInput
-	space       map[string]string
-	excluded    map[string]bool
-	conversions map[string]string
-	links       map[string][]RawLink
-	progress    map[string][2]int // nodeID -> {done, total}
+	status       map[string]string
+	secs         map[string][]SectionSpec
+	rows         map[string][]EmbeddingRowInput
+	space        map[string]string
+	excluded     map[string]bool
+	conversions  map[string]string
+	links        map[string][]RawLink
+	progress     map[string][2]int // nodeID -> {done, total}
+	summariesOff map[string]bool
+	summaries    map[string]map[int64]string
+	summaryModel map[string]string
+}
+
+func (f *fakeOps) HasNoSummariseAncestor(_ context.Context, _, nodeID string) (bool, error) {
+	return f.summariesOff[nodeID], nil
+}
+
+func (f *fakeOps) SetSectionSummaries(_ context.Context, _, nodeID string, byID map[int64]string, model string) error {
+	f.summaries[nodeID] = byID
+	f.summaryModel[nodeID] = model
+	return nil
+}
+
+// contentOf is a Content reader over a fixed string.
+func contentOf(text string) Content {
+	return func(context.Context, string, string) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(text)), nil
+	}
 }
 
 func (f *fakeOps) SetIndexStatus(_ context.Context, _, nodeID, status string) error {
@@ -215,6 +235,8 @@ func newFakeOps() *fakeOps {
 		status: map[string]string{}, secs: map[string][]SectionSpec{},
 		rows: map[string][]EmbeddingRowInput{}, space: map[string]string{},
 		excluded: map[string]bool{}, conversions: map[string]string{},
+		summariesOff: map[string]bool{}, summaries: map[string]map[int64]string{},
+		summaryModel: map[string]string{},
 	}
 }
 

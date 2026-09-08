@@ -107,6 +107,69 @@ func (s *Store) HasNoIndexAncestor(ctx context.Context, tenantID, nodeID string)
 	return false, nil
 }
 
+// SetNoSummaries opts a node (typically a folder, inherited by its
+// subtree) out of section summaries, or back in.
+func (s *Store) SetNoSummaries(ctx context.Context, tenantID, nodeID string, off bool) error {
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE nodes SET no_summaries = ? WHERE tenant_id = ? AND id = ?`),
+		off, tenantID, nodeID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// HasNoSummariseAncestor reports whether the node or any ancestor folder
+// opted out of section summaries (§8.5).
+func (s *Store) HasNoSummariseAncestor(ctx context.Context, tenantID, nodeID string) (bool, error) {
+	cur := nodeID
+	for depth := 0; cur != "" && depth < 4096; depth++ {
+		var (
+			off    *bool
+			parent *string
+		)
+		err := s.DB.QueryRowContext(ctx, s.q(
+			`SELECT no_summaries, parent_id FROM nodes WHERE tenant_id = ? AND id = ?`),
+			tenantID, cur).Scan(&off, &parent)
+		if err != nil {
+			return false, err
+		}
+		if off != nil && *off {
+			return true, nil
+		}
+		if parent == nil {
+			return false, nil
+		}
+		cur = *parent
+	}
+	return false, nil
+}
+
+// SetSectionSummaries stores §8.5 summaries for a file's sections, by
+// section row id, stamping the model + prompt version that produced
+// them. Sections not named keep whatever they had.
+func (s *Store) SetSectionSummaries(ctx context.Context, tenantID, nodeID string, byID map[int64]string, model string) error {
+	if len(byID) == 0 {
+		return nil
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for id, sum := range byID {
+		if _, err := tx.ExecContext(ctx, s.q(
+			`UPDATE sections SET summary = ?, summary_model = ? WHERE id = ? AND tenant_id = ? AND node_id = ?`),
+			sum, model, id, tenantID, nodeID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ResetIndexedForReindex flips indexed and failed files back to
 // pending across all tenants — the scheduled background reindex when
 // the embedding space changes (model cutover or upgrade). The old
@@ -517,6 +580,9 @@ type SearchHit struct {
 	CharStart     int64
 	CharEnd       int64
 	Score         float64 // cosine similarity, higher is better
+	// VectorScore keeps the cosine similarity when Score has been
+	// replaced by a reranker relevance (§8.4); 0 when not reranked.
+	VectorScore float64
 }
 
 // SearchEmbeddings runs a cosine nearest-neighbour search over a

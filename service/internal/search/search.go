@@ -36,8 +36,8 @@ const (
 	// The Qwen3-Embedding retrieval instruction format.
 	queryInstruct = "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: "
 
+	// RerankInstructVersion identifies the reranker frame in rerank.go.
 	RerankInstructVersion = "rerank_instruct/v1"
-	// Reserved for the §8.4 rerank leg (fleet /v1/rerank).
 )
 
 // maxIndexBytes caps how much of a file is read for indexing.
@@ -281,6 +281,12 @@ type Ops interface {
 	// ReplaceLinks swaps a node's outbound typed links (§8.7 graph).
 	// Extracted at index time from markdown content.
 	ReplaceLinks(ctx context.Context, tenantID, nodeID string, links []RawLink) error
+	// HasNoSummariseAncestor reports whether the node or a folder above
+	// it opted out of section summaries (§8.5 per-folder opt-out).
+	HasNoSummariseAncestor(ctx context.Context, tenantID, nodeID string) (bool, error)
+	// SetSectionSummaries stores summaries by section row id, stamped
+	// with the model + prompt version that produced them.
+	SetSectionSummaries(ctx context.Context, tenantID, nodeID string, byID map[int64]string, model string) error
 }
 
 // RawLink is an extracted outbound edge (store-independent). ToNode is
@@ -329,6 +335,12 @@ type Indexer struct {
 	// Convert handles non-text formats (the docling sidecar); nil means
 	// those formats stay skipped.
 	Convert Converter
+	// Summariser returns the CURRENT section summariser (nil = none);
+	// resolved per run like the embedder. SummariseOnIngest is the
+	// attested instance policy (§8.5): false means no plaintext goes to
+	// the fleet for summaries, whatever else is configured.
+	Summariser        func() Summariser
+	SummariseOnIngest func() bool
 	// Sync makes Process run inline in Enqueue (tests).
 	Sync bool
 
@@ -607,6 +619,10 @@ func (ix *Indexer) process(ctx context.Context, j job) {
 	}
 	setStatus(statusIndexed)
 	ix.clearBackoff(j.nodeID)
+	// Summaries after the embeddings are safe: a fleet outage that parked
+	// the file above never reaches this leg, and a failure here leaves
+	// the file indexed (§8.5, best effort).
+	ix.summarise(ctx, j, text, secs, ids)
 }
 
 func min(a, b int) int {

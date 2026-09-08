@@ -242,6 +242,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		// whole subtree is non-searchable (checked up the parent chain).
 		`ALTER TABLE nodes ADD COLUMN index_status TEXT DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN no_index BOOLEAN DEFAULT FALSE`,
+		// no_summaries opts a folder (subtree) or file out of §8.5 section
+		// summaries: the tree keeps its titles, no plaintext goes to the
+		// fleet for summarising. Checked up the parent chain like no_index.
+		`ALTER TABLE nodes ADD COLUMN no_summaries BOOLEAN DEFAULT FALSE`,
 		// Who created the node (the change-feed actor), for the Owner
 		// column in listings. '' on nodes that predate the column.
 		`ALTER TABLE nodes ADD COLUMN created_by TEXT DEFAULT ''`,

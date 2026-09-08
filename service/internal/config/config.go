@@ -136,6 +136,18 @@ type Config struct {
 	// pinned dial. Development environments only.
 	EmbeddingsAllowDebug bool `json:"embeddings_allow_debug,omitempty"`
 
+	// RerankModel is the fleet cross-encoder behind /v1/rerank (§8.4):
+	// when set, semantic search recalls up to 50 candidates by vector
+	// and returns the reranker's top hits. Same host + pin as
+	// embeddings. Empty keeps vector order.
+	RerankModel string `json:"rerank_model,omitempty"`
+	// SummariseOnIngest turns on §8.5 section summaries and document
+	// descriptions: one chat call per section at INDEX time, so file
+	// plaintext reaches the fleet at ingestion, not only at query time.
+	// Part of the attested configuration users can read via /status;
+	// a folder opts out with no_summaries. Needs chat_model.
+	SummariseOnIngest bool `json:"summarise_on_ingest,omitempty"`
+
 	// AssistantEnclaveToken gates the "assistant enclave acting for a user"
 	// inbound path (§8.7 RAG-in-enclave): the confidential-AI enclave calls
 	// Drive's read-only RAG tools (search_semantic assistant-scoped,

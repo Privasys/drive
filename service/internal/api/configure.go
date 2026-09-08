@@ -32,6 +32,22 @@ type appStatusDoc struct {
 	Message  string `json:"message,omitempty"`
 	Mode     string `json:"mode,omitempty"`
 	Version  string `json:"version,omitempty"`
+	// AI discloses the fleet dependency the instance uses for its index
+	// (§8.6): models, whether the dial is measurement-pinned, and whether
+	// plaintext leaves at ingestion for summaries.
+	AI *aiStatusDoc `json:"ai,omitempty"`
+}
+
+// aiStatusDoc is the public disclosure of the instance's AI dependency.
+type aiStatusDoc struct {
+	Endpoint          string `json:"endpoint,omitempty"`
+	EmbeddingsModel   string `json:"embeddings_model,omitempty"`
+	RerankModel       string `json:"rerank_model,omitempty"`
+	ChatModel         string `json:"chat_model,omitempty"`
+	SummariseOnIngest bool   `json:"summarise_on_ingest"`
+	// Pinned is true when every fleet call verifies the peer's attested
+	// identity against the configured dependency set (fail closed).
+	Pinned bool `json:"pinned"`
 }
 
 func (s *Server) statusDoc() appStatusDoc {
@@ -41,6 +57,14 @@ func (s *Server) statusDoc() appStatusDoc {
 		doc.Activity = "serving"
 		doc.Mode = string(cfg.Mode)
 		doc.Message = "Drive is configured (" + string(cfg.Mode) + " mode) and serving."
+		if cfg.EmbeddingsBaseURL != "" {
+			doc.AI = &aiStatusDoc{
+				Endpoint: cfg.EmbeddingsBaseURL, EmbeddingsModel: cfg.EmbeddingsModel,
+				RerankModel: cfg.RerankModel, ChatModel: cfg.ChatModel,
+				SummariseOnIngest: cfg.SummariseOnIngest && cfg.ChatModel != "",
+				Pinned:            cfg.EmbeddingsDependency != "",
+			}
+		}
 	} else {
 		doc.State = "awaiting_config"
 		doc.Activity = "awaiting configuration"
@@ -83,6 +107,8 @@ type configureRequest struct {
 	EmbeddingsDependency *string `json:"embeddings_dependency"`
 	EmbeddingsAllowDebug *bool   `json:"embeddings_allow_debug"`
 	ChatModel            *string `json:"chat_model"`
+	RerankModel          *string `json:"rerank_model"`
+	SummariseOnIngest    *bool   `json:"summarise_on_ingest"`
 	// Instance object backend (see config.Config): the store for encrypted
 	// chunk bodies. object_credential is secret (GCS SA JSON or an
 	// s3-keypair JSON); it is never echoed back via /status.
@@ -126,6 +152,12 @@ func (req *configureRequest) overlay(cur *config.Config) *config.Config {
 	}
 	if req.EmbeddingsModel != nil {
 		cfg.EmbeddingsModel = *req.EmbeddingsModel
+	}
+	if req.RerankModel != nil {
+		cfg.RerankModel = *req.RerankModel
+	}
+	if req.SummariseOnIngest != nil {
+		cfg.SummariseOnIngest = *req.SummariseOnIngest
 	}
 	if req.EmbeddingsAPIKey != nil {
 		cfg.EmbeddingsAPIKey = *req.EmbeddingsAPIKey

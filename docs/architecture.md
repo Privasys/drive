@@ -45,12 +45,18 @@ canonical, long-lived description of the system.
               └───────────────────────────────┘
 ```
 
-The optional **extraction enclave** lives in a *separate* trust domain
-with its own measurement. It subscribes to Drive's change feed (REST),
-pulls plaintext for opted-in folders, extracts text + computes
-embeddings, and *pushes* the result into
-[private-rag](https://github.com/Privasys/private-rag). Drive itself
-never calls a model.
+**The search index lives inside Drive.** A file is converted to text in
+the image (docling for PDF, Office and images), given a deterministic
+section tree with stable anchors, chunked along its sections and embedded
+into pgvector rows on the same sealed volume as the node index. The only
+model calls leave over a measurement-pinned mutual RA-TLS dial to the
+confidential-AI fleet, which identifies Drive by its attested client
+certificate: embeddings at index time, an optional cross-encoder rerank
+of the vector candidates at query time (`rerank_model`), and, when the
+instance enables `summarise_on_ingest`, one chat call per section
+producing the summaries and document descriptions the tree tools show.
+What the instance sends to which fleet is disclosed in `/status`
+(`ai` block); a folder opts out of summaries for its subtree.
 
 ## 2. Data model
 

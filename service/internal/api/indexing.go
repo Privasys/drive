@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"sync"
 
+	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/crypto"
 	"github.com/Privasys/drive/service/internal/manifest"
 	"github.com/Privasys/drive/service/internal/search"
@@ -48,10 +50,15 @@ func (s *Server) indexer() *search.Indexer {
 			conv = c
 		}
 		indexerRef = &search.Indexer{
-			Ops:      indexOps{s.Store},
-			Content:  s.indexContent,
-			Embedder: s.activeEmbedder,
-			Convert:  conv,
+			Ops:        indexOps{s.Store},
+			Content:    s.indexContent,
+			Embedder:   s.activeEmbedder,
+			Convert:    conv,
+			Summariser: s.activeSummariser,
+			SummariseOnIngest: func() bool {
+				cfg := s.CurrentConfig()
+				return cfg != nil && cfg.SummariseOnIngest
+			},
 		}
 	})
 	return indexerRef
@@ -73,17 +80,47 @@ func (s *Server) activeEmbedder() search.Embedder {
 	if model == "" {
 		model = "qwen3-embedding-0.6b"
 	}
-	fe := &search.FleetEmbedder{
+	return &search.FleetEmbedder{
 		BaseURL: cfg.EmbeddingsBaseURL, Model: model, APIKey: cfg.EmbeddingsAPIKey,
+		Client: s.pinnedFleetClient(cfg),
 	}
-	if cfg.EmbeddingsDependency != "" {
-		if hc := s.fleetClient(); hc != nil {
-			fe.Client = hc
-		} else {
-			fe.Client = &http.Client{Transport: unarmedPinTransport{}}
-		}
+}
+
+// pinnedFleetClient returns the client every fleet call must use: the
+// measurement-pinned RA-TLS dialler when a dependency is configured (or
+// a transport that refuses everything when that pin could not be armed),
+// nil for an off-platform endpoint (plain HTTPS).
+func (s *Server) pinnedFleetClient(cfg *config.Config) *http.Client {
+	if cfg.EmbeddingsDependency == "" {
+		return nil
 	}
-	return fe
+	if hc := s.fleetClient(); hc != nil {
+		return hc
+	}
+	return &http.Client{Transport: unarmedPinTransport{}}
+}
+
+// activeReranker resolves the §8.4 rerank leg: nil unless a rerank model
+// is configured beside the fleet endpoint. Same host, same pin.
+func (s *Server) activeReranker() *search.FleetReranker {
+	cfg := s.CurrentConfig()
+	if cfg == nil || cfg.EmbeddingsBaseURL == "" || cfg.RerankModel == "" {
+		return nil
+	}
+	return &search.FleetReranker{
+		BaseURL: cfg.EmbeddingsBaseURL, Model: cfg.RerankModel, APIKey: cfg.EmbeddingsAPIKey,
+		Client: s.pinnedFleetClient(cfg),
+	}
+}
+
+// activeSummariser resolves the §8.5 summariser over the fleet chat
+// model; nil when no chat model is configured.
+func (s *Server) activeSummariser() search.Summariser {
+	fc := s.activeChat()
+	if fc == nil {
+		return nil
+	}
+	return &search.FleetSummariser{Chat: fc}
 }
 
 // unarmedPinTransport refuses every request: a configured dependency
@@ -102,17 +139,10 @@ func (s *Server) activeChat() *search.FleetChat {
 	if cfg == nil || cfg.EmbeddingsBaseURL == "" || cfg.ChatModel == "" {
 		return nil
 	}
-	fc := &search.FleetChat{
+	return &search.FleetChat{
 		BaseURL: cfg.EmbeddingsBaseURL, Model: cfg.ChatModel, APIKey: cfg.EmbeddingsAPIKey,
+		Client: s.pinnedFleetClient(cfg),
 	}
-	if cfg.EmbeddingsDependency != "" {
-		if hc := s.fleetClient(); hc != nil {
-			fc.Client = hc
-		} else {
-			fc.Client = &http.Client{Transport: unarmedPinTransport{}}
-		}
-	}
-	return fc
 }
 
 // indexOps adapts the store to the search.Ops interface.
@@ -154,6 +184,14 @@ func (o indexOps) ReplaceEmbeddings(ctx context.Context, tenantID, nodeID, space
 		}
 	}
 	return o.st.ReplaceEmbeddings(ctx, tenantID, nodeID, space, converted)
+}
+
+func (o indexOps) HasNoSummariseAncestor(ctx context.Context, tenantID, nodeID string) (bool, error) {
+	return o.st.HasNoSummariseAncestor(ctx, tenantID, nodeID)
+}
+
+func (o indexOps) SetSectionSummaries(ctx context.Context, tenantID, nodeID string, byID map[int64]string, model string) error {
+	return o.st.SetSectionSummaries(ctx, tenantID, nodeID, byID, model)
 }
 
 func (o indexOps) ListPendingIndex(ctx context.Context, limit int) ([][3]string, error) {
@@ -276,6 +314,29 @@ func (s *Server) handleSetIndexing(w http.ResponseWriter, r *http.Request, p *Pr
 	writeJSON(w, http.StatusOK, map[string]any{"node_id": nodeID, "indexing": req.Enabled})
 }
 
+// handleSetSummaries opts a node (typically a folder, inherited by its
+// subtree) out of §8.5 section summaries, or back in. Summaries are
+// produced at index time, so re-enabling takes effect at the next
+// (re)index of the files below.
+func (s *Server) handleSetSummaries(w http.ResponseWriter, r *http.Request, p *Principal) {
+	tenantID := r.PathValue("tenantID")
+	nodeID := r.PathValue("nodeID")
+	if !p.IsUser() || !s.canWrite(r.Context(), tenantID, p.Sub) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
+		return
+	}
+	var req setIndexingRequest
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.Store.SetNoSummaries(r.Context(), tenantID, nodeID, !req.Enabled); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"node_id": nodeID, "summaries": req.Enabled})
+}
+
 // --- Semantic search ----------------------------------------------------
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -294,12 +355,20 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request, p *Princip
 		return
 	}
 	topK, _ := strconv.Atoi(r.URL.Query().Get("k"))
-	hits, status, err := s.semanticSearch(r.Context(), tenantID, q, topK)
+	res, status, err := s.semanticSearch(r.Context(), tenantID, q, topK)
 	if err != nil {
 		httpError(w, status, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"hits": hits})
+	writeJSON(w, http.StatusOK, res)
+}
+
+// searchResult is the response of every semantic search surface.
+type searchResult struct {
+	Hits []searchHitJSON `json:"hits"`
+	// Reranked is true when Score is the fleet reranker's relevance
+	// (§8.4) rather than the cosine similarity.
+	Reranked bool `json:"reranked,omitempty"`
 }
 
 // searchHitJSON is the provenance contract of every retrieval result
@@ -316,19 +385,83 @@ type searchHitJSON struct {
 	CharEnd     int64    `json:"char_end"`
 	Snippet     string   `json:"snippet"`
 	Score       float64  `json:"score"`
+	// VectorScore is the cosine similarity when the hit was reranked.
+	VectorScore float64 `json:"vector_score,omitempty"`
 }
 
-func (s *Server) semanticSearch(ctx context.Context, tenantID, q string, topK int) ([]searchHitJSON, int, error) {
+func (s *Server) semanticSearch(ctx context.Context, tenantID, q string, topK int) (searchResult, int, error) {
 	emb := s.activeEmbedder()
 	vecs, err := emb.Embed(ctx, []string{q}, search.Query)
 	if err != nil {
-		return nil, http.StatusBadGateway, err
+		return searchResult{}, http.StatusBadGateway, err
 	}
-	hits, err := s.Store.SearchEmbeddings(ctx, tenantID, emb.Space(), vecs[0], topK)
+	rr := s.activeReranker()
+	hits, err := s.Store.SearchEmbeddings(ctx, tenantID, emb.Space(), vecs[0], recallLimit(topK, rr != nil))
 	if err != nil {
-		return nil, http.StatusInternalServerError, err
+		return searchResult{}, http.StatusInternalServerError, err
 	}
-	return s.hitsToJSON(ctx, tenantID, hits), http.StatusOK, nil
+	hits, reranked := applyRerank(ctx, rr, q, hits, topK)
+	return searchResult{Hits: s.hitsToJSON(ctx, tenantID, hits), Reranked: reranked}, http.StatusOK, nil
+}
+
+// normTopK applies the search surface's default and ceiling.
+func normTopK(topK int) int {
+	if topK <= 0 || topK > 50 {
+		return 10
+	}
+	return topK
+}
+
+// recallLimit is how many vector candidates to fetch: the caller's topK
+// without a reranker; with one, a wider net (4x, between 20 and 50) for
+// the cross-encoder to re-order (§8.4).
+func recallLimit(topK int, rerank bool) int {
+	k := normTopK(topK)
+	if !rerank {
+		return k
+	}
+	n := k * 4
+	if n < 20 {
+		n = 20
+	}
+	if n > 50 {
+		n = 50
+	}
+	return n
+}
+
+// applyRerank re-orders vector candidates by the fleet reranker's
+// relevance and keeps the top topK. The reranker is a quality leg, not a
+// gate: when it is unconfigured or fails, the vector order stands (logged),
+// so search never goes dark because one fleet instance is down.
+func applyRerank(ctx context.Context, rr *search.FleetReranker, q string, hits []store.SearchHit, topK int) ([]store.SearchHit, bool) {
+	k := normTopK(topK)
+	if rr == nil || len(hits) == 0 {
+		if len(hits) > k {
+			hits = hits[:k]
+		}
+		return hits, false
+	}
+	docs := make([]string, len(hits))
+	for i, h := range hits {
+		docs[i] = h.Content
+	}
+	res, err := rr.Rerank(ctx, q, docs, k)
+	if err != nil {
+		log.Printf("search: rerank (%s): %v; returning vector order", rr.Model, err)
+		if len(hits) > k {
+			hits = hits[:k]
+		}
+		return hits, false
+	}
+	out := make([]store.SearchHit, 0, len(res))
+	for _, r := range res {
+		h := hits[r.Index]
+		h.VectorScore = h.Score
+		h.Score = r.Score
+		out = append(out, h)
+	}
+	return out, true
 }
 
 // hitsToJSON resolves section paths and snippets for a set of hits,
@@ -341,6 +474,7 @@ func (s *Server) hitsToJSON(ctx context.Context, tenantID string, hits []store.S
 			NodeID: h.NodeID, Name: h.Name,
 			SectionID: h.SectionAnchor, ChunkIndex: h.ChunkIndex,
 			CharStart: h.CharStart, CharEnd: h.CharEnd, Score: h.Score,
+			VectorScore: h.VectorScore,
 		}
 		if len(h.Content) > 400 {
 			hit.Snippet = h.Content[:400] + "…"
@@ -564,19 +698,19 @@ func (s *Server) toolSearchSemantic(w http.ResponseWriter, r *http.Request, p *P
 		httpError(w, http.StatusBadRequest, errors.New("query required"))
 		return
 	}
-	var hits []searchHitJSON
+	var res searchResult
 	var status int
 	var err error
 	if req.AssistantScope {
-		hits, status, err = s.semanticSearchScoped(r.Context(), req.TenantID, req.Query, req.TopK)
+		res, status, err = s.semanticSearchScoped(r.Context(), req.TenantID, req.Query, req.TopK)
 	} else {
-		hits, status, err = s.semanticSearch(r.Context(), req.TenantID, req.Query, req.TopK)
+		res, status, err = s.semanticSearch(r.Context(), req.TenantID, req.Query, req.TopK)
 	}
 	if err != nil {
 		httpError(w, status, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"hits": hits})
+	writeJSON(w, http.StatusOK, res)
 }
 
 // toolDocTree is get_doc_tree for agents.

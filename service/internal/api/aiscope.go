@@ -236,21 +236,23 @@ func (s *Server) nodeInAIScope(ctx context.Context, tenantID, nodeID string) boo
 
 // semanticSearchScoped runs the search restricted to the AI-scoped node
 // set (§8.7). Used when a caller requests assistant-scoped search.
-func (s *Server) semanticSearchScoped(ctx context.Context, tenantID, q string, topK int) ([]searchHitJSON, int, error) {
+func (s *Server) semanticSearchScoped(ctx context.Context, tenantID, q string, topK int) (searchResult, int, error) {
 	allow, err := s.aiScopeNodeSet(ctx, tenantID)
 	if err != nil {
-		return nil, http.StatusInternalServerError, err
+		return searchResult{}, http.StatusInternalServerError, err
 	}
 	emb := s.activeEmbedder()
 	vecs, err := emb.Embed(ctx, []string{q}, search.Query)
 	if err != nil {
-		return nil, http.StatusBadGateway, err
+		return searchResult{}, http.StatusBadGateway, err
 	}
-	hits, err := s.Store.SearchEmbeddingsScoped(ctx, tenantID, emb.Space(), vecs[0], topK, allow)
+	rr := s.activeReranker()
+	hits, err := s.Store.SearchEmbeddingsScoped(ctx, tenantID, emb.Space(), vecs[0], recallLimit(topK, rr != nil), allow)
 	if err != nil {
-		return nil, http.StatusInternalServerError, err
+		return searchResult{}, http.StatusInternalServerError, err
 	}
-	return s.hitsToJSON(ctx, tenantID, hits), http.StatusOK, nil
+	hits, reranked := applyRerank(ctx, rr, q, hits, topK)
+	return searchResult{Hits: s.hitsToJSON(ctx, tenantID, hits), Reranked: reranked}, http.StatusOK, nil
 }
 
 func (s *Server) handleEnableAITool(fn func(http.ResponseWriter, *http.Request, *Principal)) func(http.ResponseWriter, *http.Request, *Principal) {
