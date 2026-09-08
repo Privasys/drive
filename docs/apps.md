@@ -174,11 +174,11 @@ would scan more than 256 MiB in one call is refused with
 `SEARCH_RAW_OUTPUT_OVERFLOW`; narrow it with `include` or a smaller
 root.
 
-### Rediscover after a redeploy
+### Rediscover from the key
 
 `GET /v1/grants/mine` with the AppGrant as bearer lists every active
-grant bound to that key, so an app that lost its local state finds its
-folders again without asking the user.
+grant bound to that key, so a new instance of the app, on a fresh volume
+or a second host, finds its folders again without asking the user.
 
 ## 3. Workspace snapshots
 
