@@ -22,6 +22,8 @@ Go binary that:
   grants and sealed sessions.
 - Accepts three data-plane identities: platform OIDC bearers, AppGrant
   tokens, and session-relay sealed sessions (the relay-asserted
+  When a call arrives over an attested channel the grant's subject must
+  equal the runtime-verified app id (a token alone never suffices).
   `X-Privasys-Sub`, how the wallet and browsers reach the enclave).
   Sealed identity carries no roles, so it is data-plane only.
 - Mints + verifies Ed25519-signed AppGrant tokens that let third-party
