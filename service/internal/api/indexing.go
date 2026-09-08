@@ -612,3 +612,19 @@ func (s *Server) toolReadSection(w http.ResponseWriter, r *http.Request, p *Prin
 	r2.SetPathValue("sectionID", req.SectionID)
 	s.handleReadSection(w, r2, p)
 }
+
+// scheduleIndexingChecked queues a rewritten or appended file for indexing
+// unless the node or any folder above it is excluded, in which case the
+// node is marked skipped and nothing is queued. Content replacement used to
+// consult only the node's own mark.
+func (s *Server) scheduleIndexingChecked(ctx context.Context, n *store.Node) {
+	if _, noIndex, err := s.Store.NodeIndexMeta(ctx, n.TenantID, n.ID); err == nil && noIndex {
+		_ = s.Store.SetIndexStatus(ctx, n.TenantID, n.ID, store.IndexSkipped)
+		return
+	}
+	if excluded, err := s.Store.HasNoIndexAncestor(ctx, n.TenantID, n.ID); err == nil && excluded {
+		_ = s.Store.SetIndexStatus(ctx, n.TenantID, n.ID, store.IndexSkipped)
+		return
+	}
+	s.scheduleIndexing(ctx, n, false)
+}

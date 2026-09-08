@@ -80,10 +80,7 @@ func (s *Server) appendNodeContent(ctx context.Context, p *Principal, tenantID, 
 		}
 		return 0, 0, storeErrorStatus(err), err
 	}
-	if _, noIndex, merr := s.Store.NodeIndexMeta(ctx, tenantID, n.ID); merr == nil && !noIndex {
-		n.WrappedCEK, n.ManifestRef, n.PlainSize, n.MerkleRoot = wr.WrappedCEK, wr.ManifestKey, wr.Manifest.PlainSize, root
-		s.scheduleIndexing(ctx, n, false)
-	}
+	s.scheduleIndexingChecked(ctx, n)
 	return newRev, wr.Manifest.PlainSize, http.StatusOK, nil
 }
 

@@ -193,13 +193,13 @@ func TestCapabilityFolderIsConfinedToAppData(t *testing.T) {
 
 func TestSanitiseFolderName(t *testing.T) {
 	cases := map[string]string{
-		"  Harness ":         "Harness",
-		"a/b/c":              "a-b-c",
-		"..":                 "",
-		"../":                "",
-		"-  -":               "",
-		"...hidden":          "hidden",
-		"":                   "",
+		"  Harness ":             "Harness",
+		"a/b/c":                  "a-b-c",
+		"..":                     "",
+		"../":                    "",
+		"-  -":                   "",
+		"...hidden":              "hidden",
+		"":                       "",
 		strings.Repeat("x", 120): strings.Repeat("x", 100),
 	}
 	for in, want := range cases {
@@ -226,5 +226,46 @@ func TestResolveAppDisplayNameFallsBackSilently(t *testing.T) {
 	}
 	if got := resolveAppDisplayName(context.Background(), "http://127.0.0.1:1", "x"); got != "" {
 		t.Fatalf("unreachable control plane resolved to %q", got)
+	}
+}
+
+// A folder created for an app is excluded from the user's searchable memory
+// at creation, and re-approval finds the folder through the normaliser and
+// the grant's meta even when the stored subject uses an older spelling.
+func TestCapabilityFolderReuseAndNoIndex(t *testing.T) {
+	var srv *Server
+	ts := newFullServer(t, func(s *Server) { srv = s })
+	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	appA := "0123456789abcdef0123456789abcdef"
+	approve := func(folder string) (int, map[string]string) {
+		req := `{"nonce":"n1","subject_app_id":"` + appA + `","binding_pubkey":"cGs=","permissions":["read","write"],"kind":"storage.folder","request":{"folder":"` + folder + `"}}`
+		resp, b := doJSON(t, "POST", ts.URL+"/v1/capabilities", devAuth, req)
+		var out struct {
+			ServiceResult map[string]string `json:"service_result"`
+		}
+		_ = json.Unmarshal(b, &out)
+		return resp.StatusCode, out.ServiceResult
+	}
+	st, first := approve("Harness")
+	if st != 201 {
+		t.Fatalf("approve: %d", st)
+	}
+	if _, noIndex, err := srv.Store.NodeIndexMeta(context.Background(), tenant.ID, first["node_id"]); err != nil || !noIndex {
+		t.Fatalf("app folder must be excluded from indexing at creation (noIndex=%v err=%v)", noIndex, err)
+	}
+	// Rewrite the grant's subject to an older spelling (a code digest) but
+	// keep the meta app_id: the next approval must still reuse the folder.
+	gs, _ := srv.Grants.ListForNode(context.Background(), tenant.ID, first["node_id"])
+	if len(gs) != 1 {
+		t.Fatalf("grants on folder: %d", len(gs))
+	}
+	if _, err := srv.Store.DB.Exec(`UPDATE grants SET subject = ? WHERE id = ?`, "app:"+strings.Repeat("ab", 32), gs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	st, again := approve("Harness")
+	if st != 201 || again["node_id"] != first["node_id"] {
+		t.Fatalf("re-approval with an older subject spelling made a second folder: %d %q vs %q", st, again["node_id"], first["node_id"])
 	}
 }

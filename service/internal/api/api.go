@@ -964,7 +964,11 @@ func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentI
 	}
 	// Searchable by default: schedule semantic indexing unless the
 	// upload opted out (folder exclusions re-check inside the worker).
-	s.scheduleIndexing(ctx, n, noIndex)
+	if noIndex {
+		s.scheduleIndexing(ctx, n, true)
+	} else {
+		s.scheduleIndexingChecked(ctx, n)
+	}
 	return n, http.StatusCreated, nil
 }
 

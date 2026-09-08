@@ -312,14 +312,21 @@ func (s *Server) appFolder(r *http.Request, p *Principal, tenantID, parentID, la
 			}
 		}
 		if existing == nil {
-			return s.createFolder(r.Context(), p, tenantID, parentID, name)
+			created, status, err := s.createFolder(r.Context(), p, tenantID, parentID, name)
+			if err == nil {
+				// An app's folder is not part of the user's searchable memory
+				// unless the user says so: apps cannot mark their own folder,
+				// so Drive excludes it at creation (the user can re-enable it).
+				_ = s.Store.SetNoIndex(r.Context(), tenantID, created.ID, true)
+			}
+			return created, status, err
 		}
 		owned, err := s.Grants.ListForNode(r.Context(), tenantID, existing.ID)
 		if err != nil {
 			return nil, http.StatusInternalServerError, err
 		}
 		for _, g := range owned {
-			if g.Subject == grants.SubjectApp+appID {
+			if grantNamesApp(g, appID) {
 				return existing, http.StatusOK, nil
 			}
 		}
@@ -398,4 +405,21 @@ func capabilityMeta(req capabilityRequest, path, appID string) string {
 		return ""
 	}
 	return string(raw)
+}
+
+// grantNamesApp reports whether a grant on a folder belongs to appID: by its
+// subject through the normaliser (older grants carry a code digest or a
+// dashed id) or by the app id its capability meta recorded. Comparing the raw
+// subject string once left an app with two folders.
+func grantNamesApp(g *grants.Grant, appID string) bool {
+	if grants.NormaliseAppSubject(g.Subject) == appID {
+		return true
+	}
+	var meta struct {
+		AppID string `json:"app_id"`
+	}
+	if g.Meta != "" && json.Unmarshal([]byte(g.Meta), &meta) == nil && meta.AppID == appID {
+		return true
+	}
+	return false
 }

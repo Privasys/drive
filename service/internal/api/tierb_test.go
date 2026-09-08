@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/Privasys/drive/service/internal/store"
 	"io"
 	"net/http"
 	"strings"
@@ -220,5 +222,39 @@ func TestD7GrantsMine(t *testing.T) {
 	_ = json.Unmarshal(rb, &out)
 	if len(out.Grants) != 0 {
 		t.Fatalf("other key saw grants: %s", rb)
+	}
+}
+
+// Replacing or appending to a file under an excluded folder must not queue it
+// for indexing: the node ends up skipped, never pending.
+func TestReplaceUnderNoIndexFolderStaysExcluded(t *testing.T) {
+	var srv *Server
+	ts := newFullServer(t, func(s *Server) { srv = s })
+	_, body := doJSON(t, "POST", ts.URL+"/v1/tenants", devAuth, `{"kind":"user","name":"a"}`)
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	st, _, _ := rawReq(t, "PUT", ts.URL+"/v1/tenants/"+tenant.ID+"/path?root=&path=App/log.txt", devAuth, "one", map[string]string{"X-Drive-Parents": "create"})
+	if st != 201 {
+		t.Fatalf("put: %d", st)
+	}
+	_, fb, _ := rawReq(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/path?root=&path=App", devAuth, "", nil)
+	var folder struct{ ID string }
+	_ = json.Unmarshal(fb, &folder)
+	if resp, b := doJSON(t, "PUT", ts.URL+"/v1/tenants/"+tenant.ID+"/nodes/"+folder.ID+"/indexing", devAuth, `{"enabled":false}`); resp.StatusCode != 200 {
+		t.Fatalf("exclude folder: %d %s", resp.StatusCode, b)
+	}
+	_, nb, _ := rawReq(t, "GET", ts.URL+"/v1/tenants/"+tenant.ID+"/path?root=&path=App/log.txt", devAuth, "", nil)
+	_ = nb
+	kids, _ := srv.Store.ListChildren(context.Background(), tenant.ID, folder.ID)
+	fileID := kids[0].ID
+	if st, b, _ := rawReq(t, "PUT", ts.URL+"/v1/tenants/"+tenant.ID+"/nodes/"+fileID+"/content", devAuth, "two", nil); st != 200 {
+		t.Fatalf("replace: %d %s", st, b)
+	}
+	if st, b, _ := rawReq(t, "POST", ts.URL+"/v1/tenants/"+tenant.ID+"/nodes/"+fileID+"/append", devAuth, "three", nil); st != 200 {
+		t.Fatalf("append: %d %s", st, b)
+	}
+	status, _, err := srv.Store.NodeIndexMeta(context.Background(), tenant.ID, fileID)
+	if err != nil || status != string(store.IndexSkipped) {
+		t.Fatalf("index status after writes under an excluded folder = %q (err %v), want skipped", status, err)
 	}
 }
