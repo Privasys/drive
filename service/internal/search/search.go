@@ -191,6 +191,10 @@ type FleetEmbedder struct {
 	Model   string
 	APIKey  string
 	Client  *http.Client
+	// Decorate, when set, names the paying user on the outbound request
+	// (a spend token for the acting user carried in ctx). Indexing calls
+	// carry no user and go out as the app.
+	Decorate func(ctx context.Context, req *http.Request)
 }
 
 func (f *FleetEmbedder) Space() string {
@@ -217,6 +221,9 @@ func (f *FleetEmbedder) Embed(ctx context.Context, texts []string, mode Mode) ([
 	req.Header.Set("Content-Type", "application/json")
 	if f.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+f.APIKey)
+	}
+	if f.Decorate != nil {
+		f.Decorate(ctx, req)
 	}
 	client := f.Client
 	if client == nil {

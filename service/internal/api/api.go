@@ -6,6 +6,8 @@
 package api
 
 import (
+	"enclave-os-mini/clients/go/spend"
+
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -359,6 +361,9 @@ func (s *Server) Handler(manifestPath string) http.Handler {
 	mux.Handle("PUT /api/v1/mcp/settings", s.auth(s.handleMCPSettingsPut))
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /readiness", s.handleReadiness)
+	// Spend-key JWKS (spend.go): the identity provider fetches it from this
+	// origin before issuing Drive a spend token for a user.
+	mux.HandleFunc("GET "+spend.WellKnownPath, handleSpendKeys)
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.Handle("POST /status", s.auth(s.handleStatusTool))
 	mux.Handle("POST /configure", s.auth(s.handleConfigure))
@@ -653,11 +658,26 @@ func (s *Server) verifyAttestedAssistant(r *http.Request) (*Principal, error) {
 	if !assistantMeasurementAllowed(cfg.AssistantEnclaveMeasurement, appID, digest) {
 		return nil, errors.New("attested caller is not the configured assistant enclave")
 	}
-	sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader))
+	sub := assistantActingSubject(r)
 	if sub == "" && !isAssistantCatalogueRequest(r) {
-		return nil, errors.New("missing on-behalf-of subject")
+		return nil, errors.New("missing acting subject (spend token or on-behalf-of)")
 	}
 	return &Principal{Sub: sub, Via: viaAssistant}, nil
+}
+
+// assistantActingSubject names the user an assistant enclave acts for: the
+// runtime-asserted PAYER of a spend token (spend.go) when the caller sent
+// one, else the transitional on-behalf-of header. The two agree on a
+// caller running both; the second is deleted once no caller sends it.
+func assistantActingSubject(r *http.Request) string {
+	if sub := strings.TrimSpace(r.Header.Get(payerHeader)); sub != "" {
+		return sub
+	}
+	if sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader)); sub != "" {
+		log.Printf("assistant: legacy on-behalf-of subject (no spend token) on %s %s", r.Method, r.URL.Path)
+		return sub
+	}
+	return ""
 }
 
 // assistantMeasurementAllowed reports whether the verified peer (its app id,
@@ -701,7 +721,7 @@ func (s *Server) verifyAssistantEnclave(r *http.Request, tok string) (*Principal
 	if subtle.ConstantTimeCompare([]byte(tok), []byte(cfg.AssistantEnclaveToken)) != 1 {
 		return nil, errors.New("credential mismatch")
 	}
-	sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader))
+	sub := assistantActingSubject(r)
 	if sub == "" && !isAssistantCatalogueRequest(r) {
 		return nil, errors.New("missing on-behalf-of subject")
 	}

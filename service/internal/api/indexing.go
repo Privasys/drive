@@ -82,7 +82,8 @@ func (s *Server) activeEmbedder() search.Embedder {
 	}
 	return &search.FleetEmbedder{
 		BaseURL: cfg.EmbeddingsBaseURL, Model: model, APIKey: cfg.EmbeddingsAPIKey,
-		Client: s.pinnedFleetClient(cfg),
+		Client:   s.pinnedFleetClient(cfg),
+		Decorate: spendDecorate,
 	}
 }
 
@@ -355,7 +356,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request, p *Princip
 		return
 	}
 	topK, _ := strconv.Atoi(r.URL.Query().Get("k"))
-	res, status, err := s.semanticSearch(r.Context(), tenantID, q, topK)
+	// The query embedding is inference the searching user pays for.
+	res, status, err := s.semanticSearch(withSpendSubject(r.Context(), p.Sub), tenantID, q, topK)
 	if err != nil {
 		httpError(w, status, err)
 		return
@@ -701,10 +703,12 @@ func (s *Server) toolSearchSemantic(w http.ResponseWriter, r *http.Request, p *P
 	var res searchResult
 	var status int
 	var err error
+	// The query embedding is inference the acting user pays for.
+	sctx := withSpendSubject(r.Context(), p.Sub)
 	if req.AssistantScope {
-		res, status, err = s.semanticSearchScoped(r.Context(), req.TenantID, req.Query, req.TopK)
+		res, status, err = s.semanticSearchScoped(sctx, req.TenantID, req.Query, req.TopK)
 	} else {
-		res, status, err = s.semanticSearch(r.Context(), req.TenantID, req.Query, req.TopK)
+		res, status, err = s.semanticSearch(sctx, req.TenantID, req.Query, req.TopK)
 	}
 	if err != nil {
 		httpError(w, status, err)
