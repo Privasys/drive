@@ -23,7 +23,7 @@ defaults:
 env:
   # The go.mod replace-directive targets; keep in lockstep with the
   # ARGs in service/Dockerfile.
-  RA_TLS_CLIENTS_REF: c6c63216dc5a0915569826e3ba2c1efdf44de6b0
+  RA_TLS_CLIENTS_REF: a5c458d7601eb88ff4eec357037a9421294d8619
   ENCLAVE_VAULTS_CLIENT_REF: 23a24d9016fb81def9d755acf21d03836c700274
 
 jobs:
