@@ -269,3 +269,23 @@ func TestCapabilityFolderReuseAndNoIndex(t *testing.T) {
 		t.Fatalf("re-approval with an older subject spelling made a second folder: %d %q vs %q", st, again["node_id"], first["node_id"])
 	}
 }
+
+// The runtime forwards the declared label in a kind-agnostic envelope, so
+// Drive accepts "label"; older runtimes still send Drive's own word for it.
+// Both must work, or the two roll in lockstep.
+func TestCapabilityRequestAcceptsLabelAndTheOlderFolder(t *testing.T) {
+	for _, c := range []struct {
+		what string
+		body storageFolderRequest
+		want string
+	}{
+		{"the generic envelope", storageFolderRequest{Label: "Harness"}, "Harness"},
+		{"an older runtime", storageFolderRequest{Folder: "Harness"}, "Harness"},
+		{"both, label winning", storageFolderRequest{Label: "New", Folder: "Old"}, "New"},
+		{"neither", storageFolderRequest{}, ""},
+	} {
+		if got := c.body.name(); got != c.want {
+			t.Errorf("%s: want %q, got %q", c.what, c.want, got)
+		}
+	}
+}

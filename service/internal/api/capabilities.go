@@ -72,7 +72,22 @@ type capabilityRequest struct {
 }
 
 type storageFolderRequest struct {
+	// Label is the app's declared resource label, forwarded by the runtime in
+	// a kind-agnostic envelope. Drive is what turns a label into a folder
+	// name; the runtime does not know what a folder is and should not.
+	Label string `json:"label"`
+	// Folder is the older spelling of the same value, from a runtime that
+	// still emits Drive's own vocabulary. Accepted so the two can be rolled
+	// independently; remove once no fleet sends it.
 	Folder string `json:"folder"`
+}
+
+// name is the label the holder approved, under whichever spelling arrived.
+func (r storageFolderRequest) name() string {
+	if r.Label != "" {
+		return r.Label
+	}
+	return r.Folder
 }
 
 type capabilityResponse struct {
@@ -209,10 +224,11 @@ func (s *Server) handleCreateCapability(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	// The app's folder name: the label the holder approved on the wallet screen
-	// (the app's resource_label, forwarded as request.folder), else the app's
-	// display name as the control plane knows it, else the app id. Never a path:
-	// the app is confined to its one folder under AppData.
-	label := sanitiseFolderName(body.Folder)
+	// (the app's resource_label, forwarded as request.label, or request.folder
+	// from an older runtime), else the app's display name as the control plane
+	// knows it, else the app id. Never a path: the app is confined to its one
+	// folder under AppData.
+	label := sanitiseFolderName(body.name())
 
 	// The boundary, derived. Not read from anywhere in the request.
 	tenant, err := s.Store.PersonalTenantOf(r.Context(), p.Sub)
