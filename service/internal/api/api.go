@@ -357,6 +357,7 @@ func (s *Server) Handler(manifestPath string) http.Handler {
 	// MCP shim for the confidential-AI agent (§8.7 RAG-in-enclave).
 	mux.Handle("GET /api/v1/mcp/tools", s.auth(s.handleMCPList))
 	mux.Handle("POST /api/v1/mcp/tools/{tool}", s.auth(s.handleMCPCall))
+	mux.Handle("GET /api/v1/mcp/ai-scope", s.auth(s.handleMCPAIScope))
 	mux.Handle("GET /api/v1/mcp/settings", s.auth(s.handleMCPSettingsGet))
 	mux.Handle("PUT /api/v1/mcp/settings", s.auth(s.handleMCPSettingsPut))
 	mux.HandleFunc("GET /health", s.handleHealth)

@@ -120,12 +120,25 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request, p *Princi
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
+	// A harness may narrow this call to a folder set (knowledge.go): the
+	// field is lifted out of the arguments into the request context, where
+	// aiScopeNodeSet intersects it with the user's AI scope. It can only
+	// narrow, so accepting it from any assistant caller is safe.
+	body, folderIDs, err := splitFolderFilter(body)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
 	merged, err := injectTenantID(body, t.ID)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	r2 := r.Clone(r.Context())
+	ctx := r.Context()
+	if folderIDs != nil {
+		ctx = withFolderFilter(ctx, folderIDs)
+	}
+	r2 := r.Clone(ctx)
 	r2.Body = io.NopCloser(bytes.NewReader(merged))
 	r2.ContentLength = int64(len(merged))
 	h(w, r2, p)

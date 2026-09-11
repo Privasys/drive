@@ -213,7 +213,13 @@ func (s *Server) aiScopeNodeSet(ctx context.Context, tenantID string) ([]string,
 	for id := range roots {
 		rootIDs = append(rootIDs, id)
 	}
-	return s.Store.DescendantNodeIDs(ctx, tenantID, rootIDs)
+	scoped, err := s.Store.DescendantNodeIDs(ctx, tenantID, rootIDs)
+	if err != nil {
+		return nil, err
+	}
+	// A per-call folder filter (knowledge.go) narrows the scope further;
+	// it never widens it.
+	return s.applyFolderFilter(ctx, tenantID, scoped)
 }
 
 // nodeInAIScope reports whether a node is inside the tenant's AI-scoped set
