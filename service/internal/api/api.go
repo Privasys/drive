@@ -408,6 +408,9 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/tenants/{tenantID}/uploads/{uploadID}/finalize", s.auth(s.handleFinalizeUpload))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/uploads/{uploadID}", s.auth(s.handleAbortUpload))
 	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}", s.auth(s.handleDownloadFile))
+	// A selection of files and folders leaves as one ZIP, built in the
+	// enclave: a browser cannot write a folder tree to disk itself.
+	mux.Handle("POST /v1/tenants/{tenantID}/download.zip", s.auth(s.handleDownloadZip))
 	mux.Handle("GET /v1/tenants/{tenantID}/metrics", s.auth(s.handleTenantMetrics))
 	// Conversations in Drive (§8.7).
 	mux.Handle("POST /v1/tenants/{tenantID}/conversations", s.auth(s.handleCreateConversation))
@@ -904,34 +907,93 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request, p *Pri
 		http.Error(w, "name query parameter required", http.StatusBadRequest)
 		return
 	}
-	n, status, err := s.uploadFile(r.Context(), p, tenantID, q.Get("parent_id"), name, q.Get("mime"), r.Body, q.Get("index") == "false")
+	// overwrite=true rewrites a file of the same name in place instead of
+	// colliding; the answer is 200 for a replacement, 201 for a new file.
+	n, status, err := s.uploadFileInto(r.Context(), p, tenantID, q.Get("parent_id"), name, q.Get("mime"), r.Body, uploadOpts{
+		noIndex:  q.Get("index") == "false",
+		replace:  q.Get("overwrite") == "true",
+		declared: r.ContentLength,
+	})
 	if err != nil {
 		httpError(w, status, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, nodeView(n))
+	writeJSON(w, status, nodeView(n))
 }
 
+// uploadOpts carries the upload variations. declared is the plaintext
+// size when it is known up front (Content-Length, or the staged size of
+// a finished chunked session), else -1: replacing needs it, because the
+// replacement is written over the existing blob and cannot be rolled
+// back if it turns out to exceed the quota.
+type uploadOpts struct {
+	noIndex  bool
+	replace  bool
+	declared int64
+}
+
+// uploadFile stores an uploaded file under a free name, conflicting when
+// the name is taken.
 func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentID, name, mime string, body io.Reader, noIndex bool) (*store.Node, int, error) {
+	return s.uploadFileInto(ctx, p, tenantID, parentID, name, mime, body, uploadOpts{noIndex: noIndex, declared: -1})
+}
+
+// uploadFileInto stores an uploaded file. With opts.replace, a FILE of the
+// same name in the destination is rewritten in place, keeping its node id
+// and with it every share, link and index entry pointing at it; a FOLDER
+// of that name still conflicts. Without it the name must be free.
+func (s *Server) uploadFileInto(ctx context.Context, p *Principal, tenantID, parentID, name, mime string, body io.Reader, opts uploadOpts) (*store.Node, int, error) {
 	if !s.allowNode(ctx, p, tenantID, parentID, grants.ScopeWrite) {
 		return nil, http.StatusForbidden, errors.New("forbidden")
+	}
+	// Resolve what is being replaced before anything is written: its bytes
+	// are about to be freed, so they count as quota headroom below.
+	var existing *store.Node
+	if opts.replace {
+		prev, perr := s.Store.ChildByName(ctx, tenantID, parentID, name)
+		switch {
+		case perr != nil && !errors.Is(perr, store.ErrNotFound):
+			return nil, storeErrorStatus(perr), perr
+		case perr == nil && prev != nil && prev.Kind != store.NodeFile:
+			return nil, http.StatusConflict, fmt.Errorf("a folder named %q already exists here", name)
+		case perr == nil && prev != nil:
+			if !s.allowNode(ctx, p, tenantID, prev.ID, grants.ScopeWrite) {
+				return nil, http.StatusForbidden, errors.New("forbidden")
+			}
+			existing = prev
+		}
 	}
 	// Quota: a 0 limit is unlimited. Fast-reject when already at/over the
 	// ceiling; otherwise cap the upload so a streamed body cannot blow
 	// past it, and make the precise check after the write.
 	limit := s.quotaLimit()
-	var remaining int64
+	var free int64
 	if limit > 0 {
 		used, uerr := s.Store.TenantUsageBytes(ctx, tenantID)
 		if uerr != nil {
 			return nil, http.StatusInternalServerError, uerr
 		}
-		remaining = limit - used
-		if remaining <= 0 {
+		free = limit - used
+		if existing != nil {
+			free += existing.PlainSize // the bytes this write replaces
+		}
+		if free <= 0 {
 			return nil, http.StatusRequestEntityTooLarge,
 				fmt.Errorf("tenant storage quota reached (%d bytes)", limit)
 		}
-		body = io.LimitReader(body, remaining+1)
+		if existing != nil {
+			// A replacement overwrites the blob as it streams, so an
+			// over-quota body cannot be undone after the fact: decide from
+			// the declared size before a byte is written.
+			if opts.declared < 0 {
+				return nil, http.StatusLengthRequired, errors.New("replacing a file needs a known content length")
+			}
+			if opts.declared > free {
+				return nil, http.StatusRequestEntityTooLarge,
+					fmt.Errorf("replacement would exceed the tenant storage quota (%d bytes)", limit)
+			}
+		}
+		body = io.LimitReader(body, free+1)
 	}
 	mek, err := s.tenantMEK(ctx, tenantID)
 	if err != nil {
@@ -941,27 +1003,18 @@ func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentI
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	hmacKey, err := crypto.DeriveNameHMACKey(mek, tenantID)
-	if err != nil {
-		return nil, http.StatusInternalServerError, err
-	}
-	n := &store.Node{
-		TenantID: tenantID,
-		Kind:     store.NodeFile,
-		Name:     name,
-		NameHMAC: crypto.NameHMAC(hmacKey, name),
-		MimeHint: mime,
-	}
-	n.ID = store.NewID()
-	if parentID != "" {
-		n.ParentID.String = parentID
-		n.ParentID.Valid = true
+	// The manifest key derives from the node id, so a replacement writes
+	// under the EXISTING id: the file keeps its identity, and every share,
+	// link and index row that points at it stays valid.
+	targetID := store.NewID()
+	if existing != nil {
+		targetID = existing.ID
 	}
 	bk, err := s.backendFor(ctx, tenantID)
 	if err != nil {
 		return nil, http.StatusBadGateway, err
 	}
-	wr, err := manifest.Write(ctx, bk, dek, tenantID, n.ID, mime, 0, body)
+	wr, err := manifest.Write(ctx, bk, dek, tenantID, targetID, mime, 0, body)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
@@ -969,14 +1022,44 @@ func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentI
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	n.MerkleRoot = root
-	n.WrappedCEK = wr.WrappedCEK
-	n.ManifestRef = wr.ManifestKey
-	n.PlainSize = wr.Manifest.PlainSize
+	if existing != nil {
+		if err := s.Store.UpdateNodeContent(ctx, tenantID, existing.ID, wr.WrappedCEK, root,
+			wr.ManifestKey, wr.Manifest.PlainSize, p.Sub); err != nil {
+			return nil, http.StatusInternalServerError, err
+		}
+		existing.WrappedCEK, existing.ManifestRef = wr.WrappedCEK, wr.ManifestKey
+		existing.MerkleRoot, existing.PlainSize = root, wr.Manifest.PlainSize
+		if opts.noIndex {
+			s.scheduleIndexing(ctx, existing, true)
+		} else {
+			s.scheduleIndexingChecked(ctx, existing)
+		}
+		return existing, http.StatusOK, nil
+	}
+	hmacKey, err := crypto.DeriveNameHMACKey(mek, tenantID)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	n := &store.Node{
+		TenantID:    tenantID,
+		Kind:        store.NodeFile,
+		Name:        name,
+		NameHMAC:    crypto.NameHMAC(hmacKey, name),
+		MimeHint:    mime,
+		ID:          targetID,
+		MerkleRoot:  root,
+		WrappedCEK:  wr.WrappedCEK,
+		ManifestRef: wr.ManifestKey,
+		PlainSize:   wr.Manifest.PlainSize,
+	}
+	if parentID != "" {
+		n.ParentID.String = parentID
+		n.ParentID.Valid = true
+	}
 	// Precise quota check now that the true size is known: the capped
-	// reader let at most remaining+1 bytes through, so a file exactly at
-	// remaining passes and anything larger is rejected and cleaned up.
-	if limit > 0 && n.PlainSize > remaining {
+	// reader let at most free+1 bytes through, so a file exactly at the
+	// ceiling passes and anything larger is rejected and cleaned up.
+	if limit > 0 && n.PlainSize > free {
 		_ = manifest.Delete(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
 		return nil, http.StatusRequestEntityTooLarge,
 			fmt.Errorf("upload would exceed the tenant storage quota (%d bytes)", limit)
@@ -986,7 +1069,7 @@ func (s *Server) uploadFile(ctx context.Context, p *Principal, tenantID, parentI
 	}
 	// Searchable by default: schedule semantic indexing unless the
 	// upload opted out (folder exclusions re-check inside the worker).
-	if noIndex {
+	if opts.noIndex {
 		s.scheduleIndexing(ctx, n, true)
 	} else {
 		s.scheduleIndexingChecked(ctx, n)

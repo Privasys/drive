@@ -32,18 +32,19 @@ const (
 )
 
 type uploadSession struct {
-	ID       string
-	TenantID string
-	ParentID string
-	Name     string
-	Mime     string
-	Sub      string // creator; parts and finalize must match
-	Declared int64  // declared total size (0 = unknown)
-	NoIndex  bool   // explicit exclude-from-index flag
-	Next     int    // next expected part index
-	Bytes    int64
-	Path     string
-	Created  time.Time
+	ID        string
+	TenantID  string
+	ParentID  string
+	Name      string
+	Mime      string
+	Sub       string // creator; parts and finalize must match
+	Declared  int64  // declared total size (0 = unknown)
+	NoIndex   bool   // explicit exclude-from-index flag
+	Overwrite bool   // replace a file of the same name instead of conflicting
+	Next      int    // next expected part index
+	Bytes     int64
+	Path      string
+	Created   time.Time
 }
 
 type uploadRegistry struct {
@@ -88,8 +89,10 @@ type createUploadRequest struct {
 	ParentID string `json:"parent_id"`
 	Name     string `json:"name"`
 	Mime     string `json:"mime"`
-	Size     int64  `json:"size"` // declared plaintext size; 0 = unknown
+	Size     int64  `json:"size"`            // declared plaintext size; 0 = unknown
 	Index    *bool  `json:"index,omitempty"` // false excludes from the semantic index
+	// Overwrite replaces a file of the same name in the destination.
+	Overwrite bool `json:"overwrite,omitempty"`
 }
 
 func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -130,15 +133,16 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request, p *P
 		return
 	}
 	u := &uploadSession{
-		ID:       store.NewID(),
-		TenantID: tenantID,
-		ParentID: req.ParentID,
-		Name:     req.Name,
-		Mime:     req.Mime,
-		Sub:      p.Sub,
-		Declared: req.Size,
-		NoIndex:  req.Index != nil && !*req.Index,
-		Created:  time.Now(),
+		ID:        store.NewID(),
+		TenantID:  tenantID,
+		ParentID:  req.ParentID,
+		Name:      req.Name,
+		Mime:      req.Mime,
+		Sub:       p.Sub,
+		Declared:  req.Size,
+		NoIndex:   req.Index != nil && !*req.Index,
+		Overwrite: req.Overwrite,
+		Created:   time.Now(),
 	}
 	u.Path = filepath.Join(s.stagingDir(), u.ID)
 	if f, err := os.OpenFile(u.Path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err != nil {
@@ -242,7 +246,15 @@ func (s *Server) handleFinalizeUpload(w http.ResponseWriter, r *http.Request, p 
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
-	n, status, err := s.uploadFile(r.Context(), p, u.TenantID, u.ParentID, u.Name, u.Mime, f, u.NoIndex)
+	// The staged size is exact, which a replacement needs: it overwrites
+	// the existing blob as it streams and cannot be rolled back.
+	declared := int64(-1)
+	if st, serr := f.Stat(); serr == nil {
+		declared = st.Size()
+	}
+	n, status, err := s.uploadFileInto(r.Context(), p, u.TenantID, u.ParentID, u.Name, u.Mime, f, uploadOpts{
+		noIndex: u.NoIndex, replace: u.Overwrite, declared: declared,
+	})
 	f.Close()
 	if err != nil {
 		// Keep the session on transient errors so the client may retry
@@ -254,7 +266,7 @@ func (s *Server) handleFinalizeUpload(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 	s.dropUpload(u.ID, true)
-	writeJSON(w, http.StatusCreated, nodeView(n))
+	writeJSON(w, status, nodeView(n))
 }
 
 func (s *Server) handleAbortUpload(w http.ResponseWriter, r *http.Request, p *Principal) {
