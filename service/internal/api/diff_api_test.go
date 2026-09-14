@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/Privasys/drive/service/internal/diff"
@@ -163,5 +164,27 @@ func TestDiffRefusesNonText(t *testing.T) {
 
 	if code, _ := getDiff(t, ts.URL, tenantID, img.ID, owner, ""); code != http.StatusUnsupportedMediaType {
 		t.Fatalf("non-text diff: want 415, got %d", code)
+	}
+}
+
+// TestIdenticalRevisionsAnswerAnEmptyList: comparing a revision with itself
+// changes nothing, and the answer must still carry a list. A nil slice
+// marshals as null, which breaks any client that iterates the field, and it
+// does so only in the case where nothing changed.
+func TestIdenticalRevisionsAnswerAnEmptyList(t *testing.T) {
+	ts, _ := newTestServer(t)
+	const owner = "user-1"
+	tenantID, fileID, _ := ownerTenantWithFile(t, ts.URL, owner)
+	replaceContent(t, ts.URL, tenantID, fileID, owner, "one line\n")
+
+	v := listVersions(t, ts.URL, tenantID, fileID, owner)
+	code, b := doReq(t, bearerReq(t, "GET",
+		fmt.Sprintf("%s/v1/tenants/%s/nodes/%s/diff?from=%d&to=%d", ts.URL, tenantID, fileID, v.Rev, v.Rev),
+		owner, ""))
+	if code != http.StatusOK {
+		t.Fatalf("diff: %d %s", code, b)
+	}
+	if !strings.Contains(string(b), `"hunks":[]`) {
+		t.Fatalf(`want "hunks":[] for an unchanged comparison, got %s`, b)
 	}
 }

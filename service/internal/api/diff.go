@@ -129,12 +129,19 @@ func (s *Server) handleDiffVersions(w http.ResponseWriter, r *http.Request, p *P
 		}
 	}
 	res := diff.Unified(string(oldBytes), string(newBytes), context)
+	// An empty result is an empty list, never null: a nil slice marshals as
+	// null, and a client that iterates the field without guarding would
+	// fail on exactly the case where nothing changed.
+	hunks := res.Hunks
+	if hunks == nil {
+		hunks = []diff.Hunk{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"node_id":   nodeID,
 		"from_rev":  fromRev,
 		"to_rev":    toRev,
 		"identical": res.Identical,
 		"truncated": res.Truncated,
-		"hunks":     res.Hunks,
+		"hunks":     hunks,
 	})
 }
