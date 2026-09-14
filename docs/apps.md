@@ -161,6 +161,29 @@ a file that is appended to once per turn does not accumulate one revision
 per turn. Retention keeps the last ten superseded revisions for thirty
 days; past that a revision is deleted outright, bytes included.
 
+### What changed
+
+```
+GET /v1/tenants/{t}/nodes/{id}/diff
+GET /v1/tenants/{t}/nodes/{id}/diff?from=<rev>&to=<rev>&context=3
+```
+
+compares two revisions of a TEXT file and answers `{node_id, from_rev,
+to_rev, identical, truncated, hunks[]}`. Each hunk carries the usual
+unified-diff header (`old_start`, `old_lines`, `new_start`, `new_lines`)
+and its lines, each tagged ` ` unchanged, `-` removed or `+` added.
+
+Both bounds default usefully: `to` is the file as it stands and `from` the
+revision before it, so asking with no arguments answers what the last save
+changed. `context` is how many unchanged lines frame each change.
+
+The comparison runs inside the enclave, because both revisions are
+decryptable there and nowhere else; only the result leaves. A file with no
+earlier revision answers 404, a non-text file 415, and a revision beyond 2
+MiB 413. Two revisions sharing almost nothing answer `truncated: true`
+with a single wholesale hunk rather than a line-by-line comparison nobody
+would read.
+
 ### Range reads
 
 ```

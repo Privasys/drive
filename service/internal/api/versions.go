@@ -169,16 +169,10 @@ func (s *Server) handleReadVersion(w http.ResponseWriter, r *http.Request, p *Pr
 		httpError(w, status, err)
 		return
 	}
-	// The live revision is not history; serve it from the node itself so a
-	// file written before versioning still answers for its current bytes.
-	objectID, wrapped := contentObjectID(n), n.WrappedCEK
-	if rev != n.Rev {
-		v, verr := s.Store.GetFileVersion(r.Context(), tenantID, nodeID, rev)
-		if verr != nil {
-			writeStoreError(w, verr)
-			return
-		}
-		objectID, wrapped = v.ObjectID, v.WrappedCEK
+	objectID, wrapped, verr := s.revisionSource(r.Context(), tenantID, n, rev)
+	if verr != nil {
+		writeStoreError(w, verr)
+		return
 	}
 	_, rc, err := manifest.Read(r.Context(), bk, dek, tenantID, objectID, wrapped)
 	if err != nil {

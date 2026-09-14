@@ -458,6 +458,8 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/versions", s.auth(s.handleListVersions))
 	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/versions/{rev}", s.auth(s.handleReadVersion))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/versions/{rev}/restore", s.auth(s.handleRestoreVersion))
+	// What changed between two revisions, compared inside the enclave.
+	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/diff", s.auth(s.handleDiffVersions))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/append", s.auth(s.handleAppendContent))
 	mux.Handle("GET /v1/tenants/{tenantID}/path", s.auth(s.handleStatPath))
 	mux.Handle("PUT /v1/tenants/{tenantID}/path", s.auth(s.handleWritePath))
