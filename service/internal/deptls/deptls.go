@@ -129,12 +129,15 @@ func NewHTTPClient(set ratls.DependencySet, creds CredentialSource, allowDebugIm
 		}
 		return cli.Conn(), nil
 	}
+	// Verified connections are pooled (verify once per channel) and retired
+	// inside the peer's verdict window, or on its lapsed-verdict refusal
+	// (verdict.go).
 	return &http.Client{
-		Transport: &http.Transport{
+		Transport: newVerdictTransport(&http.Transport{
 			DialTLSContext:      dial,
 			MaxIdleConnsPerHost: 4,
 			IdleConnTimeout:     60 * time.Second,
-		},
+		}),
 		Timeout: 120 * time.Second,
 	}
 }
