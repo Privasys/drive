@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -147,5 +148,67 @@ func TestBeyondTheEditBudgetDegradesHonestly(t *testing.T) {
 	h := r.Hunks[0]
 	if h.OldLines != 2000 || h.NewLines != 2000 {
 		t.Fatalf("wholesale hunk should cover both sides: %+v", struct{ O, N int }{h.OldLines, h.NewLines})
+	}
+}
+
+// A hunk exists because something changed in it. One containing nothing but
+// context would render as a list of unchanged lines under a heading saying
+// nothing changed, which tells the reader the view is broken.
+func TestEveryHunkContainsAChange(t *testing.T) {
+	cases := [][2]string{
+		{"a\nb\nc\n", "a\nB\nc\n"},
+		{"a\nb\nc\nd\ne\nf\ng\n", "a\nb\nc\nd\ne\nf\nG\n"},
+		{"a\nb\nc\nd\ne\nf\ng\n", "A\nb\nc\nd\ne\nf\ng\n"},
+		{"1\n2\n3\n4\n5\n", "1\n2\n3\n4\n5\n6\n"},
+		{"1\n2\n3\n4\n5\n6\n", "1\n2\n3\n4\n5\n"},
+		{strings.Repeat("x\n", 40) + "tail\n", strings.Repeat("x\n", 40) + "TAIL\n"},
+		{"head\n" + strings.Repeat("y\n", 40), "HEAD\n" + strings.Repeat("y\n", 40)},
+	}
+	for _, ctx := range []int{0, 1, 3, 10} {
+		for i, tc := range cases {
+			res := Unified(tc[0], tc[1], ctx)
+			if res.Identical {
+				t.Fatalf("case %d ctx %d: reported identical", i, ctx)
+			}
+			for h, hunk := range res.Hunks {
+				changed := false
+				for _, l := range hunk.Lines {
+					if l.Op != OpEqual {
+						changed = true
+						break
+					}
+				}
+				if !changed {
+					t.Fatalf("case %d ctx %d: hunk %d has only context: %+v", i, ctx, h, hunk)
+				}
+			}
+		}
+	}
+}
+
+// The API documents each line as tagged " ", "-" or "+". Op is a byte, and
+// a byte marshals as a NUMBER, so without this the wire carries 45 where
+// every client is told to expect "-". Go decodes its own number back into a
+// byte happily, which is why only a non-Go reader ever sees the difference.
+func TestOpMarshalsAsTheCharacterTheAPIDocuments(t *testing.T) {
+	b, err := json.Marshal(Line{Op: OpDelete, Text: "gone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"op":"-"`) {
+		t.Fatalf(`want "op":"-" on the wire, got %s`, b)
+	}
+	for _, op := range []Op{OpEqual, OpDelete, OpInsert} {
+		raw, err := json.Marshal(Line{Op: op})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back Line
+		if err := json.Unmarshal(raw, &back); err != nil {
+			t.Fatalf("round trip %q: %v", string(op), err)
+		}
+		if back.Op != op {
+			t.Fatalf("round trip %q gave %q", string(op), string(back.Op))
+		}
 	}
 }

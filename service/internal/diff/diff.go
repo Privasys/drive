@@ -16,7 +16,10 @@
 // enclave's memory on a comparison nobody wants to read.
 package diff
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Op is what happened to a line between the two revisions.
 type Op byte
@@ -26,6 +29,23 @@ const (
 	OpDelete Op = '-'
 	OpInsert Op = '+'
 )
+
+// MarshalJSON writes the tag as the character it is (" ", "-", "+").
+// Without this a byte would go out as a number, and every consumer that is
+// not Go would read 45 where the API says "-".
+func (o Op) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + string(rune(o)) + `"`), nil
+}
+
+// UnmarshalJSON accepts that same character.
+func (o *Op) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	if len(s) != 1 {
+		return fmt.Errorf("diff: op %q is not a single character", string(b))
+	}
+	*o = Op(s[0])
+	return nil
+}
 
 // Line is one line of the result, tagged with what happened to it.
 type Line struct {
