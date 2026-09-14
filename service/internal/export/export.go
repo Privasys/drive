@@ -169,7 +169,7 @@ func walk(ctx context.Context, st *store.Store, tenantID, parentID, basePath str
 }
 
 func writePlainEntry(ctx context.Context, zw *zip.Writer, backend objectstore.Backend, dek []byte, tenantID string, e entry, obsidian bool, pathByID map[string]string) error {
-	_, rc, err := manifest.Read(ctx, backend, dek, tenantID, e.Node.ID, e.Node.WrappedCEK)
+	_, rc, err := manifest.Read(ctx, backend, dek, tenantID, manifest.ObjectID(e.Node.ManifestRef, e.Node.ID), e.Node.WrappedCEK)
 	if err != nil {
 		return fmt.Errorf("export: read %s: %w", e.FullPath, err)
 	}

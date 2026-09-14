@@ -55,7 +55,7 @@ func (s *Server) toolPurgeTenant(w http.ResponseWriter, r *http.Request, p *Prin
 			if bk, berr := s.backendFor(r.Context(), req.TenantID); berr == nil {
 				for _, n := range files {
 					if n.WrappedCEK != nil {
-						if manifest.Delete(r.Context(), bk, dek, req.TenantID, n.ID, n.WrappedCEK) == nil {
+						if manifest.Delete(r.Context(), bk, dek, req.TenantID, contentObjectID(n), n.WrappedCEK) == nil {
 							chunksDeleted++
 						}
 					}

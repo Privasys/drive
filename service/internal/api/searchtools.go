@@ -227,7 +227,7 @@ func (s *Server) toolGrep(w http.ResponseWriter, r *http.Request, p *Principal) 
 			})
 			return
 		}
-		_, rc, rerr := manifest.Read(ctx, bk, dek, req.TenantID, f.node.ID, f.node.WrappedCEK)
+		_, rc, rerr := manifest.Read(ctx, bk, dek, req.TenantID, contentObjectID(f.node), f.node.WrappedCEK)
 		if rerr != nil {
 			continue // unreadable file: skip rather than fail the search
 		}

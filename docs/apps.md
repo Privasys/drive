@@ -138,6 +138,29 @@ POST /v1/tenants/{t}/nodes/{id}/append    If-Match: "<rev>" (optional)
 re-read, merge, retry against `N`. Append adds chunks under the file's
 existing key, so a log grows in time proportional to what is added.
 
+### Previous versions
+
+A replacement keeps what it replaced. The new bytes are written under an
+id of their own, the file keeps its node id, and the superseded content
+stays readable as a revision:
+
+```
+GET  /v1/tenants/{t}/nodes/{id}/versions
+GET  /v1/tenants/{t}/nodes/{id}/versions/{rev}
+POST /v1/tenants/{t}/nodes/{id}/versions/{rev}/restore
+```
+
+The list answers `{node_id, rev, versions[]}`, newest first, each entry
+carrying its `rev`, size, mime hint, who wrote it and when; the entry whose
+rev matches the file's is marked `current`. Reading a revision streams the
+bytes it held. Restoring writes that content back as a NEW revision, so a
+restore is itself undoable and history stays linear.
+
+Appends do not create revisions: they extend the same content in place, so
+a file that is appended to once per turn does not accumulate one revision
+per turn. Retention keeps the last ten superseded revisions for thirty
+days; past that a revision is deleted outright, bytes included.
+
 ### Range reads
 
 ```

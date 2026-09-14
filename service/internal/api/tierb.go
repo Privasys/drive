@@ -109,18 +109,26 @@ func (s *Server) writeNodeContent(ctx context.Context, p *Principal, tenantID, n
 	if err != nil {
 		return 0, http.StatusBadGateway, err
 	}
-	wr, err := manifest.Write(ctx, bk, dek, tenantID, n.ID, n.MimeHint, 0, strings.NewReader(string(content)))
+	// The replacement goes to an id of its own; the bytes being replaced
+	// stay where they are and become this file's previous version.
+	objectID := store.NewID()
+	wr, err := manifest.Write(ctx, bk, dek, tenantID, objectID, n.MimeHint, 0, strings.NewReader(string(content)))
 	if err != nil {
 		return 0, http.StatusInternalServerError, err
 	}
 	root, _ := hex.DecodeString(wr.Manifest.MerkleRoot)
 	newRev, err := s.Store.UpdateNodeContentCond(ctx, tenantID, n.ID, wr.WrappedCEK, root, wr.ManifestKey, wr.Manifest.PlainSize, p.Sub, ifRev)
 	if err != nil {
+		// A refused writer leaves nothing behind: the row still points at
+		// the old content, so reclaim what this write put in the bucket.
+		_ = manifest.Delete(ctx, bk, dek, tenantID, objectID, wr.WrappedCEK)
 		if errors.Is(err, store.ErrStale) {
 			return 0, http.StatusPreconditionFailed, err
 		}
 		return 0, storeErrorStatus(err), err
 	}
+	s.recordContentVersion(ctx, bk, dek, tenantID, n, objectID, wr.ManifestKey,
+		root, wr.WrappedCEK, wr.Manifest.PlainSize, newRev, p.Sub)
 	s.scheduleIndexingChecked(ctx, n)
 	return newRev, http.StatusOK, nil
 }
@@ -239,7 +247,7 @@ func (s *Server) serveRange(w http.ResponseWriter, r *http.Request, p *Principal
 		httpError(w, http.StatusRequestedRangeNotSatisfiable, errors.New("range beyond end"))
 		return
 	}
-	rc, total, err := manifest.ReadRange(r.Context(), bk, dek, tenantID, fileID, n.WrappedCEK, off, length)
+	rc, total, err := manifest.ReadRange(r.Context(), bk, dek, tenantID, contentObjectID(n), n.WrappedCEK, off, length)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return
@@ -258,7 +266,7 @@ func (s *Server) serveRange(w http.ResponseWriter, r *http.Request, p *Principal
 
 // streamFull writes the whole decrypted file (the multi-range fallback).
 func (s *Server) streamFull(w http.ResponseWriter, r *http.Request, p *Principal, n *store.Node, bk objectstore.Backend, dek []byte, tenantID, fileID string) {
-	_, rc, err := manifest.Read(r.Context(), bk, dek, tenantID, fileID, n.WrappedCEK)
+	_, rc, err := manifest.Read(r.Context(), bk, dek, tenantID, contentObjectID(n), n.WrappedCEK)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return

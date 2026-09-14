@@ -65,6 +65,19 @@ func manifestKey(tenantID, fileID string) string {
 	return path.Join(keyPrefix(tenantID), "m", fileID)
 }
 
+// ObjectID recovers the id a stored manifest reference was written under.
+// Content is addressed by that id, not by the node id: a file's history
+// keeps each revision under its own id (the manifest key and the chunk AAD
+// both derive from it), so a reader must ask the row it came from rather
+// than assume the node. Content written before versioning has no reference
+// recorded, hence the fallback.
+func ObjectID(manifestRef, fallback string) string {
+	if manifestRef == "" {
+		return fallback
+	}
+	return path.Base(manifestRef)
+}
+
 // Write reads plaintext from r, chunks + AEAD-seals each chunk under a
 // fresh per-file CEK, persists the chunks via backend, builds a Merkle
 // root + sealed manifest, and persists the manifest.
@@ -290,13 +303,16 @@ func Delete(
 	tenantID, fileID string,
 	wrappedCEK []byte,
 ) error {
-	man, rc, err := Read(ctx, backend, dek, tenantID, fileID, wrappedCEK)
+	// ReadMeta, not Read: the chunk table is everything a delete needs, and
+	// Read would spawn a streaming goroutine that still holds chunk files
+	// open as the loop below unlinks them (an open file does not unlink on
+	// Windows, leaving the chunk behind).
+	man, _, err := ReadMeta(ctx, backend, dek, tenantID, fileID, wrappedCEK)
 	if err != nil {
 		// If we cannot decrypt, still drop the raw blobs we know about.
 		_ = backend.Delete(ctx, manifestKey(tenantID, fileID))
 		return err
 	}
-	rc.Close()
 	for _, c := range man.Chunks {
 		_ = backend.Delete(ctx, chunkKey(tenantID, c.CipherHash))
 	}

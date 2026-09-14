@@ -194,6 +194,30 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS nodes_unique_name
 			ON nodes(tenant_id, (COALESCE(parent_id,'')), name_hmac)`,
 		`CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(tenant_id, parent_id)`,
+		// A file's retained history: one row per kept revision, addressing
+		// that revision's own sealed manifest and chunks. The node row keeps
+		// pointing at the current content, so reads are unaffected; these rows
+		// are what "previous versions" reads from, and what eviction deletes
+		// (rows AND blobs) rather than leaving behind.
+		`CREATE TABLE IF NOT EXISTS file_versions (
+			tenant_id TEXT NOT NULL,
+			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+			rev BIGINT NOT NULL,
+			-- object_id addresses this version's manifest and chunk AAD; it is
+			-- the node id for content written before versioning, and
+			-- <node id>.v<rev> after it.
+			object_id TEXT NOT NULL,
+			manifest_ref TEXT NOT NULL DEFAULT '',
+			wrapped_cek ` + blob + `,
+			merkle_root ` + blob + `,
+			plain_size BIGINT NOT NULL DEFAULT 0,
+			mime_hint TEXT NOT NULL DEFAULT '',
+			actor TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (node_id, rev)
+		)`,
+		`CREATE INDEX IF NOT EXISTS file_versions_node
+			ON file_versions(tenant_id, node_id, rev)`,
 		// node_id is nullable and foreign-keyed to nodes: a node-scoped
 		// share references a real node (FK-enforced, cascades on node
 		// delete), and a tenant-wide grant (e.g. an escrowed recovery)

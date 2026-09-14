@@ -80,7 +80,7 @@ func writeZipFile(
 	n *store.Node,
 	zipPath string,
 ) error {
-	_, rc, err := manifest.Read(ctx, backend, dek, tenantID, n.ID, n.WrappedCEK)
+	_, rc, err := manifest.Read(ctx, backend, dek, tenantID, manifest.ObjectID(n.ManifestRef, n.ID), n.WrappedCEK)
 	if err != nil {
 		return fmt.Errorf("download: read %s: %w", zipPath, err)
 	}

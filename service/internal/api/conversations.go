@@ -305,7 +305,7 @@ func (s *Server) handleAppendTurn(w http.ResponseWriter, r *http.Request, p *Pri
 			httpError(w, status, cerr)
 			return
 		}
-		rc, _, rerr := manifest.ReadRange(r.Context(), bk, dek, tenantID, n.ID, n.WrappedCEK, tr.PlainSize-1, 1)
+		rc, _, rerr := manifest.ReadRange(r.Context(), bk, dek, tenantID, contentObjectID(n), n.WrappedCEK, tr.PlainSize-1, 1)
 		if rerr != nil {
 			httpError(w, http.StatusInternalServerError, rerr)
 			return
@@ -568,19 +568,24 @@ func (s *Server) overwriteFile(ctx context.Context, p *Principal, tenantID, node
 	if err != nil {
 		return nil, http.StatusBadGateway, err
 	}
-	// Write reuses the same manifest key (fileID), overwriting the blob
-	// in place. The previous chunks orphan harmlessly (content-addressed,
-	// possibly shared); a manifest.Delete here would wipe the manifest we
-	// just wrote, since Write and Delete key on the same fileID.
-	wr, err := manifest.Write(ctx, bk, dek, tenantID, n.ID, n.MimeHint, 0, bytes.NewReader(content))
+	// The replacement is written under an id of its own, so the content it
+	// supersedes stays readable as this file's previous version instead of
+	// being overwritten where it lies.
+	prev := *n
+	objectID := store.NewID()
+	wr, err := manifest.Write(ctx, bk, dek, tenantID, objectID, n.MimeHint, 0, bytes.NewReader(content))
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
 	root, _ := hex.DecodeString(wr.Manifest.MerkleRoot)
-	if err := s.Store.UpdateNodeContent(ctx, tenantID, n.ID, wr.WrappedCEK, root,
-		wr.ManifestKey, wr.Manifest.PlainSize, p.Sub); err != nil {
-		return nil, http.StatusInternalServerError, err
+	newRev, uerr := s.Store.UpdateNodeContentCond(ctx, tenantID, n.ID, wr.WrappedCEK, root,
+		wr.ManifestKey, wr.Manifest.PlainSize, p.Sub, -1)
+	if uerr != nil {
+		_ = manifest.Delete(ctx, bk, dek, tenantID, objectID, wr.WrappedCEK)
+		return nil, http.StatusInternalServerError, uerr
 	}
+	s.recordContentVersion(ctx, bk, dek, tenantID, &prev, objectID, wr.ManifestKey,
+		root, wr.WrappedCEK, wr.Manifest.PlainSize, newRev, p.Sub)
 	n.WrappedCEK, n.ManifestRef, n.PlainSize = wr.WrappedCEK, wr.ManifestKey, wr.Manifest.PlainSize
 	n.MerkleRoot = root
 	// Keep the semantic index current for indexed files (digest.md).

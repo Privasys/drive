@@ -68,7 +68,7 @@ func (s *Server) appendNodeContent(ctx context.Context, p *Principal, tenantID, 
 	if err != nil {
 		return 0, 0, http.StatusBadGateway, err
 	}
-	wr, err := manifest.Append(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK, bytes.NewReader(content))
+	wr, err := manifest.Append(ctx, bk, dek, tenantID, contentObjectID(n), n.WrappedCEK, bytes.NewReader(content))
 	if err != nil {
 		return 0, 0, http.StatusInternalServerError, err
 	}

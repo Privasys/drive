@@ -454,6 +454,10 @@ func (s *Server) Routes() http.Handler {
 	// replace (D1), path addressing (D2), and grant lookup by key (D7).
 	// Range reads (D4) ride the existing download route.
 	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/content", s.auth(s.handleReplaceContent))
+	// File history: what a file held before, and putting it back.
+	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/versions", s.auth(s.handleListVersions))
+	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/versions/{rev}", s.auth(s.handleReadVersion))
+	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/versions/{rev}/restore", s.auth(s.handleRestoreVersion))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/append", s.auth(s.handleAppendContent))
 	mux.Handle("GET /v1/tenants/{tenantID}/path", s.auth(s.handleStatPath))
 	mux.Handle("PUT /v1/tenants/{tenantID}/path", s.auth(s.handleWritePath))
@@ -1003,12 +1007,15 @@ func (s *Server) uploadFileInto(ctx context.Context, p *Principal, tenantID, par
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	// The manifest key derives from the node id, so a replacement writes
-	// under the EXISTING id: the file keeps its identity, and every share,
-	// link and index row that points at it stays valid.
-	targetID := store.NewID()
+	// A new file keeps its content under its own node id. A replacement
+	// writes to an id of its own, so the content it supersedes stays
+	// readable as history instead of being overwritten in place. The node
+	// keeps its identity either way, and with it every share, link and
+	// index row that points at the file.
+	nodeID := store.NewID()
+	targetID := nodeID
 	if existing != nil {
-		targetID = existing.ID
+		targetID = store.NewID()
 	}
 	bk, err := s.backendFor(ctx, tenantID)
 	if err != nil {
@@ -1023,12 +1030,20 @@ func (s *Server) uploadFileInto(ctx context.Context, p *Principal, tenantID, par
 		return nil, http.StatusInternalServerError, err
 	}
 	if existing != nil {
-		if err := s.Store.UpdateNodeContent(ctx, tenantID, existing.ID, wr.WrappedCEK, root,
-			wr.ManifestKey, wr.Manifest.PlainSize, p.Sub); err != nil {
-			return nil, http.StatusInternalServerError, err
+		prev := *existing
+		newRev, uerr := s.Store.UpdateNodeContentCond(ctx, tenantID, existing.ID, wr.WrappedCEK, root,
+			wr.ManifestKey, wr.Manifest.PlainSize, p.Sub, -1)
+		if uerr != nil {
+			// The row still points at the old content, so what was just
+			// written is unreachable: reclaim it rather than leak it.
+			_ = manifest.Delete(ctx, bk, dek, tenantID, targetID, wr.WrappedCEK)
+			return nil, storeErrorStatus(uerr), uerr
 		}
 		existing.WrappedCEK, existing.ManifestRef = wr.WrappedCEK, wr.ManifestKey
 		existing.MerkleRoot, existing.PlainSize = root, wr.Manifest.PlainSize
+		existing.Rev = newRev
+		s.recordContentVersion(ctx, bk, dek, tenantID, &prev, targetID, wr.ManifestKey,
+			root, wr.WrappedCEK, wr.Manifest.PlainSize, newRev, p.Sub)
 		if opts.noIndex {
 			s.scheduleIndexing(ctx, existing, true)
 		} else {
@@ -1046,7 +1061,7 @@ func (s *Server) uploadFileInto(ctx context.Context, p *Principal, tenantID, par
 		Name:        name,
 		NameHMAC:    crypto.NameHMAC(hmacKey, name),
 		MimeHint:    mime,
-		ID:          targetID,
+		ID:          nodeID,
 		MerkleRoot:  root,
 		WrappedCEK:  wr.WrappedCEK,
 		ManifestRef: wr.ManifestKey,
@@ -1206,7 +1221,7 @@ func (s *Server) openFile(ctx context.Context, p *Principal, tenantID, fileID st
 	if err != nil {
 		return nil, nil, status, err
 	}
-	_, rc, err := manifest.Read(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
+	_, rc, err := manifest.Read(ctx, bk, dek, tenantID, contentObjectID(n), n.WrappedCEK)
 	if err != nil {
 		return nil, nil, http.StatusInternalServerError, err
 	}
@@ -1284,7 +1299,11 @@ func (s *Server) deleteFileBlobs(ctx context.Context, tenantID string, files []*
 		if n == nil || n.Kind != store.NodeFile || n.WrappedCEK == nil {
 			continue
 		}
-		_ = manifest.Delete(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
+		// Every retained revision is addressed by an id of its own, so the
+		// node's current blob alone would leave history behind.
+		live := contentObjectID(n)
+		s.deleteVersionBlobs(ctx, bk, dek, tenantID, n.ID, live)
+		_ = manifest.Delete(ctx, bk, dek, tenantID, live, n.WrappedCEK)
 	}
 }
 

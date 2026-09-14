@@ -250,7 +250,7 @@ func (s *Server) readWorkspaceManifest(ctx context.Context, p *Principal, tenant
 	if err != nil {
 		return nil, nil, status, err
 	}
-	_, rc, err := manifest.Read(ctx, bk, dek, tenantID, mf.ID, mf.WrappedCEK)
+	_, rc, err := manifest.Read(ctx, bk, dek, tenantID, contentObjectID(mf), mf.WrappedCEK)
 	if err != nil {
 		return nil, nil, http.StatusInternalServerError, err
 	}
@@ -340,7 +340,7 @@ func (s *Server) handleWorkspaceZip(w http.ResponseWriter, r *http.Request, p *P
 		if err != nil {
 			return // headers already sent; the stream is what it is
 		}
-		_, rc, err := manifest.Read(r.Context(), bk, dek, tenantID, blob.ID, n.WrappedCEK)
+		_, rc, err := manifest.Read(r.Context(), bk, dek, tenantID, contentObjectID(n), n.WrappedCEK)
 		if err != nil {
 			missing = append(missing, rel)
 			continue

@@ -250,7 +250,7 @@ func (s *Server) indexContent(ctx context.Context, tenantID, nodeID string) (io.
 	if err != nil {
 		return nil, err
 	}
-	_, rc, err := manifest.Read(ctx, bk, dek, tenantID, n.ID, n.WrappedCEK)
+	_, rc, err := manifest.Read(ctx, bk, dek, tenantID, contentObjectID(n), n.WrappedCEK)
 	return rc, err
 }
 
