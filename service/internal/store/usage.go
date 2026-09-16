@@ -101,3 +101,38 @@ func (s *Store) WorkspaceManifestIDs(ctx context.Context, tenantID string, folde
 	}
 	return out, nil
 }
+
+// SubtreeStats is what a node holds beneath it, root included.
+type SubtreeStats struct {
+	Files   int64 `json:"files"`
+	Folders int64 `json:"folders"`
+	Bytes   int64 `json:"bytes"`
+}
+
+// SubtreeStats counts what deleting a node would take with it. The file
+// count is the number that matters: reclaiming the sealed blobs costs a
+// round trip per file (more, for a file with retained revisions), so a
+// thousand small files take far longer than one large one and the byte
+// total would mislead about the wait.
+//
+// One recursive query, like UsageByChildren, so asking costs the same on a
+// deep tree as on an empty one.
+func (s *Store) SubtreeStats(ctx context.Context, tenantID, rootID string) (SubtreeStats, error) {
+	var out SubtreeStats
+	row := s.DB.QueryRowContext(ctx, s.q(
+		`WITH RECURSIVE tree(id) AS (
+		    SELECT id FROM nodes WHERE tenant_id = ? AND id = ?
+		    UNION ALL
+		    SELECT n.id FROM nodes n JOIN tree t ON n.parent_id = t.id WHERE n.tenant_id = ?
+		 )
+		 SELECT
+		    COALESCE(SUM(CASE WHEN n.kind = 'file' THEN 1 ELSE 0 END), 0),
+		    COALESCE(SUM(CASE WHEN n.kind = 'folder' THEN 1 ELSE 0 END), 0),
+		    COALESCE(SUM(CASE WHEN n.kind = 'file' THEN n.plain_size ELSE 0 END), 0)
+		 FROM tree t JOIN nodes n ON n.id = t.id`),
+		tenantID, rootID, tenantID)
+	if err := row.Scan(&out.Files, &out.Folders, &out.Bytes); err != nil {
+		return SubtreeStats{}, err
+	}
+	return out, nil
+}

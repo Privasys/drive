@@ -161,6 +161,23 @@ a file that is appended to once per turn does not accumulate one revision
 per turn. Retention keeps the last ten superseded revisions for thirty
 days; past that a revision is deleted outright, bytes included.
 
+### What a node holds
+
+```
+GET /v1/tenants/{t}/nodes/{id}/subtree
+```
+
+answers `{files, folders, bytes}` for the node and everything beneath it,
+the node itself included, so a file answers one file and its own bytes. One
+recursive query, so asking costs the same on a deep tree as on a shallow one.
+
+It exists so a caller can say what an action will take with it before
+starting one. Deleting a folder is the case that needs it: the service
+answers the single DELETE only once it has reclaimed the sealed blobs of
+every file underneath, which is a round trip per file, so the file count is
+what predicts the wait. The byte total would mislead, because a thousand
+small files take far longer than one large one.
+
 ### What changed
 
 ```

@@ -448,6 +448,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}/sections/{sectionID}", s.auth(s.handleReadSection))
 	mux.Handle("PUT /v1/tenants/{tenantID}/nodes/{nodeID}/acl", s.auth(s.handleSetNodeACL))
 	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/permissions", s.auth(s.handleNodePermissions))
+	mux.Handle("GET /v1/tenants/{tenantID}/nodes/{nodeID}/subtree", s.auth(s.handleSubtreeStats))
 	// Wallet-facing capability endpoint: the ownership boundary is derived
 	// from the authenticated user, so this route carries no tenant.
 	// Tier B (plans/drive-as-remote-disk.md): revision-fenced content
