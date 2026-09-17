@@ -467,6 +467,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/grants/mine", s.handleGrantsMine)
 
 	mux.Handle("POST /v1/capabilities", s.auth(s.handleCreateCapability))
+	// The holder-facing pair. Same contract as the mint, tenant derived from
+	// the authenticated user, so the wallet can show and end what it granted
+	// without ever naming an ownership boundary. See capabilities_holder.go.
+	mux.Handle("GET /v1/capabilities", s.auth(s.handleListCapabilities))
+	mux.Handle("DELETE /v1/capabilities/{capabilityID}", s.auth(s.handleRevokeCapability))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/grants/{grantID}", s.auth(s.handleRevokeGrant))
 	// Share links: owner mints/lists on a node (revoke reuses the grant
