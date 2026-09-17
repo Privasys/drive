@@ -127,15 +127,38 @@ func (s *Store) CountOwners(ctx context.Context, tenantID string) (int, error) {
 	return n, err
 }
 
-// SwitchTenantKeys atomically migrates a tenant to a new master key:
-// rewrap mutates each node in place (re-wrapped CEK for files, fresh
-// name HMAC for every node), and the tenant's mek_ref is committed in
-// the same transaction, so a crash leaves the tenant fully on the old
-// key or fully on the new one. Returns the number of nodes updated.
-func (s *Store) SwitchTenantKeys(ctx context.Context, tenantID, mekRef string, rewrap func(*Node) error) (int, error) {
+// TenantKeySwitch carries the re-keying callbacks for SwitchTenantKeys. Both
+// are required: every artifact keyed off the tenant MEK must move in the one
+// transaction, or the tenant is left half-readable.
+type TenantKeySwitch struct {
+	// Node re-keys a node row in place: a fresh name HMAC for every node,
+	// and a re-wrapped CEK for the ones that carry content.
+	Node func(*Node) error
+	// CEK re-wraps a stored wrapped-CEK blob from the old DEK to the new
+	// one. Used for rows that carry a CEK but no name of their own — the
+	// retained revisions in file_versions.
+	CEK func([]byte) ([]byte, error)
+}
+
+// TenantKeySwitchCounts reports what a switch moved, for the operator log.
+type TenantKeySwitchCounts struct {
+	Nodes    int
+	Versions int
+}
+
+// SwitchTenantKeys atomically migrates a tenant to a new master key: every
+// node (re-wrapped CEK for files, fresh name HMAC for all) and every retained
+// revision's own wrapped CEK are re-keyed, and the tenant's mek_ref is
+// committed in the SAME transaction — so a crash leaves the tenant fully on
+// the old key or fully on the new one, never in between.
+func (s *Store) SwitchTenantKeys(ctx context.Context, tenantID, mekRef string, sw TenantKeySwitch) (TenantKeySwitchCounts, error) {
+	var zero TenantKeySwitchCounts
+	if sw.Node == nil || sw.CEK == nil {
+		return zero, fmt.Errorf("%w: tenant key switch needs both re-wrap callbacks", ErrInvalidInput)
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return zero, err
 	}
 	defer tx.Rollback()
 
@@ -144,41 +167,91 @@ func (s *Store) SwitchTenantKeys(ctx context.Context, tenantID, mekRef string, r
 		        wrapped_cek, manifest_ref, merkle_root, acl_override, created_at, updated_at, rev
 		 FROM nodes WHERE tenant_id = ?`), tenantID)
 	if err != nil {
-		return 0, err
+		return zero, err
 	}
 	var nodes []*Node
 	for rows.Next() {
 		n, serr := scanNode(rows)
 		if serr != nil {
 			rows.Close()
-			return 0, serr
+			return zero, serr
 		}
 		nodes = append(nodes, n)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return zero, err
 	}
 
 	for _, n := range nodes {
-		if err := rewrap(n); err != nil {
-			return 0, fmt.Errorf("rewrap node %s: %w", n.ID, err)
+		if err := sw.Node(n); err != nil {
+			return zero, fmt.Errorf("rewrap node %s: %w", n.ID, err)
 		}
 		if _, err := tx.ExecContext(ctx, s.q(
 			`UPDATE nodes SET wrapped_cek = ?, name_hmac = ? WHERE tenant_id = ? AND id = ?`),
 			nullableBytes(n.WrappedCEK), n.NameHMAC, tenantID, n.ID); err != nil {
-			return 0, err
+			return zero, err
 		}
 	}
+	// Retained revisions carry their OWN wrapped CEK (file_versions, one row
+	// per kept revision, addressing that revision's manifest). They are
+	// wrapped under the same tenant DEK as the current content, so a MEK
+	// switch that sweeps only `nodes` leaves every previous version of every
+	// file undecryptable. Sweep them in the SAME transaction: a partial
+	// switch must never be observable.
+	vrows, err := tx.QueryContext(ctx, s.q(
+		`SELECT node_id, rev, wrapped_cek FROM file_versions
+		 WHERE tenant_id = ? AND wrapped_cek IS NOT NULL`), tenantID)
+	if err != nil {
+		return zero, err
+	}
+	type versionKey struct {
+		nodeID string
+		rev    int64
+		cek    []byte
+	}
+	var versions []versionKey
+	for vrows.Next() {
+		var vk versionKey
+		if serr := vrows.Scan(&vk.nodeID, &vk.rev, &vk.cek); serr != nil {
+			vrows.Close()
+			return zero, serr
+		}
+		versions = append(versions, vk)
+	}
+	vrows.Close()
+	if err := vrows.Err(); err != nil {
+		return zero, err
+	}
+	swept := 0
+	for _, vk := range versions {
+		if len(vk.cek) == 0 {
+			continue
+		}
+		rewrapped, rerr := sw.CEK(vk.cek)
+		if rerr != nil {
+			return zero, fmt.Errorf("rewrap revision %s/%d: %w", vk.nodeID, vk.rev, rerr)
+		}
+		if _, err := tx.ExecContext(ctx, s.q(
+			`UPDATE file_versions SET wrapped_cek = ? WHERE tenant_id = ? AND node_id = ? AND rev = ?`),
+			nullableBytes(rewrapped), tenantID, vk.nodeID, vk.rev); err != nil {
+			return zero, err
+		}
+		swept++
+	}
+
 	res, err := tx.ExecContext(ctx, s.q(
 		`UPDATE tenants SET mek_ref = ? WHERE id = ?`), mekRef, tenantID)
 	if err != nil {
-		return 0, err
+		return zero, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return 0, ErrNotFound
+		return zero, ErrNotFound
 	}
-	return len(nodes), tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return zero, err
+	}
+	return TenantKeySwitchCounts{Nodes: len(nodes), Versions: swept}, nil
 }
 
 // SetTenantMekRef persists the tenant's vault MEK reference (JSON).
@@ -944,4 +1017,36 @@ func isUniqueViolation(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "unique") || strings.Contains(msg, "duplicate")
+}
+
+// TenantMekRefRow is one tenant that holds a vault-backed MEK. Used by the
+// operator re-keying sweep to enumerate what still needs to move.
+type TenantMekRefRow struct {
+	TenantID string
+	MekRef   string
+}
+
+// ListTenantMekRefs returns every tenant with a vault MEK ref, oldest first.
+// Tenants still on the instance MEK have no ref and are excluded — they hold
+// nothing on a constellation to move. The key's owner is not returned: the
+// owner's hashed namespace ref is already inside the handle, and the raw
+// subject is deliberately not part of this surface.
+func (s *Store) ListTenantMekRefs(ctx context.Context) ([]TenantMekRefRow, error) {
+	rows, err := s.DB.QueryContext(ctx, s.q(
+		`SELECT id, mek_ref FROM tenants
+		  WHERE mek_ref IS NOT NULL AND mek_ref <> ''
+		  ORDER BY created_at`))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TenantMekRefRow
+	for rows.Next() {
+		var h TenantMekRefRow
+		if err := rows.Scan(&h.TenantID, &h.MekRef); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }

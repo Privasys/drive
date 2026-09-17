@@ -41,6 +41,58 @@ type MEKProvider interface {
 // bundle also triggers, so keys move off retiring constellations.
 const mekRotateAfter = 30 * 24 * time.Hour
 
+// switchTenantMEK re-keys a tenant's stored metadata from oldMEK to newMEK
+// and commits the new mek_ref in the same transaction.
+//
+// Content is never re-encrypted: chunks stay sealed under their per-file
+// CEKs and manifests under those same CEKs, so a MEK switch only has to
+// re-wrap every CEK and recompute every name HMAC. That covers both the
+// current content (nodes) and every retained revision (file_versions,
+// which carries its own wrapped CEK) — miss the latter and previous
+// versions silently become undecryptable.
+//
+// The three callers differ only in where oldMEK comes from: the instance
+// MEK (first-time provisioning of a pre-vault tenant), the owner's
+// exported key (revault), or the old constellation read by the app's own
+// TEE principal (the operator re-sweep).
+func (s *Server) switchTenantMEK(ctx context.Context, tenantID string, oldMEK, newMEK []byte, newRef vaultmek.Ref) (store.TenantKeySwitchCounts, error) {
+	var zero store.TenantKeySwitchCounts
+	oldDEK, err := crypto.DeriveDEK(oldMEK, tenantID)
+	if err != nil {
+		return zero, err
+	}
+	newDEK, err := crypto.DeriveDEK(newMEK, tenantID)
+	if err != nil {
+		return zero, err
+	}
+	newHMAC, err := crypto.DeriveNameHMACKey(newMEK, tenantID)
+	if err != nil {
+		return zero, err
+	}
+	rewrapCEK := func(wrapped []byte) ([]byte, error) {
+		cek, uerr := crypto.UnwrapKey(oldDEK, wrapped)
+		if uerr != nil {
+			return nil, uerr
+		}
+		return crypto.WrapKey(newDEK, cek)
+	}
+	return s.Store.SwitchTenantKeys(ctx, tenantID, vaultmek.RefJSON(newRef), store.TenantKeySwitch{
+		Node: func(n *store.Node) error {
+			n.NameHMAC = crypto.NameHMAC(newHMAC, n.Name)
+			if len(n.WrappedCEK) == 0 {
+				return nil // folders carry no CEK
+			}
+			wrapped, werr := rewrapCEK(n.WrappedCEK)
+			if werr != nil {
+				return werr
+			}
+			n.WrappedCEK = wrapped
+			return nil
+		},
+		CEK: rewrapCEK,
+	})
+}
+
 // ErrVaultKeyStale means the tenant's vault MEK could not be loaded
 // (typically the stored attestation token expired since the last
 // re-arm). It is recoverable: the owner re-arms via
@@ -301,41 +353,10 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 		return
 	}
 
-	// Migrate existing content: content stays sealed under its per-file
-	// CEKs, so switching MEK is a metadata sweep (re-wrap each file's
-	// CEK, recompute every node's name HMAC), committed atomically with
-	// the tenant's mek_ref.
-	oldDEK, err := crypto.DeriveDEK(s.MEK, t.ID)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	newDEK, err := crypto.DeriveDEK(newMek, t.ID)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	newHMAC, err := crypto.DeriveNameHMACKey(newMek, t.ID)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	rewrapped, err := s.Store.SwitchTenantKeys(r.Context(), t.ID, vaultmek.RefJSON(ref), func(n *store.Node) error {
-		n.NameHMAC = crypto.NameHMAC(newHMAC, n.Name)
-		if len(n.WrappedCEK) == 0 {
-			return nil // folders carry no CEK
-		}
-		cek, uerr := crypto.UnwrapKey(oldDEK, n.WrappedCEK)
-		if uerr != nil {
-			return uerr
-		}
-		wrapped, werr := crypto.WrapKey(newDEK, cek)
-		if werr != nil {
-			return werr
-		}
-		n.WrappedCEK = wrapped
-		return nil
-	})
+	// Migrate existing content from the instance MEK to the tenant's own:
+	// content stays sealed under its per-file CEKs, so this is a metadata
+	// sweep committed atomically with the tenant's mek_ref.
+	counts, err := s.switchTenantMEK(r.Context(), t.ID, s.MEK, newMek, ref)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return
@@ -352,7 +373,8 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"status": "provisioned", "handle": ref.Handle, "rewrapped_nodes": rewrapped,
+		"status": "provisioned", "handle": ref.Handle,
+		"rewrapped_nodes": counts.Nodes, "rewrapped_versions": counts.Versions,
 	})
 }
 
@@ -434,39 +456,12 @@ func (s *Server) handleTenantKeyRevault(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	oldDEK, err := crypto.DeriveDEK(recovered, t.ID)
+	// The recovered key is proven by the sweep itself: any CEK it fails to
+	// open aborts the switch with nothing committed.
+	counts, err := s.switchTenantMEK(r.Context(), t.ID, recovered, newMek, ref)
 	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	newDEK, err := crypto.DeriveDEK(newMek, t.ID)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	newHMAC, err := crypto.DeriveNameHMACKey(newMek, t.ID)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	rewrapped, err := s.Store.SwitchTenantKeys(r.Context(), t.ID, vaultmek.RefJSON(ref), func(n *store.Node) error {
-		n.NameHMAC = crypto.NameHMAC(newHMAC, n.Name)
-		if len(n.WrappedCEK) == 0 {
-			return nil
-		}
-		cek, uerr := crypto.UnwrapKey(oldDEK, n.WrappedCEK)
-		if uerr != nil {
-			return fmt.Errorf("recovered key does not open this tenant's content: %w", uerr)
-		}
-		wrapped, werr := crypto.WrapKey(newDEK, cek)
-		if werr != nil {
-			return werr
-		}
-		n.WrappedCEK = wrapped
-		return nil
-	})
-	if err != nil {
-		httpError(w, http.StatusConflict, err)
+		httpError(w, http.StatusConflict,
+			fmt.Errorf("recovered key does not open this tenant's content: %w", err))
 		return
 	}
 
@@ -477,6 +472,7 @@ func (s *Server) handleTenantKeyRevault(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "revaulted", "handle": ref.Handle, "rewrapped_nodes": rewrapped,
+		"status": "revaulted", "handle": ref.Handle,
+		"rewrapped_nodes": counts.Nodes, "rewrapped_versions": counts.Versions,
 	})
 }
