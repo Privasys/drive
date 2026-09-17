@@ -388,6 +388,10 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/me/tenant", s.auth(s.handleEnsurePersonalTenant))
 	mux.Handle("POST /v1/me/tenant/key", s.auth(s.handleTenantKey))
 	mux.Handle("POST /v1/me/tenant/key/revault", s.auth(s.handleTenantKeyRevault))
+	// Operator re-keying of per-tenant MEKs onto a new constellation without
+	// the tenants present (see tenantkeysweep.go).
+	mux.Handle("GET /v1/admin/tenant-keys/pending", s.auth(s.handleTenantKeysPending))
+	mux.Handle("POST /v1/admin/tenant-keys/resweep", s.auth(s.handleTenantKeysResweep))
 	mux.Handle("GET /v1/shared", s.auth(s.handleSharedWithMe))
 	// Attribute marketplace, for the sharer choosing what to require.
 	mux.Handle("GET /v1/attributes", s.auth(s.handleAttributeCatalogue))
