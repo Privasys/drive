@@ -28,6 +28,7 @@ package api
 // which is how it reads a tenant's MEK back after a restart.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -53,15 +54,29 @@ type tenantKeySweepEntry struct {
 	RotatedAt  int64    `json:"rotated_at"`
 }
 
-// handleTenantKeysPending lists the tenants whose MEK is not on the
-// constellation named by the query (?mrenclave=<hex>), i.e. what a sweep
-// still has to move. With no mrenclave it lists every vault-backed tenant.
+// handleTenantKeysPending lists the tenants whose MEK is not on the named
+// constellation, i.e. what a sweep still has to move. With no mrenclave it
+// lists every vault-backed tenant.
+//
+// The target comes from `?mrenclave=` or, equivalently, a JSON body. Both are
+// accepted on both GET and POST because a deployed instance is only reachable
+// over RA-TLS, and the operator tooling that speaks that transport issues
+// POSTs — a GET-only listing would be unreachable in production, which is
+// exactly how this was found.
 func (s *Server) handleTenantKeysPending(w http.ResponseWriter, r *http.Request, p *Principal) {
 	if err := s.sweepAllowed(p); err != nil {
 		httpError(w, http.StatusForbidden, err)
 		return
 	}
 	target := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mrenclave")))
+	if target == "" && r.Body != nil {
+		var body struct {
+			Mrenclave string `json:"mrenclave"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) == nil {
+			target = strings.ToLower(strings.TrimSpace(body.Mrenclave))
+		}
+	}
 	holders, err := s.Store.ListTenantMekRefs(r.Context())
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
