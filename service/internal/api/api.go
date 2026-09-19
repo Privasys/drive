@@ -476,6 +476,10 @@ func (s *Server) Routes() http.Handler {
 	// the authenticated user, so the wallet can show and end what it granted
 	// without ever naming an ownership boundary. See capabilities_holder.go.
 	mux.Handle("GET /v1/capabilities", s.auth(s.handleListCapabilities))
+	// The holder's window onto the folders apps keep for them (appfolders.go).
+	mux.Handle("GET /v1/app-folders", s.auth(s.handleAppFolders))
+	mux.Handle("GET /v1/app-folders/{app}/files", s.auth(s.handleAppFolderFiles))
+	mux.Handle("DELETE /v1/app-folders/{app}/files", s.auth(s.handleAppFolderFiles))
 	mux.Handle("DELETE /v1/capabilities/{capabilityID}", s.auth(s.handleRevokeCapability))
 	mux.Handle("POST /v1/tenants/{tenantID}/nodes/{nodeID}/grants", s.auth(s.handleCreateGrant))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/grants/{grantID}", s.auth(s.handleRevokeGrant))

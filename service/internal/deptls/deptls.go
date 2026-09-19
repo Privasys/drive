@@ -11,12 +11,14 @@ package deptls
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	ratls "enclave-os-mini/clients/go/ratls"
@@ -158,4 +160,79 @@ func matchPinned(info ratls.CertInfo, set ratls.DependencySet) error {
 		return errors.New("deptls: peer certificate carries no app id and the pin is not a single entry (fail closed)")
 	}
 	return ratls.MatchDependency(info, ratls.TeeTypeTDX, set.Entries[0])
+}
+
+// NewIdentityHTTPClient returns an *http.Client for ONE app named by the
+// control plane's resolve endpoint rather than by a declared dependency:
+// the peer's quote is verified against the attestation server as for a
+// pinned dependency, and its leaf must then carry exactly the app id and
+// the image digest the control plane records for that app. No measurement
+// register is pinned: the quote's validity is the attestation server's
+// verdict, and the identity is the control plane's. This is what lets Drive
+// reach whichever app holds a folder for the holder (the holder's window,
+// enclave OS `/__privasys/v1/holders/files`) without a declaration per app.
+func NewIdentityHTTPClient(appIDHex, imageDigestHex string, creds CredentialSource, allowDebugImages bool) *http.Client {
+	id := egressIdentity()
+	dial := func(ctx context.Context, _, addr string) (net.Conn, error) {
+		host, portStr, err := net.SplitHostPort(addr)
+		if err != nil {
+			host, portStr = addr, "443"
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, fmt.Errorf("deptls: port %q: %w", portStr, err)
+		}
+		server, token, err := creds(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("deptls: attestation credentials: %w", err)
+		}
+		opts := &ratls.Options{ServerName: host, Timeout: 15 * time.Second}
+		if id != nil {
+			opts.GetClientCertificate = id.GetClientCertificate
+			opts.ClientEvidence = id.ClientEvidence
+		}
+		cli, err := ratls.Connect(host, port, opts)
+		if err != nil {
+			return nil, fmt.Errorf("deptls: %w", err)
+		}
+		info, err := cli.VerifyCertificate(&ratls.VerificationPolicy{
+			TEE:               ratls.TeeTypeTDX,
+			QuoteVerification: &ratls.QuoteVerificationConfig{Endpoint: server, Token: token},
+			AllowDebugImages:  allowDebugImages,
+		})
+		if err != nil {
+			cli.Close()
+			return nil, fmt.Errorf("deptls: peer attestation failed: %w", err)
+		}
+		if err := matchIdentity(info, appIDHex, imageDigestHex); err != nil {
+			cli.Close()
+			return nil, err
+		}
+		return cli.Conn(), nil
+	}
+	return &http.Client{
+		Transport: newVerdictTransport(&http.Transport{
+			DialTLSContext:      dial,
+			MaxIdleConnsPerHost: 2,
+			IdleConnTimeout:     60 * time.Second,
+		}),
+		Timeout: 60 * time.Second,
+	}
+}
+
+// matchIdentity requires the verified leaf to name the app (OID 4.1) and the
+// deployed image (OID 4.2) the control plane resolved.
+func matchIdentity(info ratls.CertInfo, appIDHex, imageDigestHex string) error {
+	if got := ratls.AppIDFromCert(info); got == "" || !strings.EqualFold(got, appIDHex) {
+		return fmt.Errorf("deptls: peer is app %q, not %q (fail closed)", got, appIDHex)
+	}
+	for _, o := range info.CustomOids {
+		if o.OID == ratls.OidWorkloadCodeHash {
+			if got := hex.EncodeToString(o.Value); strings.EqualFold(got, imageDigestHex) {
+				return nil
+			}
+			return fmt.Errorf("deptls: peer runs image %s, the control plane resolves %s (fail closed)", hex.EncodeToString(o.Value)[:16], imageDigestHex[:16])
+		}
+	}
+	return errors.New("deptls: peer certificate carries no image digest (fail closed)")
 }
