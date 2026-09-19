@@ -114,32 +114,34 @@ const holderTokenHeader = "X-Holder-Token"
 // holderBearer is the credential these calls forward: the holder's own,
 // from the bearer or from the header above. Without one the app cannot
 // tell whose folder is asked for, so the call is refused with what to do.
-func (s *Server) holderBearer(w http.ResponseWriter, r *http.Request, p *Principal) (string, bool) {
+// It returns the token and the issuer that minted it (where the holder's
+// consents are listed).
+func (s *Server) holderBearer(w http.ResponseWriter, r *http.Request, p *Principal) (string, string, bool) {
 	if !p.IsUser() {
 		http.Error(w, "only a user may look at their app folders", http.StatusForbidden)
-		return "", false
+		return "", "", false
 	}
 	if p.Bearer != "" {
-		return p.Bearer, true
+		return p.Bearer, p.ID.Issuer, true
 	}
 	tok := strings.TrimSpace(r.Header.Get(holderTokenHeader))
 	if tok == "" {
 		http.Error(w, "app folders need your own session token: send it in "+holderTokenHeader, http.StatusUnauthorized)
-		return "", false
+		return "", "", false
 	}
 	id, err := s.Verifier.Verify(r.Context(), tok)
 	if err != nil || id == nil || id.Sub != p.Sub {
 		http.Error(w, "the token in "+holderTokenHeader+" is not yours or not valid", http.StatusUnauthorized)
-		return "", false
+		return "", "", false
 	}
-	return tok, true
+	return tok, id.Issuer, true
 }
 
 // handleAppFolders lists the apps that hold a folder for the holder: every
 // app with a grant on this tenant is asked, with the holder's bearer, whether
 // it has one. Apps that do not answer, or answer no, are left out.
 func (s *Server) handleAppFolders(w http.ResponseWriter, r *http.Request, p *Principal) {
-	bearer, ok := s.holderBearer(w, r, p)
+	bearer, issuer, ok := s.holderBearer(w, r, p)
 	if !ok {
 		return
 	}
@@ -155,13 +157,23 @@ func (s *Server) handleAppFolders(w http.ResponseWriter, r *http.Request, p *Pri
 	}
 	seen := map[string]bool{}
 	var apps []string
-	for _, g := range rows {
-		id := strings.ToLower(strings.TrimSpace(appIDOfGrant(g)))
+	add := func(id string) {
+		id = strings.ToLower(strings.TrimSpace(id))
 		if id == "" || seen[id] {
-			continue
+			return
 		}
 		seen[id] = true
 		apps = append(apps, id)
+	}
+	for _, g := range rows {
+		add(appIDOfGrant(g))
+	}
+	// And the apps the holder lets act for them, from the identity
+	// provider's spend consents: an app keeps a folder whether or not it
+	// has a Drive grant (a Drive folder deleted by the holder ends the
+	// grant, not the app's folder, 2026-09-19).
+	for _, id := range consentedApps(r.Context(), issuer, bearer) {
+		add(id)
 	}
 	out := make([]appFolderView, 0, len(apps))
 	var mu sync.Mutex
@@ -226,7 +238,7 @@ func fetchHolderListing(ctx context.Context, cli *http.Client, host, bearer, pat
 // handleAppFolderFiles forwards GET (listing or bytes) and DELETE for one
 // app's folder. The app's answer is relayed as it is: status, type, bytes.
 func (s *Server) handleAppFolderFiles(w http.ResponseWriter, r *http.Request, p *Principal) {
-	bearer, ok := s.holderBearer(w, r, p)
+	bearer, _, ok := s.holderBearer(w, r, p)
 	if !ok {
 		return
 	}
@@ -283,4 +295,43 @@ func appIDOfGrant(g *grants.Grant) string {
 		return meta.AppID
 	}
 	return grants.NormaliseAppSubject(g.Subject)
+}
+
+// consentedApps lists the app ids the holder gave a spend consent to, from
+// the identity provider that issued their token. Best effort: an IdP that
+// does not answer leaves the Drive grants as the only source.
+func consentedApps(ctx context.Context, issuer, bearer string) []string {
+	if !strings.HasPrefix(issuer, "https://") {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	u := strings.TrimRight(issuer, "/") + "/spend/consents"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	req.Header.Set("Accept", "application/json")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var out struct {
+		Consents []struct {
+			AppID string `json:"app_id"`
+		} `json:"consents"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 256<<10)).Decode(&out); err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(out.Consents))
+	for _, c := range out.Consents {
+		ids = append(ids, c.AppID)
+	}
+	return ids
 }
