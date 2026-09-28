@@ -542,3 +542,52 @@ func (r *Repo) ListAppGrantsForTenant(ctx context.Context, tenantID string) ([]*
 	}
 	return out, rows.Err()
 }
+
+// SharedNodeIDs reports which of nodeIDs somebody else can currently reach:
+// the node carries a grant that is neither revoked nor expired, of any
+// subject kind (a share link, a named recipient, an app).
+//
+// One query for a whole listing, so a browser can mark the shared folders
+// without asking per row. The IN list is chunked so a large folder stays
+// within either database's placeholder limit.
+func (r *Repo) SharedNodeIDs(ctx context.Context, tenantID string, nodeIDs []string, now time.Time) (map[string]bool, error) {
+	out := map[string]bool{}
+	const chunk = 400
+	for start := 0; start < len(nodeIDs); start += chunk {
+		end := start + chunk
+		if end > len(nodeIDs) {
+			end = len(nodeIDs)
+		}
+		batch := nodeIDs[start:end]
+		args := make([]any, 0, len(batch)+2)
+		args = append(args, tenantID)
+		marks := make([]string, len(batch))
+		for i, id := range batch {
+			marks[i] = "?"
+			args = append(args, id)
+		}
+		args = append(args, now.UTC())
+		rows, err := r.DB.QueryContext(ctx, r.q(
+			`SELECT DISTINCT node_id FROM grants
+			 WHERE tenant_id = ? AND node_id IN (`+strings.Join(marks, ",")+`)
+			   AND revoked_at IS NULL
+			   AND (expires_at IS NULL OR expires_at > ?)`), args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}

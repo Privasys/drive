@@ -903,7 +903,29 @@ func (s *Server) mapNodesWithIndex(ctx context.Context, tenantID string, ns []*s
 		out[i].CreatedBy = m.CreatedBy
 	}
 	s.annotateWorkspaces(ctx, tenantID, out)
+	s.annotateShared(ctx, tenantID, out)
 	return out
+}
+
+// annotateShared marks the nodes in a listing that somebody else can
+// currently reach. One query per listing, and a failure leaves the marks
+// off rather than failing the listing: not knowing what is shared is a
+// missing icon, while not listing the folder is a broken drive.
+func (s *Server) annotateShared(ctx context.Context, tenantID string, out []nodeJSON) {
+	if len(out) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(out))
+	for i := range out {
+		ids = append(ids, out[i].ID)
+	}
+	shared, err := s.Grants.SharedNodeIDs(ctx, tenantID, ids, time.Now().UTC())
+	if err != nil {
+		return
+	}
+	for i := range out {
+		out[i].Shared = shared[out[i].ID]
+	}
 }
 
 func (s *Server) listChildren(ctx context.Context, p *Principal, tenantID, folderID string) ([]*store.Node, int, error) {
@@ -1668,7 +1690,14 @@ type nodeJSON struct {
 	// (`.workspace.json` beside `.blobs/`): the front renders it as one item
 	// and reads the manifest by this id. See workspace.go.
 	WorkspaceManifestID string `json:"workspace_manifest_id,omitempty"`
-	Rev                 int64  `json:"rev"`
+	// Shared reports that somebody else can currently reach this node: an
+	// active grant of any kind sits on it (a link, a named recipient, an
+	// app). It is what a listing marks so an owner can see which of their
+	// folders have left the drive without opening each one's sharing panel.
+	// Grants on an ANCESTOR are not counted: the mark says "this is the
+	// thing that was shared", which is the question the icon answers.
+	Shared bool  `json:"shared,omitempty"`
+	Rev    int64 `json:"rev"`
 }
 
 func nodeView(n *store.Node) nodeJSON {
