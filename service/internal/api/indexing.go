@@ -7,7 +7,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/Privasys/drive/service/internal/config"
@@ -37,7 +39,38 @@ func (s *Server) StartIndexer() {
 	if !s.Store.VectorOK {
 		return
 	}
+	s.retryFailedOncePerBuild()
 	s.indexer().Start()
+}
+
+// retryFailedOncePerBuild gives every file the index marked failed one more
+// attempt, the first time a given build boots.
+//
+// A failure is often this code's own rather than the file's. Chunks used to be
+// cut by byte offset, so one could start inside a curly quote; Postgres refused
+// the batch and the file was marked failed for good, because the retry sweep
+// only re-enqueues pending files. A new build is exactly when such a failure
+// may now succeed, and once per build bounds what a file that genuinely cannot
+// be indexed costs: one attempt per release, not one per restart.
+func (s *Server) retryFailedOncePerBuild() {
+	if s.Version == "" {
+		return // an unversioned build would retry on every boot
+	}
+	marker := filepath.Join(s.StateDir, "index-failed-retried")
+	if b, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(b)) == s.Version {
+		return
+	}
+	n, err := s.Store.RequeueFailedIndex(context.Background())
+	if err != nil {
+		log.Printf("search: requeue failed files: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("search: build %s retries %d file(s) an earlier build failed to index", s.Version, n)
+	}
+	if err := os.WriteFile(marker, []byte(s.Version), 0o600); err != nil {
+		log.Printf("search: record failed-file retry: %v", err)
+	}
 }
 
 // indexer lazily builds the singleton background indexer. The embedder

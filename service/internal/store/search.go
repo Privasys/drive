@@ -186,6 +186,21 @@ func (s *Store) ResetIndexedForReindex(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// RequeueFailedIndex flips every 'failed' file back to 'pending', so the
+// retry sweep tries it again; the sweep itself only ever looks at pending
+// files, so without this a failure is permanent. Called once per build at
+// boot (the API's retryFailedOncePerBuild).
+func (s *Store) RequeueFailedIndex(ctx context.Context) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE nodes SET index_status = ? WHERE kind = 'file' AND index_status = ?`),
+		IndexPending, IndexFailed)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ResetStaleProcessing flips every 'processing' file back to 'pending'.
 // Called once at indexer start, before any worker runs: a row still
 // 'processing' at that point was orphaned mid-index by a restart, and the

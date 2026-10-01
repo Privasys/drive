@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Dim is the vector column width (Qwen3-Embedding-0.6B full width).
@@ -104,9 +105,28 @@ type ChunkSpan struct {
 	End   int64
 }
 
+// runeFloor moves a byte offset back to the first byte of the character it
+// falls in. Every offset here is a byte offset, and the text is UTF-8: a cut
+// taken as it comes can land inside a curly quote or a pound sign, and a
+// chunk that starts with the tail of one is not text at all. Postgres refuses
+// it, the whole file's batch with it, and the file never indexes.
+func runeFloor(s string, i int) int {
+	if i <= 0 {
+		return 0
+	}
+	if i >= len(s) {
+		return len(s)
+	}
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return i
+}
+
 // ChunkRange splits text[start:end] (absolute offsets) into overlapping
 // windows, preferring paragraph and line boundaries near the target
-// size. Anchors are absolute so provenance survives.
+// size. Anchors are absolute so provenance survives. Every boundary, the
+// range's own included, sits on a character boundary.
 func ChunkRange(text string, start, end int64) []ChunkSpan {
 	if start < 0 {
 		start = 0
@@ -114,13 +134,15 @@ func ChunkRange(text string, start, end int64) []ChunkSpan {
 	if end > int64(len(text)) {
 		end = int64(len(text))
 	}
+	start = int64(runeFloor(text, int(start)))
+	end = int64(runeFloor(text, int(end)))
 	if start >= end {
 		return nil
 	}
 	seg := text[start:end]
 	var out []ChunkSpan
 	for off := 0; off < len(seg); {
-		lim := off + chunkSize
+		lim := runeFloor(seg, off+chunkSize)
 		if lim >= len(seg) {
 			span := strings.TrimSpace(seg[off:])
 			if span != "" {
@@ -143,7 +165,9 @@ func ChunkRange(text string, start, end int64) []ChunkSpan {
 		if span != "" {
 			out = append(out, ChunkSpan{Text: span, Start: start + int64(off), End: start + int64(off+cut)})
 		}
-		next := off + cut - chunkOverlap
+		// The overlap steps back a fixed number of BYTES, which is where
+		// chunks used to start mid-character; snap it to a boundary.
+		next := runeFloor(seg, off+cut-chunkOverlap)
 		if next <= off {
 			next = off + cut
 		}

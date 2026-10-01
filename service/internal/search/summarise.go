@@ -96,6 +96,10 @@ func (ix *Indexer) summarise(ctx context.Context, j job, text string, secs []Sec
 		if end > int64(len(text)) {
 			end = int64(len(text))
 		}
+		// Section offsets are bytes; keep the excerpt whole characters, as
+		// ChunkRange does, or the summariser is sent half a curly quote.
+		start = int64(runeFloor(text, int(start)))
+		end = int64(runeFloor(text, int(end)))
 		if start >= end {
 			return ""
 		}
