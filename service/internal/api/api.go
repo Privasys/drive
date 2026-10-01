@@ -78,6 +78,9 @@ type Server struct {
 	// without platform roles).
 	DevMode bool
 	Version string
+	// WebDir holds the UI's static export (webui.go); empty serves the API
+	// only.
+	WebDir string
 
 	cfgMu sync.RWMutex
 	cfg   *config.Config
@@ -374,6 +377,7 @@ func (s *Server) Handler(manifestPath string) http.Handler {
 		})
 		mux.Handle("/mcp/", legacyToolCatalog(manifestPath))
 	}
+	s.mountWebUI(mux)
 	return loggingMiddleware(mux)
 }
 

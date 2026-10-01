@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'service/**'
+      - 'web/**'
+      - 'drive-client/**'
       - '.github/workflows/service.yml'
   pull_request:
     branches: [main]
@@ -114,6 +116,12 @@ jobs:
         with:
           context: service
           file: service/Dockerfile
+          # The UI is built into the image (service/Dockerfile, stage web).
+          build-contexts: |
+            drive-web=web
+            drive-client=drive-client
+          secrets: |
+            node_auth_token=${{ secrets.GITHUB_TOKEN }}
           push: true
           provenance: false
           build-args: |

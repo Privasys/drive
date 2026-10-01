@@ -189,6 +189,7 @@ func serve(args []string) error {
 		StateDir: *state,
 		DevMode:  *dev,
 		Version:  version,
+		WebDir:   os.Getenv("DRIVE_WEB_DIR"),
 	}
 
 	// Re-apply persisted config on restart: the manager re-arms the

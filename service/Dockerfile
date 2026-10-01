@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.10
 # Privasys Drive — TDX-attested per-tenant file storage.
 #
 # Reproducible OCI image; pin its `@sha256:...` digest when deploying.
@@ -6,8 +7,24 @@
 # enclave-vaults-client) are cloned + pinned, so the image builds from
 # this repo alone (build context = service/). Bump the ARGs when the
 # siblings move (they must point at RA-TLS v2 commits).
+#
+# The UI (../web, with ../drive-client) comes in as two named build
+# contexts, and the private registry token as a build secret:
+#   docker buildx build service \n#     --build-context drive-web=web --build-context drive-client=drive-client \n#     --secret id=node_auth_token,env=NODE_AUTH_TOKEN
 ARG RA_TLS_CLIENTS_REF=c6c63216dc5a0915569826e3ba2c1efdf44de6b0
 ARG ENCLAVE_VAULTS_CLIENT_REF=23a24d9016fb81def9d755acf21d03836c700274
+
+# The Drive UI: a static Next.js export, built here so the page a user runs
+# is part of the measured image (service/internal/api/webui.go serves it).
+# Dependencies are pinned by web/package-lock.json.
+FROM node:24-alpine AS web
+WORKDIR /src/web
+COPY --from=drive-client . /src/drive-client
+COPY --from=drive-web package.json package-lock.json .npmrc ./
+RUN --mount=type=secret,id=node_auth_token,env=NODE_AUTH_TOKEN npm ci --no-audit --no-fund
+COPY --from=drive-web . .
+ARG VERSION=dev
+RUN NEXT_PUBLIC_COMMIT_SHA="${VERSION}" NEXT_TELEMETRY_DISABLED=1 npm run build     && test -f out/index.html && test -f out/l/index.html
 
 FROM golang:1.26-alpine AS builder
 ARG RA_TLS_CLIENTS_REF
@@ -87,6 +104,12 @@ COPY docling/server.py /opt/docling/server.py
 RUN /opt/docling-venv/bin/python -c "import docling; import compileall, sys; sys.exit(0 if compileall.compile_file('/opt/docling/server.py', quiet=1) else 1)"
 
 COPY --from=builder /drive /usr/local/bin/drive
+COPY --from=web /src/web/out /app/web
+ENV DRIVE_WEB_DIR=/app/web
+# The UI's paths, served in the clear so the page loads before a sealed
+# session exists; every other path stays sealed. Measured with the image, and
+# kept in step with webUIPaths in internal/api/webui.go.
+LABEL org.privasys.static-unsealed-prefixes="/,/_next/,/l,/favicon,/privasys-config.js"
 # The app manifest: also baked into the org.privasys.manifest OCI label
 # by CI (the platform reads capabilities from the label; the file serves
 # GET /privasys.json for runtime introspection).
