@@ -1,0 +1,36 @@
+name: Publish drive-client
+
+# Tag drive-client-v<version> at a commit whose drive-client/package.json
+# carries that version. Privasys Chat pins the published package; the Drive
+# UI uses the directory itself.
+
+on:
+  push:
+    tags:
+      - 'drive-client-v*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: drive-client
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@privasys'
+      - name: Tag matches package.json
+        run: |
+          WANT="${GITHUB_REF_NAME#drive-client-v}"
+          HAVE=$(node -p "require('./package.json').version")
+          [ "$WANT" = "$HAVE" ] || { echo "::error::Tag says $WANT, package.json says $HAVE"; exit 1; }
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

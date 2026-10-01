@@ -1,0 +1,29 @@
+{
+    "name": "@privasys/drive-client",
+    "version": "0.1.0",
+    "description": "The browser's sealed transport and upload helpers for Privasys Drive, shared by the Drive UI and Privasys Chat.",
+    "license": "AGPL-3.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/Privasys/drive.git",
+        "directory": "drive-client"
+    },
+    "type": "module",
+    "main": "./src/index.ts",
+    "types": "./src/index.ts",
+    "exports": {
+        ".": "./src/index.ts"
+    },
+    "files": [
+        "src",
+        "README.md"
+    ],
+    "peerDependencies": {
+        "@privasys/auth": ">=0.13.0",
+        "react": ">=19",
+        "react-dom": ">=19"
+    },
+    "publishConfig": {
+        "registry": "https://npm.pkg.github.com"
+    }
+}

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
+<defs>
+<linearGradient id="g" y2="1">
+<stop offset="21%" stop-color="#34E89E"/>
+<stop offset="42%" stop-color="#12B06E"/>
+</linearGradient>
+
+<linearGradient id="b" x1="1" y1="1" x2="0" y2="0">
+<stop offset="21%" stop-color="#00BCF2"/>
+<stop offset="42%" stop-color="#00A0EB"/>
+</linearGradient>
+</defs>
+
+<path d="M100 0H450L0 450V100A100 100 0 0 1 100 0Z" fill="url(#g)"/>
+<path d="M500 50V400A100 100 0 0 1 400 500H50L500 50Z" fill="url(#b)"/>
+<polygon points="0,500 50,500 500,50 500,0" fill="#fff"/>
+
+</svg>

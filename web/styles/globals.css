@@ -1,0 +1,200 @@
+@import 'tailwindcss';
+@import '@privasys/ui/styles.css';
+
+/* Scan the shared attestation-view lib so its badge/pill utility classes
+ * (bg-emerald-100, rounded-full, …) survive Tailwind's content purge — the
+ * trust footer renders them. Mirrors chat.privasys.org's globals. */
+@source '../../../../libs/attestation-view/src';
+
+:root {
+    color-scheme: light dark;
+
+    /* Privasys brand palette (see .operations/brand-identity.md). */
+    --drv-green: #34e89e;
+    --drv-blue: #00bcf2;
+    --drv-navy: #0f172a;
+    --drv-slate: #64748b;
+    --drv-gradient: linear-gradient(135deg, #34e89e 0%, #00bcf2 100%);
+
+    /* Drive UI tokens derived from the brand palette. */
+    --drv-accent: #00bcf2;
+    --drv-accent-weak: #e2f8ff;
+    --drv-surface: #ffffff;
+    --drv-surface-2: #f8fafc;
+    --drv-border: #e2e8f0;
+    --drv-text: #0f172a;
+    --drv-text-muted: #64748b;
+    --drv-hover: rgba(0, 188, 242, 0.07);
+    --drv-selected: rgba(0, 188, 242, 0.14);
+
+    /* Insights chart series. Validated per mode for the lightness band,
+       chroma floor, CVD separation and >=3:1 contrast on the card surface
+       (dataviz six-checks validator, 2026-07-17). */
+    --drv-chart-views: #2a78d6;
+    --drv-chart-downloads: #b45309;
+
+    /* Knowledge-graph node classes (memory / conversation / document).
+       Categorical hues validated all-pairs in both modes on the card
+       surface: worst CVD deltaE 13.0, normal-vision floor 27.5, safe under
+       protanopia, deuteranopia and tritanopia (dataviz six-checks
+       validator, 2026-07-17). Magenta sits at 2.69:1 on the light surface;
+       the always-visible node labels and legend are its sanctioned
+       contrast relief. */
+    --drv-graph-memory: #e87ba4;
+    --drv-graph-conversation: #008300;
+    --drv-graph-document: #2a78d6;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --drv-accent: #34e89e;
+        --drv-accent-weak: #12313a;
+        --drv-surface: #0f172a;
+        --drv-surface-2: #0b1220;
+        --drv-border: rgba(226, 232, 240, 0.12);
+        --drv-text: #e2e8f0;
+        --drv-text-muted: #94a3b8;
+        --drv-hover: rgba(52, 232, 158, 0.08);
+        --drv-selected: rgba(52, 232, 158, 0.16);
+
+        /* Dark steps of the same hues, re-validated on the dark surface. */
+        --drv-chart-views: #2a78d6;
+        --drv-chart-downloads: #d97706;
+
+        /* Dark steps of the graph classes, re-validated on the dark card
+           surface (all three clear 3:1; worst CVD deltaE 13.0). */
+        --drv-graph-memory: #d55181;
+        --drv-graph-conversation: #008300;
+        --drv-graph-document: #3987e5;
+    }
+}
+
+html {
+    -webkit-font-smoothing: antialiased;
+}
+
+body {
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background: var(--drv-surface-2);
+    color: var(--drv-text);
+}
+
+/* Solid accent primary button. */
+.drv-btn-primary {
+    background: var(--drv-accent);
+    color: #fff;
+    font-weight: 600;
+}
+.drv-btn-primary:hover {
+    opacity: 0.9;
+}
+@media (prefers-color-scheme: dark) {
+    /* The dark accent is the brand green; dark text reads better on it. */
+    .drv-btn-primary {
+        color: #052235;
+    }
+}
+
+/* Subtle scrollbars for the file panes. */
+.drv-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: var(--drv-border) transparent;
+}
+
+/* Rendered Markdown preview (file viewer). */
+.drv-markdown {
+    color: var(--drv-text);
+    font-size: 15px;
+    line-height: 1.7;
+    word-wrap: break-word;
+}
+.drv-markdown h1,
+.drv-markdown h2,
+.drv-markdown h3,
+.drv-markdown h4 {
+    font-weight: 600;
+    line-height: 1.3;
+    margin: 1.4em 0 0.6em;
+}
+.drv-markdown h1 { font-size: 1.7em; }
+.drv-markdown h2 { font-size: 1.35em; }
+.drv-markdown h3 { font-size: 1.15em; }
+.drv-markdown p { margin: 0.7em 0; }
+.drv-markdown a { color: var(--drv-accent); text-decoration: underline; }
+/* Restore markers: the Tailwind reset sets list-style:none globally. */
+.drv-markdown ul,
+.drv-markdown ol { margin: 0.7em 0; padding-left: 1.5em; }
+.drv-markdown ul { list-style: disc; }
+.drv-markdown ol { list-style: decimal; }
+.drv-markdown ul ul { list-style: circle; }
+.drv-markdown li { margin: 0.25em 0; }
+.drv-markdown blockquote {
+    margin: 0.9em 0;
+    padding: 0.2em 1em;
+    border-left: 3px solid var(--drv-accent);
+    color: var(--drv-text-muted);
+}
+.drv-markdown code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.88em;
+    background: var(--drv-accent-weak);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+}
+.drv-markdown pre {
+    background: var(--drv-surface);
+    border: 1px solid var(--drv-border);
+    border-radius: 8px;
+    padding: 1em;
+    overflow-x: auto;
+    margin: 0.9em 0;
+}
+.drv-markdown pre code { background: none; padding: 0; }
+.drv-markdown table {
+    border-collapse: collapse;
+    margin: 0.9em 0;
+    width: 100%;
+}
+.drv-markdown th,
+.drv-markdown td {
+    border: 1px solid var(--drv-border);
+    padding: 0.4em 0.7em;
+    text-align: left;
+}
+.drv-markdown img { max-width: 100%; border-radius: 8px; }
+.drv-markdown hr { border: none; border-top: 1px solid var(--drv-border); margin: 1.4em 0; }
+
+/* Work that cannot report a percentage: a sliver that travels the track,
+   rather than a full bar, which reads as "finished" the moment it appears.
+   Deleting a folder is the case that needs this: one call the enclave
+   answers only once it has reclaimed every file beneath it. */
+@keyframes drv-travel {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(400%); }
+}
+@keyframes drv-breathe {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 0.9; }
+}
+.drv-indeterminate {
+    width: 25%;
+    animation: drv-travel 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+    /* Still visibly alive, without anything moving across the screen. */
+    .drv-indeterminate { animation: drv-breathe 2s ease-in-out infinite; }
+}
+
+/* The SDK's attribute picker renders in a closed shadow root, which no
+   stylesheet reaches; custom properties are the one thing that passes in. Hand
+   it Drive's palette so it sits in the share dialog like everything else there,
+   including under the dark theme, while its trust markers stay the SDK's own. */
+.drv-attribute-picker {
+    --privasys-accent: var(--drv-accent);
+    --privasys-accent-weak: var(--drv-accent-weak);
+    --privasys-text: var(--drv-text);
+    --privasys-muted: var(--drv-text-muted);
+    --privasys-border: var(--drv-border);
+    --privasys-hover: var(--drv-hover);
+    --privasys-surface: transparent;
+}

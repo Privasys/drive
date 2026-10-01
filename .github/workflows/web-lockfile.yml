@@ -1,0 +1,38 @@
+name: Web lockfile
+
+# Regenerates web/package-lock.json in CI, where the GitHub Packages token
+# lives, and hands it back as an artifact to commit (signed) from a checkout.
+# Run it after changing web/package.json or drive-client/package.json.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or commit to resolve against'
+        required: false
+        default: main
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+      - run: npm install --package-lock-only --no-audit --no-fund
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-package-lock
+          path: web/package-lock.json

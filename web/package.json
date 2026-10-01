@@ -1,0 +1,34 @@
+{
+    "name": "@privasys/drive-web",
+    "version": "0.0.0",
+    "private": true,
+    "license": "AGPL-3.0",
+    "type": "module",
+    "scripts": {
+        "dev": "next dev -p 4215",
+        "build": "next build",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run"
+    },
+    "dependencies": {
+        "@privasys/attestation-view": "0.1.0",
+        "@privasys/auth": "0.13.0",
+        "@privasys/drive-client": "file:../drive-client",
+        "@privasys/ui": "0.1.0",
+        "next": "15.5.9",
+        "react": "19.2.3",
+        "react-dom": "19.2.3",
+        "react-markdown": "9.1.0",
+        "remark-gfm": "4.0.1"
+    },
+    "devDependencies": {
+        "@tailwindcss/postcss": "4.1.18",
+        "@types/node": "24.3.0",
+        "@types/react": "19.1.12",
+        "@types/react-dom": "19.1.9",
+        "babel-plugin-react-compiler": "19.1.0-rc.3",
+        "tailwindcss": "4.1.18",
+        "typescript": "5.9.3",
+        "vitest": "3.2.4"
+    }
+}
