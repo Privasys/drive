@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"enclave-os-mini/clients/go/spend"
+
+	"github.com/Privasys/drive/service/internal/store"
 )
 
 // payerHeader is the runtime-asserted paying user (spend.HeaderPayer).
@@ -107,4 +109,64 @@ func handleSpendKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.ServeJWKS(w, r)
+}
+
+// errNoIndexPayer is why a tenant's files wait: nobody who owns it has allowed
+// Drive to spend their credits, so there is no one to bill for indexing.
+var errNoIndexPayer = errors.New("no owner has allowed Drive to spend their credits (privasys.id/account)")
+
+// indexPayer names who pays for indexing a tenant's files: its owner, under
+// the spending allowance they gave Drive at sign-in (the same allowance and
+// monthly cap their own searches spend). A personal Drive has one owner; a
+// shared workspace pays through its first owner in subject order, which is
+// stable, so its bill does not wander between people from one file to the
+// next.
+//
+// Indexing used to go out as Drive itself, billed to whoever runs the
+// instance. That cannot work where the inference service answers to another
+// control plane (a dev Drive using the shared CAI is unknown there, so every
+// embedding came back 402), and it is the wrong party anyway: the files, and
+// the choice to keep them searchable, are the owner's.
+//
+// Without a signer (off platform, tests) the calls stay as they were. An owner
+// who has not allowed Drive to spend is errNoIndexPayer and their files wait; any
+// other failure to get a token (the IdP unreachable) is returned as is, and
+// the file waits the same way and is retried.
+func (s *Server) indexPayer(ctx context.Context, tenantID string) (context.Context, error) {
+	signer := spendSigner()
+	if signer == nil {
+		return ctx, nil
+	}
+	members, err := s.Store.ListMembers(ctx, tenantID)
+	if err != nil {
+		return ctx, err
+	}
+	sub, err := pickPayer(ctx, members, func(ctx context.Context, sub string) error {
+		_, err := signer.Token(ctx, sub)
+		return err
+	})
+	if err != nil {
+		return ctx, err
+	}
+	return withSpendSubject(ctx, sub), nil
+}
+
+// pickPayer is the first owner, in the members' (subject) order, who has
+// allowed Drive to spend. One who has not is passed over for the next; any
+// other failure is returned, because it says nothing about the owner and
+// trying the next would bill someone else for a transient fault.
+func pickPayer(ctx context.Context, members []*store.Member, canPay func(context.Context, string) error) (string, error) {
+	for _, m := range members {
+		if m.Role != store.RoleOwner {
+			continue
+		}
+		err := canPay(ctx, m.UserSub)
+		if err == nil {
+			return m.UserSub, nil
+		}
+		if !errors.Is(err, spend.ErrNoConsent) {
+			return "", err
+		}
+	}
+	return "", errNoIndexPayer
 }

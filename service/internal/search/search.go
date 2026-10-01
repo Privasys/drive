@@ -372,6 +372,13 @@ type Indexer struct {
 	// the fleet for summaries, whatever else is configured.
 	Summariser        func() Summariser
 	SummariseOnIngest func() bool
+	// Payer, when set, names who pays for a tenant's indexing inference and
+	// returns ctx carrying it, for the embedder's and summariser's Decorate
+	// hooks to present. An error means nobody can pay right now: the file is
+	// parked pending and retried with backoff, never sent out billed to
+	// whoever the call would otherwise fall back on. Nil keeps the calls as
+	// they are (off platform, tests).
+	Payer func(ctx context.Context, tenantID string) (context.Context, error)
 	// Sync makes Process run inline in Enqueue (tests).
 	Sync bool
 
@@ -381,6 +388,25 @@ type Indexer struct {
 	mu       sync.Mutex
 	attempts map[string]int       // nodeID -> failed attempts
 	nextTry  map[string]time.Time // nodeID -> earliest retry
+	// payerNoted throttles the "nobody can pay" line to one per tenant per
+	// window: a tenant with a hundred files would otherwise log a hundred
+	// identical lines per sweep, and the capped log loses its beginning.
+	payerNoted map[string]time.Time
+}
+
+// notePayerRefusal records why a tenant's files are waiting, once per tenant
+// per ten minutes.
+func (ix *Indexer) notePayerRefusal(tenantID string, err error) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.payerNoted == nil {
+		ix.payerNoted = map[string]time.Time{}
+	}
+	if last, ok := ix.payerNoted[tenantID]; ok && time.Since(last) < 10*time.Minute {
+		return
+	}
+	ix.payerNoted[tenantID] = time.Now()
+	log.Printf("search: tenant %.8s… files wait for a payer: %v", tenantID, err)
 }
 
 const (
@@ -614,6 +640,20 @@ func (ix *Indexer) process(ctx context.Context, j job) {
 		setStatus(statusIndexed) // empty file: trivially indexed
 		ix.clearBackoff(j.nodeID)
 		return
+	}
+
+	// Everything above is free; the embeddings below (and the summaries after
+	// them) are inference somebody pays for. Ask who, before making the calls:
+	// with no payer the file waits, rather than being billed to whoever the
+	// call would otherwise fall back on.
+	if ix.Payer != nil {
+		pctx, err := ix.Payer(ctx, j.tenantID)
+		if err != nil {
+			ix.notePayerRefusal(j.tenantID, err)
+			ix.parkPending(ctx, j)
+			return
+		}
+		ctx = pctx
 	}
 
 	emb := ix.Embedder()

@@ -88,6 +88,7 @@ func (s *Server) indexer() *search.Indexer {
 			Embedder:   s.activeEmbedder,
 			Convert:    conv,
 			Summariser: s.activeSummariser,
+			Payer:      s.indexPayer,
 			SummariseOnIngest: func() bool {
 				cfg := s.CurrentConfig()
 				return cfg != nil && cfg.SummariseOnIngest
@@ -143,7 +144,8 @@ func (s *Server) activeReranker() *search.FleetReranker {
 	}
 	return &search.FleetReranker{
 		BaseURL: cfg.EmbeddingsBaseURL, Model: cfg.RerankModel, APIKey: cfg.EmbeddingsAPIKey,
-		Client: s.pinnedFleetClient(cfg),
+		Client:   s.pinnedFleetClient(cfg),
+		Decorate: spendDecorate,
 	}
 }
 
@@ -175,7 +177,8 @@ func (s *Server) activeChat() *search.FleetChat {
 	}
 	return &search.FleetChat{
 		BaseURL: cfg.EmbeddingsBaseURL, Model: cfg.ChatModel, APIKey: cfg.EmbeddingsAPIKey,
-		Client: s.pinnedFleetClient(cfg),
+		Client:   s.pinnedFleetClient(cfg),
+		Decorate: spendDecorate,
 	}
 }
 

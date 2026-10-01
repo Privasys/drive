@@ -21,6 +21,10 @@ type FleetChat struct {
 	Model   string
 	APIKey  string
 	Client  *http.Client
+	// Decorate, when set, names who pays on the outbound request: the spend
+	// token of the user in ctx, as FleetEmbedder does. Without it a call
+	// made for a person is billed to Drive.
+	Decorate func(ctx context.Context, req *http.Request)
 }
 
 // ChatMessage is one OpenAI-style chat message.
@@ -55,6 +59,9 @@ func (c *FleetChat) Complete(ctx context.Context, messages []ChatMessage, maxTok
 	req.Header.Set("Content-Type", "application/json")
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	if c.Decorate != nil {
+		c.Decorate(ctx, req)
 	}
 	client := c.Client
 	if client == nil {

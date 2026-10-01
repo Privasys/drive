@@ -56,6 +56,10 @@ type FleetReranker struct {
 	Model   string
 	APIKey  string
 	Client  *http.Client
+	// Decorate, when set, names who pays on the outbound request: the spend
+	// token of the user in ctx, as FleetEmbedder does. Without it a call
+	// made for a person is billed to Drive.
+	Decorate func(ctx context.Context, req *http.Request)
 }
 
 // Rerank scores docs against query and returns the topN best, highest
@@ -95,6 +99,9 @@ func (r *FleetReranker) Rerank(ctx context.Context, query string, docs []string,
 	req.Header.Set("Content-Type", "application/json")
 	if r.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.APIKey)
+	}
+	if r.Decorate != nil {
+		r.Decorate(ctx, req)
 	}
 	client := r.Client
 	if client == nil {
