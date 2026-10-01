@@ -8,6 +8,9 @@ export default defineConfig({
     test: {
         globals: true,
         environment: 'node',
-        include: ['lib/**/*.spec.ts']
+        include: ['lib/**/*.spec.ts'],
+        // The auth SDK ships extensionless ESM imports, which Node refuses;
+        // let Vite resolve it like the Next build does.
+        server: { deps: { inline: [/@privasys//] } }
     }
 });
