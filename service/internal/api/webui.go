@@ -24,9 +24,11 @@ import (
 // front of Drive is a gateway alias that rewrites Host to the platform
 // hostname, so the host named here is always the one the wallet attests.
 
-// webUIPaths are the static prefixes the export produces. Keep in step with
-// the static-unsealed-prefixes label in service/Dockerfile.
-var webUIPaths = []string{"/_next/", "/l/", "/favicon/", "/favicon.svg"}
+// webUIPaths are the static paths the export produces besides "/": the
+// bundle, each page (with its index.txt, the payload Next fetches for a
+// client-side navigation), the not-found page and the icons. Keep in step
+// with the static-unsealed-prefixes label in service/Dockerfile.
+var webUIPaths = []string{"/_next/", "/index.txt", "/l/", "/404", "/favicon/", "/favicon.svg"}
 
 // mountWebUI adds the UI to mux when the image carries one; a build without
 // WebDir (tests, a bare service) serves the API only.

@@ -109,7 +109,7 @@ ENV DRIVE_WEB_DIR=/app/web
 # The UI's paths, served in the clear so the page loads before a sealed
 # session exists; every other path stays sealed. Measured with the image, and
 # kept in step with webUIPaths in internal/api/webui.go.
-LABEL org.privasys.static-unsealed-prefixes="/,/_next/,/l,/favicon,/privasys-config.js"
+LABEL org.privasys.static-unsealed-prefixes="/,/_next/,/index.txt,/l,/404,/favicon,/privasys-config.js"
 # The app manifest: also baked into the org.privasys.manifest OCI label
 # by CI (the platform reads capabilities from the label; the file serves
 # GET /privasys.json for runtime introspection).

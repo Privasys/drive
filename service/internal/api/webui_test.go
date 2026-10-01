@@ -19,6 +19,7 @@ func webUIServer(t *testing.T) http.Handler {
 		"index.html":               "<html>drive</html>",
 		"l/index.html":             "<html>link</html>",
 		"_next/static/chunks/a.js": "console.log(1)",
+		"index.txt":                "rsc",
 	} {
 		p := filepath.Join(dir, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -50,6 +51,10 @@ func TestWebUIServesTheExport(t *testing.T) {
 	}
 	if rec := get(t, h, host, "/l/?id=x"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "link") {
 		t.Fatalf("/l/ = %d %q", rec.Code, rec.Body.String())
+	}
+	// The page payload Next fetches when it navigates client-side.
+	if rec := get(t, h, host, "/index.txt?_rsc=1"); rec.Code != http.StatusOK || rec.Body.String() != "rsc" {
+		t.Fatalf("/index.txt = %d %q", rec.Code, rec.Body.String())
 	}
 	rec := get(t, h, host, "/_next/static/chunks/a.js")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Cache-Control"), "immutable") {
