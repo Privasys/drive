@@ -1,0 +1,46 @@
+name: Web UI
+
+# Typecheck, test and build the Drive UI (web/) and the drive-client it
+# shares with Privasys Chat. The image build (service.yml) builds the same
+# export into the measured image; this job is the fast signal on a change.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'drive-client/**'
+      - '.github/workflows/web.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'drive-client/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+defaults:
+  run:
+    working-directory: web
+
+jobs:
+  web:
+    name: Typecheck, test, build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+      - run: npm ci --no-audit --no-fund
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+      - run: test -f out/index.html && test -f out/l/index.html
