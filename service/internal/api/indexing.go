@@ -688,8 +688,10 @@ func (s *Server) handleReadSection(w http.ResponseWriter, r *http.Request, p *Pr
 func (s *Server) allowNodeRead(ctx context.Context, p *Principal, tenantID, nodeID string) bool {
 	if p.IsAssistant() {
 		// The assistant enclave may read a node's content only when the user
-		// is a tenant member AND the node is inside the AI-scoped set.
-		return s.canRead(ctx, tenantID, p.Sub) && s.nodeInAIScope(ctx, tenantID, nodeID)
+		// is a tenant member AND the node is inside the AI-scoped set, or
+		// the node is in a share the user opened through the assistant.
+		return (s.canRead(ctx, tenantID, p.Sub) && s.nodeInAIScope(ctx, tenantID, nodeID)) ||
+			s.assistantMayReadShared(ctx, p.Sub, tenantID, nodeID)
 	}
 	if !p.IsUser() {
 		return false
@@ -741,7 +743,11 @@ func (s *Server) toolSearchSemantic(w http.ResponseWriter, r *http.Request, p *P
 	var err error
 	// The query embedding is inference the acting user pays for.
 	sctx := withSpendSubject(r.Context(), p.Sub)
-	if req.AssistantScope {
+	if p.IsAssistant() {
+		// The user's AI scope plus the shares they opened through the
+		// assistant (assistantshares.go).
+		res, status, err = s.assistantSearch(sctx, p.Sub, req.TenantID, req.Query, req.TopK)
+	} else if req.AssistantScope {
 		res, status, err = s.semanticSearchScoped(sctx, req.TenantID, req.Query, req.TopK)
 	} else {
 		res, status, err = s.semanticSearch(sctx, req.TenantID, req.Query, req.TopK)

@@ -52,8 +52,9 @@ func (s *Server) handleFolderTree(w http.ResponseWriter, r *http.Request, p *Pri
 		// The assistant enclave may walk the tree only within an AI-scoped
 		// folder (a whole-tree walk would leak names outside scope), so a
 		// concrete in-scope folderID is required.
-		if !s.canRead(r.Context(), tenantID, p.Sub) || folderID == "" ||
-			!s.nodeInAIScope(r.Context(), tenantID, folderID) {
+		inScope := s.canRead(r.Context(), tenantID, p.Sub) && folderID != "" &&
+			s.nodeInAIScope(r.Context(), tenantID, folderID)
+		if !inScope && !s.assistantMayReadShared(r.Context(), p.Sub, tenantID, folderID) {
 			httpError(w, http.StatusForbidden, errors.New("forbidden"))
 			return
 		}

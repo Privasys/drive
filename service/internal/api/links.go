@@ -702,35 +702,70 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 		return
 	}
 
+	out, err := s.redeemLinkFor(r.Context(), p, g, meta, n, req.Attributes)
+	var me *linkMarketError
+	switch {
+	case errors.As(err, &me):
+		writeMarketError(w, me.err)
+	case err != nil:
+		httpError(w, http.StatusInternalServerError, err)
+	case out.Status == linkMissingAttrs:
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error":              "missing required attributes: " + strings.Join(out.Missing, ", "),
+			"missing_attributes": out.Missing,
+		})
+	default:
+		writeJSON(w, http.StatusOK, redeemResult(out.Status, g, n, out.RequestID))
+	}
+}
+
+// linkMissingAttrs is a redeem that could not proceed: the link requires
+// attributes the caller has not presented.
+const linkMissingAttrs = "missing-attributes"
+
+// linkRedeemOutcome is where a redeem left the caller: "granted" (a share
+// is in place), "pending" (a request awaits the owner) or linkMissingAttrs.
+type linkRedeemOutcome struct {
+	Status    string
+	RequestID string
+	Missing   []string
+}
+
+// linkMarketError carries a failure to price the link's attributes, which
+// the browser route renders as the marketplace's own answer.
+type linkMarketError struct{ err error }
+
+func (e *linkMarketError) Error() string { return e.err.Error() }
+
+// redeemLinkFor redeems a verified link for the caller's subject. The
+// browser and the assistant's open_link tool both come here, so a link
+// means the same thing whoever opens it: an assistant acting for a user
+// gets that user exactly the share they would get by clicking. Proven
+// attributes come off the caller's own token, so an assistant (which holds
+// none) is reported missing them rather than trusted to supply them.
+func (s *Server) redeemLinkFor(ctx context.Context, p *Principal, g *grants.Grant, meta *linkMeta, n *store.Node, claimed map[string]string) (linkRedeemOutcome, error) {
 	// Idempotent: an existing grant means access is already in place.
-	if ag, aerr := s.Grants.ActiveForSubjectOnNode(r.Context(), g.TenantID, g.NodeID, p.Sub); aerr == nil && ag != nil {
-		writeJSON(w, http.StatusOK, redeemResult("granted", g, n, ""))
-		return
+	if ag, aerr := s.Grants.ActiveForSubjectOnNode(ctx, g.TenantID, g.NodeID, p.Sub); aerr == nil && ag != nil {
+		return linkRedeemOutcome{Status: "granted"}, nil
 	}
 
 	switch meta.Mode {
 	case linkModeOpen:
-		if _, err := s.mintSubjectGrant(r.Context(), g.TenantID, g.NodeID, p.Sub, g.Scope, g.ID); err != nil {
-			httpError(w, http.StatusInternalServerError, err)
-			return
+		if _, err := s.mintSubjectGrant(ctx, g.TenantID, g.NodeID, p.Sub, g.Scope, g.ID); err != nil {
+			return linkRedeemOutcome{}, err
 		}
-		writeJSON(w, http.StatusOK, redeemResult("granted", g, n, ""))
+		return linkRedeemOutcome{Status: "granted"}, nil
 	case linkModeRestricted:
 		// Every required attribute must be presented, else no request is
 		// filed: a half-empty request would push an undecidable card at
-		// the owner. The front tells the visitor what is missing.
-		proven, err := s.provenClaims(r.Context(), meta)
+		// the owner. The caller is told what is missing.
+		proven, err := s.provenClaims(ctx, meta)
 		if err != nil {
-			writeMarketError(w, err)
-			return
+			return linkRedeemOutcome{}, &linkMarketError{err}
 		}
-		presented, missing := linkAttributeEvidence(p, meta, proven, req.Attributes)
+		presented, missing := linkAttributeEvidence(p, meta, proven, claimed)
 		if len(missing) > 0 {
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"error":              "missing required attributes: " + strings.Join(missing, ", "),
-				"missing_attributes": missing,
-			})
-			return
+			return linkRedeemOutcome{Status: linkMissingAttrs, Missing: missing}, nil
 		}
 		// PII boundary (§7.6): the presented attributes ride out to the
 		// sharer's wallet in the notification and are NOT persisted —
@@ -740,15 +775,13 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 			RequesterSub: p.Sub,
 			Scope:        joinScopeStrings(g.Scope),
 		}
-		err = s.Store.CreateLinkRequest(r.Context(), lr)
+		err = s.Store.CreateLinkRequest(ctx, lr)
 		if errors.Is(err, store.ErrDuplicateApproval) {
 			// Already requested; report the current pending state.
-			writeJSON(w, http.StatusOK, redeemResult("pending", g, n, ""))
-			return
+			return linkRedeemOutcome{Status: "pending"}, nil
 		}
 		if err != nil {
-			httpError(w, http.StatusInternalServerError, err)
-			return
+			return linkRedeemOutcome{}, err
 		}
 		s.Notifier().Fire(g.CreatedBy, "share-request", map[string]any{
 			"tenant_id":     g.TenantID,
@@ -759,9 +792,9 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 			"attributes":    presented,
 			"scope":         scopeStrings(g.Scope),
 		})
-		writeJSON(w, http.StatusOK, redeemResult("pending", g, n, lr.ID))
+		return linkRedeemOutcome{Status: "pending", RequestID: lr.ID}, nil
 	default:
-		httpError(w, http.StatusInternalServerError, errors.New("unknown link mode"))
+		return linkRedeemOutcome{}, errors.New("unknown link mode")
 	}
 }
 

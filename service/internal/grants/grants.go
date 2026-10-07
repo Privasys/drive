@@ -39,6 +39,11 @@ const (
 	// the peer headers carry the app id and code hash, not the host MRTD.
 	SubjectApp       = "app:"
 	SubjectAssistant = "assistant" // sentinel — the Drive AI Tool (§8.7 AI scope)
+	// SubjectAssistantFor is followed by a recipient's OIDC sub: it marks a
+	// share that recipient received as readable by THEIR assistant (it was
+	// opened through the assistant). It grants nothing alone; reads also
+	// need the recipient's own live share on the node.
+	SubjectAssistantFor = "assistant-for:"
 )
 
 // NormaliseAppSubject returns the canonical identity payload of an app
@@ -250,6 +255,32 @@ func (r *Repo) ActiveRawSubjectOnNode(ctx context.Context, tenantID, nodeID, sub
 		}
 	}
 	return nil, rows.Err()
+}
+
+// ListForRawSubject returns the active grants for a verbatim subject across
+// every tenant (ListForSubject is the user-subject form of this).
+func (r *Repo) ListForRawSubject(ctx context.Context, subject string) ([]*Grant, error) {
+	rows, err := r.DB.QueryContext(ctx, r.q(
+		`SELECT id, tenant_id, node_id, subject, scope, created_by, created_at,
+		        expires_at, revoked_at, binding_pubkey, meta
+		 FROM grants WHERE subject = ? AND revoked_at IS NULL ORDER BY created_at DESC`),
+		subject)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	now := r.NowFn()
+	var out []*Grant
+	for rows.Next() {
+		g, serr := scanGrant(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		if g.IsActive(now) {
+			out = append(out, g)
+		}
+	}
+	return out, rows.Err()
 }
 
 // ListForTenantSubject returns a tenant's active grants for a verbatim

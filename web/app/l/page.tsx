@@ -20,6 +20,7 @@ import { parseLinkURL, type LinkParams } from '~/lib/share-link-url';
 import {
     DriveError,
     downloadFile,
+    downloadZip,
     redeemLink,
     resolveLink,
     type DriveNode,
@@ -266,6 +267,31 @@ function LinkLanding() {
         return () => clearInterval(t);
     }, [state, session, params]);
 
+    // A shared folder downloads whole, as a ZIP the enclave assembles from
+    // the recipient's grant on it (the same route the Drive's own selection
+    // download uses).
+    const [zipping, setZipping] = useState(false);
+    const downloadAll = async () => {
+        if (!session || !resolved) return;
+        setZipping(true);
+        try {
+            const bytes = await downloadZip(session, resolved.tenant_id, [resolved.node.id], resolved.node.name);
+            const blob = new Blob([bytes as BlobPart], { type: 'application/zip' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${resolved.node.name}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : 'Download failed.');
+        } finally {
+            setZipping(false);
+        }
+    };
+
     const download = async () => {
         if (!session || !resolved) return;
         try {
@@ -353,13 +379,26 @@ function LinkLanding() {
                         </Card>
                     ) : grantedFolder ? (
                         <>
-                            <div className="mb-4">
-                                <div className="text-lg font-semibold">{resolved.node.name}</div>
-                                <div className="text-xs" style={{ color: 'var(--drv-text-muted)' }}>
-                                    {resolved.owner_name ? `Shared by ${resolved.owner_name}` : 'Shared with you'}
-                                    {' · sealed end-to-end inside the enclave'}
+                            <div className="mb-4 flex items-start gap-3">
+                                <div className="min-w-0 flex-1">
+                                    <div className="text-lg font-semibold">{resolved.node.name}</div>
+                                    <div className="text-xs" style={{ color: 'var(--drv-text-muted)' }}>
+                                        {resolved.owner_name ? `Shared by ${resolved.owner_name}` : 'Shared with you'}
+                                        {' · sealed end-to-end inside the enclave'}
+                                    </div>
                                 </div>
+                                {session && (
+                                    <button
+                                        onClick={() => void downloadAll()}
+                                        disabled={zipping}
+                                        className="drv-btn-primary inline-flex shrink-0 items-center gap-1.5 rounded-full px-4 py-2 text-sm disabled:opacity-60"
+                                    >
+                                        <DownloadIcon width={16} height={16} />
+                                        {zipping ? 'Preparing ZIP…' : 'Download all'}
+                                    </button>
+                                )}
                             </div>
+                            {error && <p className="mb-3 text-sm text-red-500">{error}</p>}
                             {session && (
                                 <SharedBrowser
                                     session={session}

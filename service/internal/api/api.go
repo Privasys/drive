@@ -202,8 +202,10 @@ func (p *Principal) IsUser() bool { return p.ID != nil }
 
 // IsAssistant reports whether p is the confidential-AI assistant enclave
 // acting on behalf of a user (§8.7 RAG-in-enclave). Such a principal may
-// run only the read-only, AI-scoped RAG surface — never writes, and never
-// content outside the tenant's AI-scoped node set.
+// run only the AI-scoped RAG surface: it reads the tenant's AI-scoped node
+// set and the shares the user opened through it, and its one act is
+// open_link, which gives the user what clicking the link would
+// (assistantshares.go). It never writes content.
 func (p *Principal) IsAssistant() bool { return p.Via == viaAssistant }
 
 // SetConfig installs (and persists) the instance configuration.
@@ -1572,9 +1574,13 @@ func (s *Server) canAdmin(ctx context.Context, tenantID, sub string) bool {
 func (s *Server) allowNode(ctx context.Context, p *Principal, tenantID, nodeID string, need grants.Scope) bool {
 	if p.IsAssistant() {
 		// The assistant enclave may only READ, and only inside the tenant's
-		// AI-scoped node set (§8.7 RAG-in-enclave).
-		return need == grants.ScopeRead &&
-			s.canRead(ctx, tenantID, p.Sub) && s.nodeInAIScope(ctx, tenantID, nodeID)
+		// AI-scoped node set (§8.7 RAG-in-enclave), or inside a share the
+		// user opened through it (assistantshares.go).
+		if need != grants.ScopeRead {
+			return false
+		}
+		return (s.canRead(ctx, tenantID, p.Sub) && s.nodeInAIScope(ctx, tenantID, nodeID)) ||
+			s.assistantMayReadShared(ctx, p.Sub, tenantID, nodeID)
 	}
 	if p.IsUser() {
 		if need == grants.ScopeRead {

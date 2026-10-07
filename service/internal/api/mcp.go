@@ -52,6 +52,16 @@ var assistantMCPTools = []mcpTool{
 		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 	},
 	{
+		Name:        "open_link",
+		Description: "Open a Privasys Drive share link the user gives you (https://drive.privasys.org/l?id=…#…). Pass the whole link, including the part after #. The user gets the share as if they had clicked it, and its files become readable with search_semantic, get_folder_tree and read_file. Returns status granted, pending (the owner approves each person) or missing-attributes (the user must share something in their wallet first), with what to do next.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"The share link, complete with its #fragment."}},"required":["url"]}`),
+	},
+	{
+		Name:        "list_shares",
+		Description: "List what other people shared with the user that you can read: files and folders the user opened through you with open_link. Each has a node_id for get_folder_tree or read_file.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+	},
+	{
 		Name:        "get_folder_tree",
 		Description: "List a folder's structure (subfolders, files and their section anchors) by folder_id, to navigate a knowledge area the user has enabled for the assistant.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"folder_id":{"type":"string"}},"required":["folder_id"]}`),
@@ -72,7 +82,8 @@ func (s *Server) handleMCPList(w http.ResponseWriter, _ *http.Request, _ *Princi
 }
 
 // assistantToolHandler maps an MCP tool name to the underlying /tools/*
-// handler. Only the read-only RAG surface is exposed here.
+// handler. The RAG reads, plus open_link and list_shares
+// (assistantshares.go).
 func (s *Server) assistantToolHandler(tool string) func(http.ResponseWriter, *http.Request, *Principal) {
 	switch tool {
 	case "search_semantic":
@@ -85,6 +96,10 @@ func (s *Server) assistantToolHandler(tool string) func(http.ResponseWriter, *ht
 		return s.toolGetMemory
 	case "get_folder_tree":
 		return s.toolFolderTree
+	case "open_link":
+		return s.toolOpenLink
+	case "list_shares":
+		return s.toolListShares
 	default:
 		return nil
 	}
@@ -104,6 +119,12 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request, p *Princi
 	// route (isAssistantCatalogueRequest); a call always acts for a user.
 	if p.Sub == "" {
 		httpError(w, http.StatusUnauthorized, errors.New("missing on-behalf-of subject"))
+		return
+	}
+	// Shares the user received are not in any tenant of theirs, and opening
+	// one needs no Drive of their own.
+	if tool == "open_link" || tool == "list_shares" {
+		h(w, r, p)
 		return
 	}
 	t, err := s.Store.PersonalTenantOf(r.Context(), p.Sub)
@@ -129,7 +150,18 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request, p *Princi
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	merged, err := injectTenantID(body, t.ID)
+	// A node the model names may sit in a share the user opened through the
+	// assistant rather than in their own Drive: send the call to the tenant
+	// that holds it. The read gates still decide whether it may be read.
+	tenantID := t.ID
+	if nodeID := namedNode(body); nodeID != "" {
+		if _, gerr := s.Store.GetNode(r.Context(), t.ID, nodeID); gerr != nil {
+			if other, ok := s.sharedTenantOf(r.Context(), p.Sub, nodeID); ok {
+				tenantID = other
+			}
+		}
+	}
+	merged, err := injectTenantID(body, tenantID)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
@@ -157,4 +189,20 @@ func injectTenantID(body []byte, tenantID string) ([]byte, error) {
 	id, _ := json.Marshal(tenantID)
 	obj["tenant_id"] = id
 	return json.Marshal(obj)
+}
+
+// namedNode returns the node a read tool's arguments name (file_id or
+// folder_id), or "".
+func namedNode(body []byte) string {
+	var args struct {
+		FileID   string `json:"file_id"`
+		FolderID string `json:"folder_id"`
+	}
+	if json.Unmarshal(body, &args) != nil {
+		return ""
+	}
+	if args.FileID != "" {
+		return args.FileID
+	}
+	return args.FolderID
 }
