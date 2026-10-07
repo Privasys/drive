@@ -2,9 +2,10 @@
 //
 // The UI ships inside the Drive image, and one image runs on every platform
 // (dev and production alike), so nothing per-environment may be compiled in.
-// The Drive service writes /privasys-config.js on each request, from its own
-// identity and the platform host the gateway names it by; the root layout
-// loads that script before any of the app's code runs.
+// The Drive service writes window.__DRIVE_CFG__ inline at the top of each
+// page's <head> (service/internal/api/webui.go), from its own identity and
+// the platform host the gateway names it by, so it is set before any of the
+// app's chunks can run.
 //
 // Under `next dev` there is no Drive serving the page, so the NEXT_PUBLIC_*
 // variables fill in, and failing those the production platform.

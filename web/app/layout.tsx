@@ -23,13 +23,6 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
     return (
         <html lang="en">
-            <head>
-                {/* The backend this page talks to, written by the Drive service
-                    (lib/runtime-config.ts). A plain blocking script, so it runs
-                    before any of the app's own chunks. */}
-                {/* eslint-disable-next-line @next/next/no-sync-scripts */}
-                <script src="/privasys-config.js" />
-            </head>
             <body className="min-h-screen">
                 <AuthProvider>
                     <DriveProvider>{children}</DriveProvider>

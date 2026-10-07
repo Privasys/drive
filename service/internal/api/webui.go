@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -19,8 +20,11 @@ import (
 // loads in the clear before a sealed session exists. Everything else stays
 // sealed.
 //
-// The UI learns where its backend is from /privasys-config.js, written here
-// per request, so one image serves every platform. An adopter hostname in
+// The UI learns where its backend is from window.__DRIVE_CFG__, which this
+// file writes into each page per request, so one image serves every
+// platform. It goes inline at the very top of <head>: Next's chunks are
+// async scripts, cached as immutable, and a warm cache can run them before a
+// separately fetched config script has, leaving the app with no backend. An adopter hostname in
 // front of Drive is a gateway alias that rewrites Host to the platform
 // hostname, so the host named here is always the one the wallet attests.
 
@@ -49,9 +53,16 @@ func (s *Server) mountWebUI(mux *http.ServeMux) {
 		}
 		files.ServeHTTP(w, r)
 	})
-	mux.Handle("GET /{$}", static)
 	for _, p := range webUIPaths {
 		mux.Handle("GET "+p, static)
+	}
+	// The pages themselves, with the config written in.
+	for route, file := range map[string]string{"/{$}": "index.html", "/l/{$}": "l/index.html"} {
+		page, err := os.ReadFile(filepath.Join(s.WebDir, filepath.FromSlash(file)))
+		if err != nil {
+			continue
+		}
+		mux.Handle("GET "+route, s.webUIPage(page))
 	}
 	// Share links are /l?id=…#secret; the export's page is /l/. The browser
 	// carries the fragment across the redirect.
@@ -62,7 +73,27 @@ func (s *Server) mountWebUI(mux *http.ServeMux) {
 		}
 		http.Redirect(w, r, target, http.StatusPermanentRedirect)
 	})
+	// Kept for pages a browser cached before the config went inline.
 	mux.HandleFunc("GET /privasys-config.js", s.handleWebUIConfig)
+}
+
+// webUIPage serves one exported page with this request's config as the
+// first thing in <head>.
+func (s *Server) webUIPage(page []byte) http.Handler {
+	head := []byte("<head>")
+	at := bytes.Index(page, head)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		if at < 0 {
+			_, _ = w.Write(page)
+			return
+		}
+		cfg, _ := json.Marshal(s.webUIConfigFor(r)) // escapes <, > and &
+		_, _ = w.Write(page[:at+len(head)])
+		_, _ = w.Write([]byte("<script>window.__DRIVE_CFG__=" + string(cfg) + ";</script>"))
+		_, _ = w.Write(page[at+len(head):])
+	})
 }
 
 // webUIConfig is what the UI reads as window.__DRIVE_CFG__.
@@ -74,7 +105,7 @@ type webUIConfig struct {
 
 var hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 
-func (s *Server) handleWebUIConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Server) webUIConfigFor(r *http.Request) webUIConfig {
 	host := strings.ToLower(r.Host)
 	if h, _, ok := strings.Cut(host, ":"); ok {
 		host = h
@@ -82,8 +113,11 @@ func (s *Server) handleWebUIConfig(w http.ResponseWriter, r *http.Request) {
 	if !hostnameRE.MatchString(host) {
 		host = ""
 	}
-	cfg := webUIConfig{APIBase: controlPlaneFor(host), AppID: dashedAppID(s.Platform.AppID), AppHost: host}
-	body, _ := json.Marshal(cfg)
+	return webUIConfig{APIBase: controlPlaneFor(host), AppID: dashedAppID(s.Platform.AppID), AppHost: host}
+}
+
+func (s *Server) handleWebUIConfig(w http.ResponseWriter, r *http.Request) {
+	body, _ := json.Marshal(s.webUIConfigFor(r))
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte("window.__DRIVE_CFG__=" + string(body) + ";\n"))

@@ -16,8 +16,8 @@ func webUIServer(t *testing.T) http.Handler {
 	t.Helper()
 	dir := t.TempDir()
 	for name, body := range map[string]string{
-		"index.html":               "<html>drive</html>",
-		"l/index.html":             "<html>link</html>",
+		"index.html":               "<html><head><script async src=\"/_next/a.js\"></script></head><body>drive</body></html>",
+		"l/index.html":             "<html><head></head><body>link</body></html>",
 		"_next/static/chunks/a.js": "console.log(1)",
 		"index.txt":                "rsc",
 	} {
@@ -51,6 +51,15 @@ func TestWebUIServesTheExport(t *testing.T) {
 	}
 	if rec := get(t, h, host, "/l/?id=x"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "link") {
 		t.Fatalf("/l/ = %d %q", rec.Code, rec.Body.String())
+	}
+	// The config is the first thing in <head>, ahead of every chunk, so a
+	// warm cache cannot run the app before it.
+	for _, p := range []string{"/", "/l/?id=x"} {
+		body := get(t, h, host, p).Body.String()
+		if !strings.HasPrefix(body, "<html><head><script>window.__DRIVE_CFG__={") ||
+			!strings.Contains(body, `"appHost":"`+host+`"`) {
+			t.Fatalf("%s: config not first in head: %q", p, body)
+		}
 	}
 	// The page payload Next fetches when it navigates client-side.
 	if rec := get(t, h, host, "/index.txt?_rsc=1"); rec.Code != http.StatusOK || rec.Body.String() != "rsc" {

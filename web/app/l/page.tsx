@@ -52,7 +52,18 @@ export default function LinkPage() {
 }
 
 function LinkLanding() {
-    const { status, session, signInInto, holderToken } = useDrive();
+    const { status, error: driveError, session, signInInto, holderToken, reconnect, signOut } = useDrive();
+    // A Drive session that failed, or is taking far longer than it should,
+    // is shown for what it is, with a way out. This page used to render
+    // only its own errors, so a connection that never came up read as
+    // "Opening the link…" for ever.
+    const [slow, setSlow] = useState(false);
+    useEffect(() => {
+        setSlow(false);
+        if (status !== 'connecting') return;
+        const t = setTimeout(() => setSlow(true), 20_000);
+        return () => clearTimeout(t);
+    }, [status]);
     const [params] = useState(readParams);
     const [resolved, setResolved] = useState<ResolvedLink | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -316,8 +327,29 @@ function LinkLanding() {
                     ) : !resolved ? (
                         <Card>
                             <p className="py-6 text-center text-sm" style={{ color: 'var(--drv-text-muted)' }}>
-                                {error ?? 'Opening the link…'}
+                                {error ??
+                                    (status === 'error' || status === 'misconfigured'
+                                        ? (driveError ?? 'Could not connect to Drive.')
+                                        : slow
+                                          ? 'Still connecting to Drive…'
+                                          : 'Opening the link…')}
                             </p>
+                            {!error && (status === 'error' || slow) && (
+                                <div className="flex justify-center gap-3 pb-2">
+                                    <button
+                                        onClick={() => void reconnect()}
+                                        className="rounded-full border px-4 py-1.5 text-sm"
+                                        style={{ borderColor: 'var(--drv-border)' }}
+                                    >
+                                        Try again
+                                    </button>
+                                    {/* Signing out drops the stuck session; the
+                                        page then shows the wallet sign-in. */}
+                                    <button onClick={signOut} className="drv-btn-primary rounded-full px-4 py-1.5 text-sm">
+                                        Sign in again
+                                    </button>
+                                </div>
+                            )}
                         </Card>
                     ) : grantedFolder ? (
                         <>
