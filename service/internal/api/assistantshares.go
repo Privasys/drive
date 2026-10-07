@@ -171,7 +171,7 @@ func (s *Server) toolOpenLink(w http.ResponseWriter, r *http.Request, p *Princip
 		writeStoreError(w, err)
 		return
 	}
-	out, err := s.redeemLinkFor(r.Context(), p, g, meta, n, nil)
+	out, note, err := s.openLinkForAssistant(r.Context(), p, g, meta, n)
 	var me *linkMarketError
 	if errors.As(err, &me) {
 		writeMarketError(w, me.err)
@@ -193,7 +193,7 @@ func (s *Server) toolOpenLink(w http.ResponseWriter, r *http.Request, p *Princip
 		"owner_name": ownerName,
 	}
 	switch out.Status {
-	case "granted", "pending":
+	case "granted", "pending", linkAwaitingApproval:
 		if err := s.markAssistantShare(r.Context(), g.TenantID, g.NodeID, p.Sub); err != nil {
 			httpError(w, http.StatusInternalServerError, err)
 			return
@@ -204,14 +204,21 @@ func (s *Server) toolOpenLink(w http.ResponseWriter, r *http.Request, p *Princip
 			} else {
 				res["next"] = "The file is open. Call read_file with its node_id."
 			}
-		} else {
+		} else if out.Status == "pending" {
 			res["next"] = "The owner approves each person for this link. Tell the user their request is with " +
 				orDefault(ownerName, "the owner") + "; once approved, the files are readable here without opening the link again."
+		} else {
+			res["missing_attributes"] = out.Missing
+			res["next"] = "This link asks the user to share " + strings.Join(out.Missing, ", ") + " with " +
+				orDefault(ownerName, "its owner") + ". A request is waiting in their Privasys Wallet: ask them to approve it on their phone, then call open_link again with the same link."
 		}
 	case linkMissingAttrs:
 		res["missing_attributes"] = out.Missing
 		res["next"] = "This link asks the user to share " + strings.Join(out.Missing, ", ") +
-			" with " + orDefault(ownerName, "its owner") + ". Ask them to open the link in a browser and approve that in their wallet; afterwards, call open_link again."
+			" with " + orDefault(ownerName, "its owner") + ", and their wallet could not be asked from here. Ask them to open the link in a browser and approve that in their wallet; afterwards, call open_link again."
+		if note != "" {
+			res["reason"] = note
+		}
 	}
 	writeJSON(w, http.StatusOK, res)
 }

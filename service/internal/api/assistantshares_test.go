@@ -180,3 +180,93 @@ func decoded(out map[string]any) string {
 	b, _ := base64.StdEncoding.DecodeString(s)
 	return string(b)
 }
+
+// TestAssistantLinkAsksTheWallet: a link that needs the user's name sends
+// the request to their wallet through the IdP; the assistant waits, and once
+// the user approves, Drive redeems with the wallet's value, never one the
+// assistant supplied.
+func TestAssistantLinkAsksTheWallet(t *testing.T) {
+	_, srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler(""))
+	t.Cleanup(ts.Close)
+	const owner, recipient = "user-1", "user-2"
+	const secret = "assistant-shared-secret"
+	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign, AssistantEnclaveToken: secret})
+	tenantID, nodeID, _ := ownerTenantWithFile(t, ts.URL, owner)
+	if code, b := doReq(t, bearerReq(t, "POST", ts.URL+"/v1/me/tenant", recipient, "")); code != 200 && code != 201 {
+		t.Fatalf("personal tenant: %d %s", code, b)
+	}
+	code, b := doReq(t, bearerReq(t, "POST",
+		fmt.Sprintf("%s/v1/tenants/%s/nodes/%s/links", ts.URL, tenantID, nodeID), owner,
+		`{"mode":"restricted","scope":["read"],"required_attributes":["name"]}`))
+	if code != 201 {
+		t.Fatalf("link: %d %s", code, b)
+	}
+	var link struct {
+		ID     string `json:"id"`
+		Secret string `json:"secret"`
+	}
+	_ = json.Unmarshal(b, &link)
+
+	// A stand-in IdP: one request, pending until the user approves.
+	var asked []map[string]any
+	approved := false
+	prevPost, prevCheck, prevWait := idpPost, checkDisclosed, disclosureWait
+	t.Cleanup(func() { idpPost, checkDisclosed, disclosureWait = prevPost, prevCheck, prevWait })
+	disclosureWait = 0
+	idpPost = func(_ context.Context, path string, body map[string]any) (int, map[string]any, error) {
+		switch path {
+		case "/spend/disclosures":
+			asked = append(asked, body)
+			return http.StatusAccepted, map[string]any{"id": "d1", "expires_in": float64(600)}, nil
+		case "/spend/disclosures/d1":
+			if !approved {
+				return 200, map[string]any{"status": "pending"}, nil
+			}
+			return 200, map[string]any{"status": "approved", "disclosure": "signed"}, nil
+		}
+		return 404, map[string]any{}, nil
+	}
+	checkDisclosed = func(_ context.Context, tok, sub string) (map[string]string, error) {
+		if tok != "signed" || sub != recipient {
+			t.Errorf("checked %q for %q", tok, sub)
+		}
+		return map[string]string{"name": "Ada Lovelace"}, nil
+	}
+
+	open := func() map[string]any {
+		body, _ := json.Marshal(map[string]any{
+			"url": fmt.Sprintf("https://drive.privasys.org/l?id=%s&a=name#%s", link.ID, link.Secret)})
+		code, b := doReq(t, assistantReq(t, "POST", ts.URL+"/api/v1/mcp/tools/open_link", secret, recipient, string(body)))
+		if code != 200 {
+			t.Fatalf("open_link: %d %s", code, b)
+		}
+		var out map[string]any
+		_ = json.Unmarshal(b, &out)
+		return out
+	}
+
+	out := open()
+	if out["status"] != linkAwaitingApproval {
+		t.Fatalf("first call: %v", out)
+	}
+	if len(asked) != 1 || asked[0]["sub"] != recipient || fmt.Sprint(asked[0]["attributes"]) != "[name]" ||
+		!strings.Contains(fmt.Sprint(asked[0]["purpose"]), "shared.txt") {
+		t.Fatalf("asked the IdP: %v", asked)
+	}
+	// Still waiting: the same request is polled, not a second one sent.
+	if out := open(); out["status"] != linkAwaitingApproval || len(asked) != 1 {
+		t.Fatalf("second call: %v (asked %d)", out, len(asked))
+	}
+
+	// The user approves: the link redeems with the wallet's value, and the
+	// owner receives the request.
+	approved = true
+	if out := open(); out["status"] != "pending" {
+		t.Fatalf("after approval: %v", out)
+	}
+	code, b = doReq(t, bearerReq(t, "GET", fmt.Sprintf("%s/v1/tenants/%s/link-requests?status=pending", ts.URL, tenantID), owner, ""))
+	if code != 200 || !strings.Contains(string(b), recipient) {
+		t.Fatalf("owner's requests: %d %s", code, b)
+	}
+}

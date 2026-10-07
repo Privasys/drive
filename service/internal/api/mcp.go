@@ -53,7 +53,7 @@ var assistantMCPTools = []mcpTool{
 	},
 	{
 		Name:        "open_link",
-		Description: "Open a Privasys Drive share link the user gives you (https://drive.privasys.org/l?id=…#…). Pass the whole link, including the part after #. The user gets the share as if they had clicked it, and its files become readable with search_semantic, get_folder_tree and read_file. Returns status granted, pending (the owner approves each person) or missing-attributes (the user must share something in their wallet first), with what to do next.",
+		Description: "Open a Privasys Drive share link the user gives you (https://drive.privasys.org/l?id=…#…). Pass the whole link, including the part after #. The user gets the share as if they had clicked it, and its files become readable with search_semantic, get_folder_tree and read_file. Returns status granted, pending (the owner approves each person), awaiting-approval (the link asks for something about the user, and a request is waiting in their wallet: ask them to approve it, then call open_link again) or missing-attributes (open the link in a browser instead), with what to do next.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"The share link, complete with its #fragment."}},"required":["url"]}`),
 	},
 	{
