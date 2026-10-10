@@ -174,6 +174,14 @@ export class PrivasysDrive {
       attestation_server: string;
       threshold: number;
     };
+    /**
+     * The holder's PLATFORM token (the one the data-key grant was fetched
+     * with). The vault key is owned by the account, so after a Drive
+     * upgrade the vault approves the new measurement only against a token
+     * naming the account; Drive's own token does not once Drive has its
+     * own per-app subjects. Always send it.
+     */
+    owner_token?: string;
   }): Promise<{ status: string; handle: string }> {
     return this.req("POST", "/v1/me/tenant/key", JSON.stringify(bundle), "application/json");
   }
