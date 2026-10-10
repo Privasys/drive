@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -129,6 +130,7 @@ func (s *Server) ownerApprovalToken(ctx context.Context, tenantID, bearer, handl
 		}
 		vaultOp = op
 		pendingOwnerApprovals.Store(tenantID, &pendingOwnerApproval{vaultOp: op, expires: time.Now().Add(5 * time.Minute)})
+		log.Printf("tenant-key: the vault refused the token for tenant %.8s…; asked the holder's wallet to approve the upgrade", tenantID)
 	}
 	deadline := time.Now().Add(ownerApprovalWait)
 	for {
@@ -139,6 +141,7 @@ func (s *Server) ownerApprovalToken(ctx context.Context, tenantID, bearer, handl
 		}
 		if tok != "" {
 			pendingOwnerApprovals.Delete(tenantID)
+			log.Printf("tenant-key: the holder approved the upgrade for tenant %.8s… in their wallet", tenantID)
 			return tok, nil
 		}
 		if time.Now().Add(2 * time.Second).After(deadline) {
