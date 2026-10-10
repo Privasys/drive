@@ -124,6 +124,12 @@ func (s *Server) handleMCPCall(w http.ResponseWriter, r *http.Request, p *Princi
 	// Shares the user received are not in any tenant of theirs, and opening
 	// one needs no Drive of their own.
 	if tool == "open_link" || tool == "list_shares" {
+		// Redeeming a link acts in the holder's name beyond reading; a
+		// files.ai grant covers reading and searching only.
+		if tool == "open_link" && p.AIGrant {
+			httpError(w, http.StatusForbidden, errors.New("a files.ai grant reads and searches only"))
+			return
+		}
 		h(w, r, p)
 		return
 	}

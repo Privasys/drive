@@ -38,6 +38,13 @@ const appDataRoot = "AppData"
 
 const capabilityKindStorageFolder = "storage.folder"
 
+// capabilityKindFilesAI lets an app read and search what the holder put in
+// their Drive's AI scope, acting for that holder. It is how an assistant (the
+// Privasys harness or any other attested app the holder approves) reaches the
+// holder's knowledge without sharing an identifier with Drive: Drive takes
+// the holder from the grant they minted, never from a header the app sets.
+const capabilityKindFilesAI = "files.ai"
+
 // Keys that would let a caller select WHOSE data the capability lands on. The
 // boundary is derived from the authenticated user and never supplied: Drive's
 // rule for creating a grant is a user principal with WRITE rights on the
@@ -182,7 +189,7 @@ func (s *Server) handleCreateCapability(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if req.Kind != "" && req.Kind != capabilityKindStorageFolder {
+	if req.Kind != "" && req.Kind != capabilityKindStorageFolder && req.Kind != capabilityKindFilesAI {
 		http.Error(w, "unsupported capability kind", http.StatusBadRequest)
 		return
 	}
@@ -213,6 +220,11 @@ func (s *Server) handleCreateCapability(w http.ResponseWriter, r *http.Request, 
 		http.Error(w,
 			"request must not name an ownership boundary; the tenant is derived from the authenticated user",
 			http.StatusBadRequest)
+		return
+	}
+
+	if req.Kind == capabilityKindFilesAI {
+		s.createAICapability(w, r, p, req, appID, scope)
 		return
 	}
 
@@ -265,7 +277,7 @@ func (s *Server) handleCreateCapability(w http.ResponseWriter, r *http.Request, 
 		Scope:         scope,
 		CreatedBy:     p.Sub,
 		BindingPubkey: req.BindingPubkey,
-		Meta:          capabilityMeta(req, path, appID),
+		Meta:          capabilityMeta(req, capabilityKindStorageFolder, path, appID),
 	}
 	if req.ExpiresUnix > 0 {
 		t := time.Unix(req.ExpiresUnix, 0).UTC()
@@ -406,9 +418,9 @@ func resolveAppDisplayName(ctx context.Context, mgmtBaseURL, appID string) strin
 // capabilityMeta is what a later "apps with access to my Drive" list shows.
 // Populated rather than left empty, since an unexplained grant in that list is
 // worse than no list.
-func capabilityMeta(req capabilityRequest, path, appID string) string {
+func capabilityMeta(req capabilityRequest, kind, path, appID string) string {
 	m := map[string]string{
-		"kind":   capabilityKindStorageFolder,
+		"kind":   kind,
 		"folder": path,
 		"app_id": appID,
 		"via":    "wallet-capability",
@@ -438,4 +450,60 @@ func grantNamesApp(g *grants.Grant, appID string) bool {
 		return true
 	}
 	return false
+}
+
+// createAICapability mints a files.ai grant: read over the holder's AI scope
+// in their personal Drive, for one app. The grant names no node (the AI scope
+// is a set Drive computes, and the holder changes it), so it is tenant-wide in
+// shape and confined at use to the AI-scope node set (see verifyAppGrant).
+func (s *Server) createAICapability(w http.ResponseWriter, r *http.Request, p *Principal,
+	req capabilityRequest, appID string, scope []grants.Scope) {
+	// Read and search only: the AI scope is never written through a grant.
+	if len(scope) != 1 || scope[0] != grants.ScopeRead {
+		http.Error(w, "files.ai grants read only", http.StatusBadRequest)
+		return
+	}
+	tenant, err := s.Store.PersonalTenantOf(r.Context(), p.Sub)
+	if err != nil {
+		httpError(w, storeErrorStatus(err), err)
+		return
+	}
+	g := &grants.Grant{
+		TenantID:      tenant.ID,
+		Subject:       grants.SubjectApp + appID,
+		Scope:         scope,
+		CreatedBy:     p.Sub,
+		BindingPubkey: req.BindingPubkey,
+		Meta:          capabilityMeta(req, capabilityKindFilesAI, "", appID),
+	}
+	if req.ExpiresUnix > 0 {
+		t := time.Unix(req.ExpiresUnix, 0).UTC()
+		g.ExpiresAt = &t
+	}
+	if err := s.Grants.Create(r.Context(), g); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, capabilityResponse{
+		CapabilityID: g.ID,
+		Nonce:        req.Nonce,
+		ExpiresUnix:  req.ExpiresUnix,
+		ServiceResult: map[string]string{
+			"tenant_id": tenant.ID,
+			"node_id":   "",
+			"grant_id":  g.ID,
+		},
+	})
+}
+
+// grantKind is the capability kind recorded on a grant's meta, or "".
+func grantKind(g *grants.Grant) string {
+	if g == nil || g.Meta == "" {
+		return ""
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(g.Meta), &m); err != nil {
+		return ""
+	}
+	return m["kind"]
 }

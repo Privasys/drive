@@ -195,6 +195,11 @@ type Principal struct {
 	// token rather than its app identity. Empty on every other path,
 	// which is why a sealed-session sharer cannot fund a share.
 	Bearer string
+	// AIGrant marks an assistant principal that came from a files.ai grant
+	// rather than the trusted assistant enclave: it acts for the holder who
+	// minted the grant, may read and search their AI scope, and nothing more
+	// (no open_link, no settings changes).
+	AIGrant bool
 }
 
 // IsUser reports whether p is a user (OIDC bearer or sealed session).
@@ -642,6 +647,13 @@ func (s *Server) verifyAppGrant(r *http.Request, tok string) (*Principal, error)
 		if want == "" || (want != appID && want != digest) {
 			return nil, errors.New("attested caller is not the app this grant was approved for")
 		}
+	}
+	// A files.ai grant makes the app the holder's assistant over their AI
+	// scope, acting for the holder who minted it: every assistant gate
+	// (canRead on the holder's tenant, nodeInAIScope) applies unchanged, and
+	// the holder is taken from the grant, never from a header.
+	if grantKind(g) == capabilityKindFilesAI {
+		return &Principal{Sub: g.CreatedBy, Via: viaAssistant, Grant: g, Env: env, AIGrant: true}, nil
 	}
 	return &Principal{Sub: g.Subject, Via: viaAppGrant, Grant: g, Env: env}, nil
 }

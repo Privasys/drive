@@ -90,6 +90,12 @@ func (s *Server) handleMCPSettingsGet(w http.ResponseWriter, r *http.Request, p 
 }
 
 func (s *Server) handleMCPSettingsPut(w http.ResponseWriter, r *http.Request, p *Principal) {
+	// Settings decide what the assistant may see; a grant to read cannot
+	// widen itself.
+	if p.AIGrant {
+		httpError(w, http.StatusForbidden, errors.New("a files.ai grant cannot change settings"))
+		return
+	}
 	tenantID, ok := s.settingsActingTenant(w, r, p)
 	if !ok {
 		return
