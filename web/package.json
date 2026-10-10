@@ -12,7 +12,7 @@
     },
     "dependencies": {
         "@privasys/attestation-view": "0.1.0",
-        "@privasys/auth": "0.14.1",
+        "@privasys/auth": "0.14.2",
         "@privasys/drive-client": "file:../drive-client",
         "@privasys/ui": "0.1.0",
         "next": "15.5.9",
