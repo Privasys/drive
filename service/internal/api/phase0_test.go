@@ -221,6 +221,9 @@ type fakeMEKs struct {
 	refreshed      [][2]string
 	refreshErr     error
 	clearOnRefresh bool
+	// owner, when set, is the only bearer the vault accepts as the key's
+	// owner; any other is refused (Drive's own per-app subject).
+	owner string
 
 	// regenerated records Regenerate results (the new handles); regenErr
 	// makes Regenerate fail (rotation must then be skipped silently).
@@ -256,6 +259,9 @@ func (f *fakeMEKs) Regenerate(_ context.Context, ref vaultmek.Ref, b vaultmek.Bu
 func (f *fakeMEKs) RefreshTees(_ context.Context, _ vaultmek.Ref, grant, bearer string) error {
 	if f.refreshErr != nil {
 		return f.refreshErr
+	}
+	if f.owner != "" && bearer != f.owner {
+		return errors.New("vault error: caller is not the key owner")
 	}
 	f.refreshed = append(f.refreshed, [2]string{grant, bearer})
 	if f.clearOnRefresh {
@@ -1232,5 +1238,77 @@ func TestToolsWriteReadRoundtrip(t *testing.T) {
 		fmt.Sprintf(`{"tenant_id":"%s"}`, tenant.ID))
 	if resp.StatusCode != 200 || !strings.Contains(string(body), "user-1") {
 		t.Fatalf("tool changes (actor attribution): %d %s", resp.StatusCode, body)
+	}
+}
+
+// TestUpgradeApprovedInTheWallet: once the token Drive is handed no longer
+// names the key's owner (Drive's own per-app subject), the vault refuses it
+// and Drive asks the holder's wallet for the approval instead; the tap
+// yields a token that does, and the upgrade is approved with it.
+func TestUpgradeApprovedInTheWallet(t *testing.T) {
+	mek := sha256.Sum256([]byte("vault-held-tenant-mek"))
+	fake := &fakeMEKs{mek: mek[:], clearOnRefresh: true}
+	ts := newFullServer(t, func(s *Server) { s.MEKs = fake })
+
+	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	const handle = "apps.privasys.org/x/data/y/mek/v1"
+	resp, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth,
+		`{"grant":"g","handle":"`+handle+`","constellation":{"endpoints":["v1:1","v2:2"],"mrenclave":"00","attestation_server":"as","threshold":2}}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("adopt: %d %s", resp.StatusCode, body)
+	}
+
+	var begun []string
+	approved := false
+	prevBegin, prevCollect, prevWait := approvalBegin, approvalCollect, ownerApprovalWait
+	t.Cleanup(func() { approvalBegin, approvalCollect, ownerApprovalWait = prevBegin, prevCollect, prevWait })
+	ownerApprovalWait = 0
+	approvalBegin = func(_ context.Context, bearer, h string) (string, bool, error) {
+		begun = append(begun, bearer+"|"+h)
+		return "op-1", true, nil
+	}
+	approvalCollect = func(_ context.Context, _ string, op string) (string, error) {
+		if op != "op-1" {
+			t.Errorf("collected %q", op)
+		}
+		if !approved {
+			return "", nil
+		}
+		return "account-approval-token", nil
+	}
+
+	// Drive upgrades; the vault accepts only a token naming the account.
+	fake.loadErr = errors.New("vaultmek: only 0/2 shares recovered: vault error: caller is not in policy.principals")
+	fake.owner = "account-approval-token"
+
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh"}`)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "owner_approval_pending") {
+		t.Fatalf("before the tap: %d %s", resp.StatusCode, body)
+	}
+	if len(begun) != 1 || !strings.HasSuffix(begun[0], "|"+handle) {
+		t.Fatalf("approval requests: %v", begun)
+	}
+
+	// The holder taps; the next re-arm collects, approves and loads.
+	approved = true
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh"}`)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"measurement_approved":true`) {
+		t.Fatalf("after the tap: %d %s", resp.StatusCode, body)
+	}
+	if len(begun) != 1 {
+		t.Fatalf("a second approval was requested: %v", begun)
+	}
+	if last := fake.refreshed[len(fake.refreshed)-1]; last[1] != "account-approval-token" {
+		t.Fatalf("approved with %q", last[1])
+	}
+
+	// A vault that cannot be reached is not a reason to push the holder.
+	fake.loadErr = errors.New("vaultmek: only 0/2 shares recovered: vault error: caller is not in policy.principals")
+	fake.refreshErr = errors.New("vaultmek: dial v1:1: connection refused")
+	resp, _ = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"g4"}`)
+	if resp.StatusCode != http.StatusBadGateway || len(begun) != 1 {
+		t.Fatalf("unreachable vault: %d, approvals %v", resp.StatusCode, begun)
 	}
 }

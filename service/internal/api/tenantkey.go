@@ -302,7 +302,24 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 			if req.AttestationToken != "" {
 				ref.AttToken = req.AttestationToken
 			}
-			if aerr := s.MEKs.RefreshTees(r.Context(), ref, req.Grant, bearer); aerr != nil {
+			aerr := s.MEKs.RefreshTees(r.Context(), ref, req.Grant, bearer)
+			if aerr != nil && !vaultUnreachable(aerr) {
+				// The vault refused the token: it does not name the key's
+				// owner, which is the case once Drive has its own per-app
+				// subjects. Ask the holder's wallet for an approval whose
+				// token does (ownerapproval.go).
+				tok, terr := s.ownerApprovalToken(r.Context(), t.ID, bearer, ref.Handle)
+				if errors.Is(terr, errApprovalPending) {
+					httpError(w, http.StatusConflict, terr)
+					return
+				}
+				if terr != nil {
+					httpError(w, http.StatusBadGateway, fmt.Errorf("%v; wallet approval: %v", aerr, terr))
+					return
+				}
+				aerr = s.MEKs.RefreshTees(r.Context(), ref, req.Grant, tok)
+			}
+			if aerr != nil {
 				httpError(w, http.StatusBadGateway, aerr)
 				return
 			}
