@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -45,6 +46,17 @@ func TestRekeySubjects(t *testing.T) {
 		t.Fatal("a chained mapping was applied")
 	}
 
+	// A share acct-1 opened through their assistant moves with them.
+	code, b := doReq(t, bearerReq(t, "POST", fmt.Sprintf("%s/v1/tenants/%s/folders", base.URL, other), "acct-2", `{"name":"Shared"}`))
+	if code != 201 {
+		t.Fatalf("folder: %d %s", code, b)
+	}
+	var folder nodeJSON
+	_ = json.Unmarshal(b, &folder)
+	if err := srv.markAssistantShare(ctx, other, folder.ID, "acct-1"); err != nil {
+		t.Fatal(err)
+	}
+
 	counts, err := srv.Store.RekeySubjects(ctx, map[string]string{"acct-1": "drive-sub-1"})
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +66,9 @@ func TestRekeySubjects(t *testing.T) {
 	}
 	if got := tenantOf("drive-sub-1"); got != before {
 		t.Fatalf("after the re-key the holder found tenant %q, want their own %q", got, before)
+	}
+	if g, err := srv.Grants.ActiveRawSubjectOnNode(ctx, other, folder.ID, "assistant-for:drive-sub-1"); err != nil || g == nil {
+		t.Fatalf("the assistant share stayed on the old identifier: %v", err)
 	}
 	if got := tenantOf("acct-2"); got != other {
 		t.Fatal("another holder's Drive moved")

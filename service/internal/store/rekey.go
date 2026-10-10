@@ -25,11 +25,14 @@ var subjectColumns = []struct {
 }{
 	{"members", "user_sub", ""},
 	{"grants", "subject", "subject:"},
+	// A share the person opened through their assistant (assistantshares.go).
+	{"grants", "subject", "assistant-for:"},
 	{"grants", "created_by", ""},
 	{"nodes", "created_by", ""},
 	{"file_versions", "actor", ""},
 	{"changes", "actor", ""},
 	{"recoveries", "grantee_sub", ""},
+	{"recoveries", "requested_by", ""},
 	{"recovery_approvals", "approver_sub", ""},
 	{"link_requests", "requester_sub", ""},
 	{"link_requests", "decided_by", ""},

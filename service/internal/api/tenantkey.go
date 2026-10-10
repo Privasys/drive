@@ -226,10 +226,13 @@ type tenantKeyRequest struct {
 		AttestationServer string   `json:"attestation_server"`
 		Threshold         int      `json:"threshold"`
 	} `json:"constellation"`
-	// OwnerToken carries the data owner's platform bearer when the
-	// request itself rides a transport with no Authorization header (a
-	// sealed session asserts the sub only). Used solely as the vault
-	// owner credential for a measurement approval.
+	// OwnerToken is the data owner's PLATFORM token, the credential the
+	// vault checks a measurement approval against. The key is owned by the
+	// account (the control plane's grant names it), so the approval needs a
+	// token whose subject is the account. Drive's own token stops being one
+	// once Drive has per-app subjects, which is why this field wins over
+	// the request's bearer whenever both are present. Used for nothing
+	// else.
 	OwnerToken string `json:"owner_token,omitempty"`
 }
 
@@ -279,9 +282,12 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 		// vault authorises the tees update against the owner
 		// credential, so this works only for the key's own owner.
 		if vaultmek.PrincipalMismatch(rerr) {
-			bearer := p.Bearer
+			// The platform token the caller supplied names the key's owner;
+			// the request's own bearer only did while Drive's subjects were
+			// the account ids, so it is the fallback.
+			bearer := req.OwnerToken
 			if bearer == "" {
-				bearer = req.OwnerToken
+				bearer = p.Bearer
 			}
 			if req.Grant == "" || bearer == "" {
 				httpError(w, http.StatusConflict, errors.New(

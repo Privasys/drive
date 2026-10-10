@@ -50,6 +50,34 @@ func (s *Server) toolRekeySubjects(w http.ResponseWriter, r *http.Request, p *Pr
 		httpError(w, http.StatusConflict, err)
 		return
 	}
+	// The instance's recovery policy names people too.
+	if cfg := s.CurrentConfig(); cfg != nil && cfg.Recovery != nil {
+		next := *cfg
+		rec := *cfg.Recovery
+		rec.Approvers = remapSubjects(rec.Approvers, req.Mapping)
+		rec.Requesters = remapSubjects(rec.Requesters, req.Mapping)
+		next.Recovery = &rec
+		if err := s.SetConfig(&next); err != nil {
+			httpError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
 	_ = s.Store.AppendAudit(r.Context(), "", "subjects_rekeyed", p.Sub, req.Reason)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "rekeyed", "identifiers": len(req.Mapping), "rows": counts})
+}
+
+// remapSubjects rewrites the identifiers in subs that the mapping renames.
+func remapSubjects(subs []string, mapping map[string]string) []string {
+	if len(subs) == 0 {
+		return subs
+	}
+	out := make([]string, len(subs))
+	for i, sub := range subs {
+		if nu, ok := mapping[sub]; ok {
+			out[i] = nu
+		} else {
+			out[i] = sub
+		}
+	}
+	return out
 }

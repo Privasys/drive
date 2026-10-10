@@ -371,14 +371,27 @@ func TestMeasurementApprovalOnRearm(t *testing.T) {
 		t.Fatal("owner bearer missing from the approval")
 	}
 
+	// With Drive's own token as the bearer and the platform token as
+	// owner_token, the approval goes out with the platform token: only it
+	// names the account that owns the key.
+	fake.loadErr = errors.New("vaultmek: only 0/2 shares recovered: vault error: caller is not in policy.principals")
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"g3","owner_token":"platform-token"}`)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"measurement_approved":true`) {
+		t.Fatalf("approval with owner_token: %d %s", resp.StatusCode, body)
+	}
+	if last := fake.refreshed[len(fake.refreshed)-1]; last[0] != "g3" || last[1] != "platform-token" {
+		t.Fatalf("approval used %v, want the owner_token", last)
+	}
+
 	// A non-principal failure (stale token, vault down) must not
 	// trigger an approval attempt.
+	approvals := len(fake.refreshed)
 	fake.loadErr = errors.New("vaultmek: dial v1:1: connection refused")
 	resp, _ = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"g2"}`)
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("transport failure: want 502, got %d", resp.StatusCode)
 	}
-	if len(fake.refreshed) != 1 {
+	if len(fake.refreshed) != approvals {
 		t.Fatal("approval ran on a non-principal failure")
 	}
 }
