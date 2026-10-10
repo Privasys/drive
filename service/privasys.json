@@ -1104,6 +1104,44 @@
             }
         },
         {
+            "name": "list_subjects",
+            "role": "config",
+            "title": "List the identifiers Drive holds",
+            "endpoint": "/tools/list_subjects",
+            "description": "Every distinct identifier Drive stores for a person (members, user grants, authors, link requests, access events), for re-keying Drive to its own per-app subjects. Instance operator (app owner/admin) only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "rekey_subjects",
+            "role": "config",
+            "title": "Re-key Drive's identifiers",
+            "endpoint": "/tools/rekey_subjects",
+            "description": "Rewrite every stored identifier for a person from one value to another, in one transaction, from a mapping the IdP produced (subjects for Drive's client, per account). Refuses a mapping that would merge two people. The append-only audit log keeps its history. Instance operator (app owner/admin) only; audited.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mapping": {
+                        "type": "object",
+                        "description": "Old identifier to new identifier.",
+                        "additionalProperties": {
+                            "type": "string"
+                        }
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why the identifiers are re-keyed (audited)."
+                    }
+                },
+                "required": [
+                    "mapping",
+                    "reason"
+                ]
+            }
+        },
+        {
             "name": "search_semantic",
             "title": "Semantic search (agentic RAG)",
             "endpoint": "/tools/search_semantic",

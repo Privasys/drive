@@ -93,7 +93,7 @@ func (v *JWKSVerifier) Verify(ctx context.Context, token string) (*Identity, err
 	if iss, _ := claims["iss"].(string); iss != v.issuer {
 		return nil, fmt.Errorf("oidc: issuer %q != %q", iss, v.issuer)
 	}
-	if v.audience != "" && !checkAudience(claims, v.audience) {
+	if v.audience != "" && !checkAnyAudience(claims, v.audience) {
 		return nil, fmt.Errorf("oidc: audience missing %q", v.audience)
 	}
 	if exp, ok := claims["exp"].(float64); ok {
@@ -133,6 +133,18 @@ func rolesClaim(claims map[string]any) []string {
 		}
 	}
 	return out
+}
+
+// checkAnyAudience accepts a token addressed to any of a comma-separated
+// list. Drive takes two while it moves from the platform audience to its own
+// (per-app subjects): tokens its sign-in issued before, and after.
+func checkAnyAudience(claims map[string]any, expected string) bool {
+	for _, aud := range strings.Split(expected, ",") {
+		if aud = strings.TrimSpace(aud); aud != "" && checkAudience(claims, aud) {
+			return true
+		}
+	}
+	return false
 }
 
 func checkAudience(claims map[string]any, expected string) bool {
