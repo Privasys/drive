@@ -388,6 +388,12 @@ func (s *Store) migrate(ctx context.Context) error {
 			decided_by TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS link_requests_tenant ON link_requests(tenant_id, status, created_at)`,
+		// Identifiers a subject re-key retired (rekey.go): a sign-in still
+		// carrying one is refused rather than given an empty new Drive.
+		`CREATE TABLE IF NOT EXISTS retired_subjects (
+			sub TEXT PRIMARY KEY,
+			retired_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS link_requests_pending
 			ON link_requests(link_id, requester_sub) WHERE status = 'pending'`,
 	} {

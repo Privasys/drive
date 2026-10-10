@@ -535,6 +535,7 @@ func (s *Server) Routes() http.Handler {
 // inbound value and sets it only from an authenticated session; it
 // carries no roles, so it is a data-plane identity (never configure).
 func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal)) http.Handler {
+	next = s.refuseRetired(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := r.Header.Get("Authorization")
 		switch {

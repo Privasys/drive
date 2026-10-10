@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strings"
 )
 
 // Operator tools for moving Drive to its own per-app subjects (role:config,
@@ -80,4 +81,17 @@ func remapSubjects(subs []string, mapping map[string]string) []string {
 		}
 	}
 	return out
+}
+
+// refuseRetired turns away a person still known by an identifier a re-key
+// retired: a session opened before Drive moved to its own subjects. Signing
+// in again gives the new identifier, under which their Drive now lives.
+func (s *Server) refuseRetired(next func(http.ResponseWriter, *http.Request, *Principal)) func(http.ResponseWriter, *http.Request, *Principal) {
+	return func(w http.ResponseWriter, r *http.Request, p *Principal) {
+		if p != nil && p.Sub != "" && !strings.HasPrefix(p.Sub, "app:") && s.Store.SubjectRetired(r.Context(), p.Sub) {
+			http.Error(w, "identifier_retired: Drive now knows you by a new identifier; sign in again", http.StatusUnauthorized)
+			return
+		}
+		next(w, r, p)
+	}
 }

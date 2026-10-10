@@ -105,6 +105,11 @@ func (s *Store) RekeySubjects(ctx context.Context, mapping map[string]string) (m
 			return nil, errors.New("a new identifier is already in use: " + e)
 		}
 	}
+	for nu := range targets {
+		if s.SubjectRetired(ctx, nu) {
+			return nil, errors.New("a new identifier was retired by an earlier re-key: " + nu)
+		}
+	}
 
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -124,8 +129,27 @@ func (s *Store) RekeySubjects(ctx context.Context, mapping map[string]string) (m
 			counts[c.table+"."+c.column] += n
 		}
 	}
+	// Retire the old identifiers in the same transaction. A session opened
+	// before the switch keeps asserting one; without this Drive would see a
+	// stranger and give them an empty personal Drive, beside the real one
+	// and colliding with its vault key.
+	for old := range mapping {
+		if _, err := tx.ExecContext(ctx,
+			s.q(`INSERT INTO retired_subjects (sub) VALUES (?) ON CONFLICT (sub) DO NOTHING`), old); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return counts, nil
+}
+
+// SubjectRetired reports whether a re-key retired this identifier.
+func (s *Store) SubjectRetired(ctx context.Context, sub string) bool {
+	if sub == "" {
+		return false
+	}
+	var one int
+	return s.DB.QueryRowContext(ctx, s.q(`SELECT 1 FROM retired_subjects WHERE sub = ?`), sub).Scan(&one) == nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +71,16 @@ func TestRekeySubjects(t *testing.T) {
 	}
 	if g, err := srv.Grants.ActiveRawSubjectOnNode(ctx, other, folder.ID, "assistant-for:drive-sub-1"); err != nil || g == nil {
 		t.Fatalf("the assistant share stayed on the old identifier: %v", err)
+	}
+	// A session still carrying the old identifier is refused, rather than
+	// handed an empty second Drive.
+	if code, b := doReq(t, bearerReq(t, "POST", base.URL+"/v1/me/tenant", "acct-1", "")); code != http.StatusUnauthorized ||
+		!strings.Contains(string(b), "identifier_retired") {
+		t.Fatalf("retired identifier: %d %s", code, b)
+	}
+	// A later re-key may not land anyone on a retired identifier.
+	if _, err := srv.Store.RekeySubjects(ctx, map[string]string{"acct-2": "acct-1"}); err == nil {
+		t.Fatal("a mapping onto a retired identifier was applied")
 	}
 	if got := tenantOf("acct-2"); got != other {
 		t.Fatal("another holder's Drive moved")
