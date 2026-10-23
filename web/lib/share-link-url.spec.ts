@@ -1,4 +1,4 @@
-import { buildLinkURL, parseLinkURL } from './share-link-url';
+import { buildLinkURL, linkPreviewKey, parseLinkURL } from './share-link-url';
 
 const split = (url: string) => {
     const u = new URL(url);
@@ -6,22 +6,30 @@ const split = (url: string) => {
 };
 
 describe('share link addresses', () => {
-    it('carries the requirement names for a restricted link and reads them back', () => {
-        const url = buildLinkURL('https://drive.test.privasys.org', 'abc', 'S3cr3t', ['name', 'email']);
-        expect(url).toBe('https://drive.test.privasys.org/l?id=abc&a=name%2Cemail#S3cr3t');
+    it('carries only the id and the secret', () => {
+        const url = buildLinkURL('https://drive.test.privasys.org', 'abc', 'S3cr3t');
+        expect(url).toBe('https://drive.test.privasys.org/l?id=abc#S3cr3t');
         const { search, hash } = split(url);
-        expect(parseLinkURL(search, hash)).toEqual({ id: 'abc', secret: 'S3cr3t', attrs: ['name', 'email'] });
+        expect(parseLinkURL(search, hash)).toEqual({ id: 'abc', secret: 'S3cr3t', attrs: [] });
     });
 
-    it('asks for nothing on an open link', () => {
-        const url = buildLinkURL('https://drive.privasys.org', 'abc', 'S3cr3t');
-        expect(url).toBe('https://drive.privasys.org/l?id=abc#S3cr3t');
-        const { search, hash } = split(url);
-        expect(parseLinkURL(search, hash).attrs).toEqual([]);
+    it('still reads the requirement hint of an older address', () => {
+        expect(parseLinkURL('?id=abc&a=name%2Cemail', '#S3cr3t')).toEqual({
+            id: 'abc',
+            secret: 'S3cr3t',
+            attrs: ['name', 'email']
+        });
+    });
+
+    it('derives the same preview key as the service', async () => {
+        // The vector is pinned in the service too (TestLinkPreviewKeyVector).
+        expect(await linkPreviewKey('BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc')).toBe(
+            'urExxQiXkVuo6HKpYJOnNLetpELWRuayjBd9bf0DtgQ'
+        );
     });
 
     it('keeps the secret out of the query', () => {
-        const url = buildLinkURL('https://drive.privasys.org', 'abc', 'S3cr3t', ['name']);
+        const url = buildLinkURL('https://drive.privasys.org', 'abc', 'S3cr3t');
         expect(new URL(url).search).not.toContain('S3cr3t');
     });
 

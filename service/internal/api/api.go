@@ -505,6 +505,9 @@ func (s *Server) Routes() http.Handler {
 	// grant to build the sign-in that would authenticate them (see
 	// handlePreviewLink). The link secret is the authority.
 	mux.HandleFunc("POST /v1/links/{linkID}/preview", s.handlePreviewLink)
+	// The same view on the public surface (declared in privasys.json), keyed
+	// by the preview key so the secret never crosses the clear leg.
+	mux.HandleFunc("POST /v1/public/links/preview", s.handlePublicLinkPreview)
 	mux.Handle("POST /v1/links/{linkID}/resolve", s.auth(s.handleResolveLink))
 	mux.Handle("POST /v1/links/{linkID}/redeem", s.auth(s.handleRedeemLink))
 	mux.Handle("GET /v1/tenants/{tenantID}/link-requests", s.auth(s.handleListLinkRequests))

@@ -26,12 +26,7 @@ import {
     type CanonicalAttribute
 } from '@privasys/auth';
 import { PrivasysAttributePicker } from '@privasys/auth/react';
-import {
-    loadReferential,
-    loadShareAttributes,
-    requestKeyFor,
-    type ShareAttribute
-} from '~/lib/share-attributes';
+import { loadReferential } from '~/lib/share-attributes';
 import { buildLinkURL } from '~/lib/share-link-url';
 import { useDrive } from '~/lib/use-drive';
 import { CloseIcon, FolderIcon, FileIcon, LinkIcon, LockIcon, TrashIcon } from './icons';
@@ -63,21 +58,11 @@ const PAID_BLOCKED_COPY: Record<'no_marketplace' | 'no_payer' | 'no_referential'
 // Tenant member roles an enterprise folder ACL can narrow to.
 const ROLE_OPTIONS = ['owner', 'admin', 'contributor', 'reader'] as const;
 
-// The address a visitor opens. A restricted link names what it requires, as
-// the key the wallet must be asked for rather than the marketplace spelling it
-// is stored under, so the visitor's first approval already shows it. See
-// lib/share-link-url for why this is a hint the enclave does not rely on.
-function linkURL(
-    link: { id: string; mode: LinkMode; required_attributes?: string[] },
-    secret: string,
-    attrs: ShareAttribute[]
-): string {
+// The address a visitor opens: the link's id and, in the fragment, its
+// secret. What it requires the landing page asks Drive (lib/share-link-url).
+function linkURL(link: { id: string }, secret: string): string {
     const origin = typeof window !== 'undefined' ? window.location.origin : 'https://drive.privasys.org';
-    const ask =
-        link.mode === 'restricted'
-            ? (link.required_attributes ?? []).map((k) => requestKeyFor(attrs, k))
-            : undefined;
-    return buildLinkURL(origin, link.id, secret, ask);
+    return buildLinkURL(origin, link.id, secret);
 }
 
 export function ShareDialog({
@@ -106,22 +91,6 @@ export function ShareDialog({
     const [reqAttrs, setReqAttrs] = useState<string[]>(['name']);
     const [generated, setGenerated] = useState<CreatedLink | null>(null);
     const [copied, setCopied] = useState<string | null>(null); // link id last copied
-
-    // What a visitor can be asked to present, read from the canonical
-    // referential rather than listed here. Null while it loads: the create
-    // button already refuses an empty selection, so a referential the browser
-    // cannot reach blocks a restricted link instead of offering keys the wallet
-    // might no longer honour.
-    const [shareAttrs, setShareAttrs] = useState<ShareAttribute[] | null>(null);
-    useEffect(() => {
-        let live = true;
-        loadShareAttributes()
-            .then((a) => live && setShareAttrs(a))
-            .catch(() => live && setShareAttrs([]));
-        return () => {
-            live = false;
-        };
-    }, []);
 
     // Whether Drive can sell this sharer a paid attribute, and at what price,
     // asked of Drive itself: it is Drive that has to charge the sharer when
@@ -160,18 +129,21 @@ export function ShareDialog({
     // government-backed attribute here, in which case those are left out and
     // a line under the picker says why. Memoised because a new list rebuilds
     // the picker.
-    const offered = useMemo(
-        () =>
-            referential && paidBlocked
-                ? referential.filter((a) => !isBillable(a) && !isGovVerified(a))
-                : referential,
-        [referential, paidBlocked]
-    );
+    const allowed = offer !== null && offer !== 'unknown' ? offer.allowed : undefined;
+    const offered = useMemo(() => {
+        if (!referential) return referential;
+        // Only what the visitor's sign-in may ask for: the IdP keeps anything
+        // else from the wallet, and a link requiring it could never be met.
+        const allow = allowed ? new Set(allowed) : null;
+        return referential.filter(
+            (a) => (!allow || allow.has(a.key)) && (!paidBlocked || (!isBillable(a) && !isGovVerified(a)))
+        );
+    }, [referential, paidBlocked, allowed]);
     useEffect(() => {
-        if (!offered || !paidBlocked) return;
+        if (!offered || (!paidBlocked && !allowed)) return;
         const keep = new Set(offered.map((a) => a.key));
         setReqAttrs((cur) => (cur.every((k) => keep.has(k)) ? cur : cur.filter((k) => keep.has(k))));
-    }, [offered, paidBlocked]);
+    }, [offered, paidBlocked, allowed]);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -220,7 +192,7 @@ export function ShareDialog({
     const copyLink = async (link: { id: string; mode: LinkMode; required_attributes?: string[] }, secret: string) => {
         const id = link.id;
         try {
-            await navigator.clipboard.writeText(linkURL(link, secret, shareAttrs ?? []));
+            await navigator.clipboard.writeText(linkURL(link, secret));
             setCopied(id);
             setTimeout(() => setCopied((cur) => (cur === id ? null : cur)), 5000);
         } catch {
@@ -375,7 +347,7 @@ export function ShareDialog({
                             // selectable field so the link is not lost.
                             <input
                                 readOnly
-                                value={linkURL(generated, generated.secret, shareAttrs ?? [])}
+                                value={linkURL(generated, generated.secret)}
                                 onFocus={(e) => e.currentTarget.select()}
                                 className="mt-3 w-full rounded-lg border px-3 py-2 text-xs outline-none"
                                 style={{ borderColor: 'var(--drv-border)', background: 'var(--drv-surface)' }}

@@ -9,6 +9,11 @@
         "tos_url": "https://privasys.org/legal/terms/",
         "description": "Privasys Drive is the per-tenant encrypted file store behind Privasys Wallet, Chat and Secure Room, and a storage backend any platform app or agent can be granted scoped access to. File content is split into content-addressed chunks, each AEAD-sealed (XChaCha20-Poly1305) under a per-file key wrapped under the tenant's key; the cloud bucket only ever sees opaque ciphertext. The directory index, ACLs and wrapped keys live inside the attested enclave on the sealed per-app volume. Every file carries a Merkle root so clients detect tampering, and a GDPR-grade ZIP export (plaintext or ciphertext) is built in. An instance runs in one of two attestable operating modes: sovereign (only tenants can unlock their data; the operator holds no key) or escrowed (tenant keys carry an escrow wrap under the operator's master key, unlockable only through an audited, policy-gated recovery path)."
     },
+    "surfaces": {
+        "public": [
+            { "method": "POST", "path": "/v1/public/links/preview" }
+        ]
+    },
     "configure": {
         "name": "configure",
         "title": "Drive instance settings",

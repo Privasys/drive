@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -840,5 +841,93 @@ func TestSealedSharerPaysWithTheirHolderToken(t *testing.T) {
 	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign})
 	if o := offer(owner); o["paid"] != false || o["reason"] != "no_marketplace" {
 		t.Fatalf("offer without a marketplace: %v", o)
+	}
+}
+
+// The link page asks the public surface what a link requires before any
+// session exists, with a key derived from the secret rather than the
+// secret, and learns nothing about what the link opens.
+func TestPublicLinkPreviewTakesTheKeyNotTheSecret(t *testing.T) {
+	ts, _, _ := billedServer(t)
+	const owner = "user-1"
+	tenantID, nodeID, _ := ownerTenantWithFile(t, ts.URL, owner)
+	link := createLink(t, ts.URL, tenantID, nodeID, owner,
+		`{"mode":"restricted","scope":["read"],"required_attributes":["document_valid","name"]}`)
+	raw, err := base64.RawURLEncoding.DecodeString(link["secret"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(id, key string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest("POST", ts.URL+"/v1/public/links/preview",
+			strings.NewReader(fmt.Sprintf(`{"id":%q,"key":%q}`, id, key)))
+		req.Header.Set("Content-Type", "application/json")
+		code, b := doReq(t, req)
+		var out map[string]any
+		_ = json.Unmarshal(b, &out)
+		return code, out
+	}
+	code, out := post(link["id"].(string), linkPreviewKey(raw))
+	if code != 200 || out["billing_grant"] != "grant-1" || fmt.Sprint(out["required_attributes"]) != "[privasys:document_valid name]" {
+		t.Fatalf("preview: %d %v", code, out)
+	}
+	for _, k := range []string{"node", "tenant_id", "owner_name", "secret"} {
+		if _, ok := out[k]; ok {
+			t.Fatalf("the public preview carries %q: %v", k, out)
+		}
+	}
+	// The secret itself is not a preview key, nor is a key for another link.
+	if code, _ := post(link["id"].(string), link["secret"].(string)); code != http.StatusNotFound {
+		t.Fatalf("secret as key: %d", code)
+	}
+	if code, _ := post("no-such-link", linkPreviewKey(raw)); code != http.StatusNotFound {
+		t.Fatalf("unknown link: %d", code)
+	}
+}
+
+// A visitor on a sealed session proves a paid attribute with their own
+// token: the relay-asserted identity carries no claims.
+func TestSealedVisitorProvesWithTheirHolderToken(t *testing.T) {
+	ts, srv, _ := billedServer(t)
+	const owner, recipient = "user-1", "user-2"
+	tenantID, nodeID, _ := ownerTenantWithFile(t, ts.URL, owner)
+	link := createLink(t, ts.URL, tenantID, nodeID, owner,
+		`{"mode":"restricted","scope":["read"],"required_attributes":["document_valid"]}`)
+	srv.Verifier = claimsVerifier{bySub: map[string]map[string]any{recipient: {"document_valid": true}}}
+	redeemURL := fmt.Sprintf("%s/v1/links/%s/redeem", ts.URL, link["id"])
+	body := `{"secret":"` + link["secret"].(string) + `"}`
+
+	if code, b := doReq(t, sealedReq(t, "POST", redeemURL, recipient, "", body)); code != http.StatusForbidden {
+		t.Fatalf("sealed without a token: want 403, got %d %s", code, b)
+	}
+	code, b := doReq(t, sealedReq(t, "POST", redeemURL, recipient, recipient, body))
+	if code != 200 || !strings.Contains(string(b), `"pending"`) {
+		t.Fatalf("sealed with the holder token: %d %s", code, b)
+	}
+}
+
+// The offer names what the configured client may request at all.
+func TestAttributeOfferCarriesTheClientAllowlist(t *testing.T) {
+	ts, _, _ := billedServer(t)
+	prev := clientAllowlist
+	t.Cleanup(func() { clientAllowlist = prev })
+	clientAllowlist = func(_ context.Context, id string) ([]string, error) {
+		if id != "drive-web" {
+			return nil, fmt.Errorf("asked for %q", id)
+		}
+		return []string{"name", "given_name_id"}, nil
+	}
+	code, b := doReq(t, bearerReq(t, "GET", ts.URL+"/v1/attributes/offer", "user-1", ""))
+	if code != 200 || !strings.Contains(string(b), `"allowed":["name","given_name_id"]`) {
+		t.Fatalf("offer: %d %s", code, b)
+	}
+}
+
+// The page derives the preview key in the browser; both sides must agree
+// byte for byte. The same vector is pinned in web/lib/share-link-url.spec.ts.
+func TestLinkPreviewKeyVector(t *testing.T) {
+	raw, _ := base64.RawURLEncoding.DecodeString("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc")
+	if got := linkPreviewKey(raw); got != "urExxQiXkVuo6HKpYJOnNLetpELWRuayjBd9bf0DtgQ" {
+		t.Fatalf("preview key = %s", got)
 	}
 }

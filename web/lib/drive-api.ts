@@ -525,15 +525,21 @@ export function createLink(
  * choose one. `prices` maps the marketplace key to credits when it can;
  * `reason` says why not when it cannot.
  */
-export type AttributeOffer =
+export type AttributeOffer = (
     | { paid: true; prices: Map<string, number> }
-    | { paid: false; reason: 'no_marketplace' | 'no_payer' | 'no_referential' };
+    | { paid: false; reason: 'no_marketplace' | 'no_payer' | 'no_referential' }
+) & {
+    /** What a visitor's sign-in may ask for at all (the sign-in client's
+     * registration), when Drive could read it. */
+    allowed?: string[];
+};
 
 export async function getAttributeOffer(session: SealedSession, holderToken?: string): Promise<AttributeOffer> {
     const res = await json<{
         paid: boolean;
         reason?: 'no_marketplace' | 'no_payer' | 'no_referential';
         attributes?: { key?: string; price_credits?: number }[];
+        allowed?: string[];
     }>(
         session,
         'GET',
@@ -542,12 +548,13 @@ export async function getAttributeOffer(session: SealedSession, holderToken?: st
         REQUEST_TIMEOUT_MS,
         holderToken ? holderHeaders(holderToken) : undefined
     );
-    if (!res.paid) return { paid: false, reason: res.reason ?? 'no_marketplace' };
+    const allowed = Array.isArray(res.allowed) ? res.allowed : undefined;
+    if (!res.paid) return { paid: false, reason: res.reason ?? 'no_marketplace', allowed };
     const prices = new Map<string, number>();
     for (const a of res.attributes ?? []) {
         if (a.key && typeof a.price_credits === 'number') prices.set(a.key, a.price_credits);
     }
-    return { paid: true, prices };
+    return { paid: true, prices, allowed };
 }
 
 /** Owner: list a node's active links (no secrets). */
@@ -578,9 +585,50 @@ export function redeemLink(
     session: SealedSession,
     linkID: string,
     secret: string,
-    attributes?: Record<string, string>
+    attributes?: Record<string, string>,
+    holderToken?: string
 ): Promise<RedeemResult> {
-    return json<RedeemResult>(session, 'POST', `/v1/links/${linkID}/redeem`, { secret, attributes });
+    // The visitor's own token carries any attribute the link needs proven;
+    // the sealed session asserts only who they are.
+    return json<RedeemResult>(
+        session,
+        'POST',
+        `/v1/links/${linkID}/redeem`,
+        { secret, attributes },
+        REQUEST_TIMEOUT_MS,
+        holderToken ? holderHeaders(holderToken) : undefined
+    );
+}
+
+/** What a link needs from its visitor before they sign in. */
+export interface LinkPreview {
+    link_id: string;
+    mode: LinkMode;
+    required_attributes?: string[];
+    paid_attributes?: string[];
+    attribute_claims?: Record<string, string>;
+    billing_grant?: string;
+    billing_state?: string;
+}
+
+/**
+ * Ask the link's requirements before any session exists, on Drive's public
+ * surface. The secret never crosses that clear leg: `previewKey` is derived
+ * from it (lib/share-link-url). Null when Drive does not answer, and the page
+ * then falls back to signing in first and asking after.
+ */
+export async function previewLinkPublic(linkID: string, previewKey: string): Promise<LinkPreview | null> {
+    try {
+        const res = await fetch('/v1/public/links/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: linkID, key: previewKey })
+        });
+        if (!res.ok) return null;
+        return (await res.json()) as LinkPreview;
+    } catch {
+        return null;
+    }
 }
 
 /** Owner: list restricted-link access requests (default pending). */

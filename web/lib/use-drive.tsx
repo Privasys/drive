@@ -82,7 +82,11 @@ interface DriveContextValue {
     /** Create an enterprise workspace, refresh memberships, switch to it. */
     newWorkspace: (name: string) => Promise<void>;
     signIn: () => Promise<void>;
-    signInInto: (el: HTMLElement, requestedAttributes?: readonly string[]) => Promise<void>;
+    signInInto: (
+        el: HTMLElement,
+        requestedAttributes?: readonly string[],
+        link?: { clientId?: string; billingGrant?: string }
+    ) => Promise<void>;
     /**
      * The one-call gate (SDK connect()): mounts the whole sign-in surface
      * (header + pitch + ceremony/approval states) into `el` and bootstraps
@@ -241,10 +245,14 @@ export function DriveProvider({ children }: { children: ReactNode }) {
     // Inline ceremony: the wallet SDK renders its own sign-in surface
     // (install-the-wallet / connect-with-passkey) into the container.
     const signInInto = useCallback(
-        async (el: HTMLElement, requestedAttributes?: readonly string[]) => {
+        async (
+            el: HTMLElement,
+            requestedAttributes?: readonly string[],
+            link?: { clientId?: string; billingGrant?: string }
+        ) => {
             setError(null);
             try {
-                await auth.signInInto(el, { sessionRelayHost: host, requestedAttributes });
+                await auth.signInInto(el, { sessionRelayHost: host, requestedAttributes, ...link });
             } catch (e) {
                 if (e instanceof Error && e.message !== 'Authentication cancelled') {
                     setError(e.message);

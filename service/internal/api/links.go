@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
@@ -544,6 +545,57 @@ func (s *Server) handlePreviewLink(w http.ResponseWriter, r *http.Request) {
 		writeLinkError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, previewOf(g, meta))
+}
+
+// linkPreviewKey is what the link page sends on the clear leg instead of
+// the secret: an HMAC keyed by it, so the gateway that terminates that leg
+// learns a key that previews the link and does nothing else. The secret
+// itself stays in the URL fragment and only ever travels sealed.
+func linkPreviewKey(secret []byte) string {
+	m := hmac.New(sha256.New, secret)
+	m.Write([]byte("privasys-drive link preview v1"))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
+}
+
+// handlePublicLinkPreview is handlePreviewLink on the public surface: the
+// page asks it before any session exists, so the link's address needs to
+// carry nothing but its id and secret. It answers with the same strictly
+// pre-sign-in view (no node, no owner, no tenant), authorised by the
+// preview key rather than the secret.
+//
+// What the gateway sees is therefore the link id, the preview key, the
+// attribute names and the billing grant. It cannot open the link. The most
+// it could do is spend the grant, which costs the visitor a re-arm from the
+// sharer; every failure answers the same 404.
+func (s *Server) handlePublicLinkPreview(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID  string `json:"id"`
+		Key string `json:"key"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	g, err := s.Grants.Get(r.Context(), strings.TrimSpace(req.ID))
+	if err != nil || g.Subject != grants.SubjectLink || !g.IsActive(time.Now().UTC()) {
+		httpError(w, http.StatusNotFound, errLinkSecret)
+		return
+	}
+	var meta linkMeta
+	if err := json.Unmarshal([]byte(g.Meta), &meta); err != nil || meta.Secret == "" {
+		httpError(w, http.StatusNotFound, errLinkSecret)
+		return
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(meta.Secret)
+	if err != nil || !hmac.Equal([]byte(linkPreviewKey(raw)), []byte(strings.TrimSpace(req.Key))) {
+		httpError(w, http.StatusNotFound, errLinkSecret)
+		return
+	}
+	writeJSON(w, http.StatusOK, previewOf(g, &meta))
+}
+
+func previewOf(g *grants.Grant, meta *linkMeta) previewLinkResponse {
 	out := previewLinkResponse{
 		LinkID:             g.ID,
 		Mode:               meta.Mode,
@@ -559,7 +611,7 @@ func (s *Server) handlePreviewLink(w http.ResponseWriter, r *http.Request) {
 	if out.BillingState == billingFunded {
 		out.BillingGrant = meta.BillingGrant
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out
 }
 
 // handleRearmLinkBilling mints a fresh billing grant on an existing
@@ -712,6 +764,12 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 		return
 	}
 
+	// A proven attribute is read off the visitor's own token.
+	p, err = s.withHolderToken(r, p)
+	if err != nil {
+		writeMarketError(w, err)
+		return
+	}
 	out, err := s.redeemLinkFor(r.Context(), p, g, meta, n, req.Attributes)
 	var me *linkMarketError
 	switch {

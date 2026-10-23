@@ -101,6 +101,11 @@ type webUIConfig struct {
 	APIBase string `json:"apiBase"`
 	AppID   string `json:"appId"`
 	AppHost string `json:"appHost"`
+	// LinkClientID is the OAuth client a link's visitor signs in with: the
+	// one this instance binds billing grants to (oidc_client_id), so the
+	// grant a link carries is spendable by that sign-in. Empty: the page's
+	// own client.
+	LinkClientID string `json:"linkClientId,omitempty"`
 }
 
 var hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
@@ -113,7 +118,11 @@ func (s *Server) webUIConfigFor(r *http.Request) webUIConfig {
 	if !hostnameRE.MatchString(host) {
 		host = ""
 	}
-	return webUIConfig{APIBase: controlPlaneFor(host), AppID: dashedAppID(s.Platform.AppID), AppHost: host}
+	out := webUIConfig{APIBase: controlPlaneFor(host), AppID: dashedAppID(s.Platform.AppID), AppHost: host}
+	if cfg := s.CurrentConfig(); cfg != nil {
+		out.LinkClientID = cfg.OIDCClientID
+	}
+	return out
 }
 
 func (s *Server) handleWebUIConfig(w http.ResponseWriter, r *http.Request) {

@@ -16,14 +16,17 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { Navbar, Footer } from '@privasys/ui';
 import { useDrive } from '~/lib/use-drive';
 import { claimString, decodeTokenClaims } from '~/lib/token-claims';
-import { parseLinkURL, type LinkParams } from '~/lib/share-link-url';
+import { linkPreviewKey, parseLinkURL, type LinkParams } from '~/lib/share-link-url';
+import { RUNTIME } from '~/lib/runtime-config';
 import {
     DriveError,
     downloadFile,
     downloadZip,
+    previewLinkPublic,
     redeemLink,
     resolveLink,
     type DriveNode,
+    type LinkPreview,
     type ResolvedLink
 } from '~/lib/drive-api';
 import { FileViewer, canPreview } from '~/components/file-viewer';
@@ -106,14 +109,64 @@ function LinkLanding() {
     // install or attribute-import detour and the session expired, the
     // network dropped): surface a retry instead of a dead blank frame.
     const [ceremonyError, setCeremonyError] = useState<string | null>(null);
+
+    // What the link requires, asked of Drive's public surface before any
+    // session exists (lib/share-link-url). Undefined while it is asked, null
+    // when Drive did not answer: the page then falls back to an older
+    // address's hint, or to signing in first and stepping up after.
+    const [preview, setPreview] = useState<LinkPreview | null | undefined>(undefined);
+    useEffect(() => {
+        let live = true;
+        if (!params.id || !params.secret) {
+            setPreview(null);
+            return;
+        }
+        linkPreviewKey(params.secret)
+            .then((k) => previewLinkPublic(params.id, k))
+            .catch(() => null)
+            .then((p) => live && setPreview(p));
+        return () => {
+            live = false;
+        };
+    }, [params.id, params.secret]);
+
+    // The sign-in a link's visitor runs: with the client Drive binds the
+    // link's billing grant to, and that grant, so the sharer pays for what
+    // they required. A paid attribute is only asked for with a grant to pay
+    // for it: without one the bill would land on the client's owner.
+    const linkSignIn = useMemo(
+        () => ({
+            clientId: RUNTIME.linkClientId || undefined,
+            billingGrant: preview?.billing_grant || undefined
+        }),
+        [preview]
+    );
+    const askable = useCallback(
+        (keys: readonly string[]): string[] => {
+            const paid = new Set(preview?.paid_attributes ?? resolved?.paid_attributes ?? []);
+            const claims = { ...(resolved?.attribute_claims ?? {}), ...(preview?.attribute_claims ?? {}) };
+            return keys
+                .filter((k) => !paid.has(k) || !!linkSignIn.billingGrant)
+                .map((k) => claims[k] ?? requestKeyFor(shareAttrs, k));
+        },
+        [preview, resolved, linkSignIn, shareAttrs]
+    );
+    const unfunded = !!preview && (preview.paid_attributes ?? []).length > 0 && !preview.billing_grant;
+
     useEffect(() => {
         if (status !== 'signed-out' || ceremonyError || started.current || !ceremonyRef.current) return;
+        if (preview === undefined) return;
         started.current = true;
-        signInInto(ceremonyRef.current, params.attrs.length > 0 ? params.attrs : undefined).catch(() => {
+        const ask = preview
+            ? preview.mode === 'restricted'
+                ? askable(preview.required_attributes ?? [])
+                : []
+            : params.attrs;
+        signInInto(ceremonyRef.current, ask.length > 0 ? ask : undefined, linkSignIn).catch(() => {
             started.current = false;
             setCeremonyError('The sign-in did not complete. Scan the code again to open the link.');
         });
-    }, [status, signInInto, ceremonyError, params.attrs]);
+    }, [status, signInInto, ceremonyError, params.attrs, preview, askable, linkSignIn]);
 
     // Restricted-link step-up: re-run the ceremony requesting exactly the
     // attributes the link requires, then resolve + redeem again.
@@ -126,12 +179,8 @@ function LinkLanding() {
             // reading of a field is a different key from the bare name. The
             // link states that mapping; the referential answers for links
             // created before it did.
-            const claims = resolved?.attribute_claims ?? {};
             try {
-                await signInInto(
-                    ceremonyRef.current!,
-                    missingAttrs.map((k) => claims[k] ?? requestKeyFor(shareAttrs, k))
-                );
+                await signInInto(ceremonyRef.current!, askable(missingAttrs), linkSignIn);
             } catch {
                 stepUpStarted.current = false;
                 setCeremonyError('The sign-in did not complete. Scan the code again to open the link.');
@@ -142,7 +191,7 @@ function LinkLanding() {
             stepUpStarted.current = false;
             setState('resolving');
         })();
-    }, [stepUp, ceremonyError, missingAttrs, shareAttrs, resolved, signInInto]);
+    }, [stepUp, ceremonyError, missingAttrs, askable, linkSignIn, signInInto]);
 
     // The attributes the visitor already consented to share at sign-in,
     // matched against what the link requires.
@@ -218,7 +267,7 @@ function LinkLanding() {
             redeemed.current = true;
             let res;
             try {
-                res = await redeemLink(session, params.id, params.secret, attrs);
+                res = await redeemLink(session, params.id, params.secret, attrs, holderToken);
             } catch (e) {
                 // The enclave refuses a redeem that proves less than the link
                 // requires, and it is the only party that can tell: ask for
@@ -240,7 +289,7 @@ function LinkLanding() {
         } catch (e) {
             setError(e instanceof Error ? e.message : 'This link is invalid or has expired.');
         }
-    }, [session, params, presentedAttributes]);
+    }, [session, params, presentedAttributes, holderToken]);
 
     useEffect(() => {
         void resolveAndRedeem();
@@ -335,6 +384,13 @@ function LinkLanding() {
                                         ? `This private link asks you to share ${missingAttrs.map((k) => attributeLabel(shareAttrs, k)).join(', ')}.`
                                         : 'Sign in with the Privasys Wallet, or install it, to open it securely.'}
                                 </div>
+                                {unfunded && (
+                                    <div className="mt-2 text-xs" style={{ color: 'var(--drv-text-muted)' }}>
+                                        This link asks for details certified from a government ID, and the
+                                        sender has not funded them for another visitor. Ask them to renew the
+                                        link.
+                                    </div>
+                                )}
                             </div>
                             {ceremonyError ? (
                                 <div className="py-10 text-center">

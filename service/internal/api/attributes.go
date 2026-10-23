@@ -2,10 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Privasys/drive/service/internal/attrbilling"
 	"github.com/Privasys/drive/service/internal/attrref"
@@ -110,38 +114,77 @@ func (s *Server) handleAttributeOffer(w http.ResponseWriter, r *http.Request, p 
 		writeMarketError(w, err)
 		return
 	}
+	out := map[string]any{}
+	// What the visitor's sign-in may ask for at all: the IdP keeps from the
+	// wallet any key outside the client's registration, so offering one
+	// would make a link nobody can satisfy. Omitted when unknown, and the
+	// dialog then offers everything, as before.
+	if cfg := s.CurrentConfig(); cfg != nil && cfg.OIDCClientID != "" {
+		if allowed, aerr := clientAllowlist(r.Context(), cfg.OIDCClientID); aerr == nil {
+			out["allowed"] = allowed
+		} else {
+			log.Printf("attributes: allowlist for %s: %v", cfg.OIDCClientID, aerr)
+		}
+	}
 	m, err := s.marketFor(p)
 	if err == nil && s.AttrRef == nil {
 		err = errNoReferential
 	}
 	switch {
 	case errors.Is(err, errNoMarket):
-		writeJSON(w, http.StatusOK, map[string]any{"paid": false, "reason": "no_marketplace"})
-		return
+		out["paid"], out["reason"] = false, "no_marketplace"
 	case errors.Is(err, errNoPayer):
-		writeJSON(w, http.StatusOK, map[string]any{"paid": false, "reason": "no_payer"})
-		return
+		out["paid"], out["reason"] = false, "no_payer"
 	case errors.Is(err, errNoReferential):
-		writeJSON(w, http.StatusOK, map[string]any{"paid": false, "reason": "no_referential"})
-		return
+		out["paid"], out["reason"] = false, "no_referential"
+	default:
+		attrs, err := m.Catalogue(r.Context(), p.Bearer)
+		if err != nil {
+			writeMarketError(w, err)
+			return
+		}
+		out["paid"], out["attributes"] = true, attrs
 	}
-	attrs, err := m.Catalogue(r.Context(), p.Bearer)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// clientAllowlist reads the attributes an OAuth client may request from
+// the IdP's public registration view. Swappable in tests.
+var clientAllowlist = func(ctx context.Context, clientID string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		idpBase()+"/clients/"+url.PathEscape(clientID)+"/attributes", nil)
 	if err != nil {
-		writeMarketError(w, err)
-		return
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"paid": true, "attributes": attrs})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("identity provider answered %d", resp.StatusCode)
+	}
+	var body struct {
+		RequiredAttributes []string `json:"required_attributes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	return body.RequiredAttributes, nil
 }
 
 // errHolderToken refuses a holder token that is not the session's own.
 var errHolderToken = errors.New("the token in " + holderTokenHeader + " is not yours or not valid")
 
-// withHolderToken lends a sealed-session sharer the platform token the
-// marketplace charges. The browser reaches Drive over a sealed session,
-// which carries an identity but no token, so it sends the holder's own in
-// X-Holder-Token, as app folders do; it is verified like a bearer and
-// must name the session's subject. Without one the principal is returned
-// as it came, and the caller meets errNoPayer.
+// withHolderToken lends a sealed-session caller their own token. The
+// browser reaches Drive over a sealed session, which carries an identity
+// but no token, so it sends the holder's own in X-Holder-Token, as app
+// folders do; it is verified like a bearer and must name the session's
+// subject. A sharer needs it to be charged for a paid attribute, a visitor
+// to prove one (the proven claim is in the token). Without one the
+// principal is returned as it came: no payer, nothing proven.
 func (s *Server) withHolderToken(r *http.Request, p *Principal) (*Principal, error) {
 	if p.Bearer != "" || p.Via != viaSealed {
 		return p, nil
@@ -156,6 +199,9 @@ func (s *Server) withHolderToken(r *http.Request, p *Principal) (*Principal, err
 	}
 	q := *p
 	q.Bearer = tok
+	// The verified token carries the claims a proven attribute is read from;
+	// the relay-asserted identity carries none.
+	q.ID = id
 	return &q, nil
 }
 

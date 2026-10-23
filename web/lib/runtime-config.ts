@@ -18,6 +18,9 @@ export interface DriveRuntimeConfig {
     /** The Drive enclave's platform hostname, which the sealed session is
      * attested against. An alias domain in the address bar never changes it. */
     appHost: string;
+    /** The OAuth client a link's visitor signs in with: the one Drive binds a
+     * link's billing grant to. Empty means the page's own client. */
+    linkClientId: string;
 }
 
 declare global {
@@ -29,7 +32,8 @@ declare global {
 const FALLBACK: DriveRuntimeConfig = {
     apiBase: process.env.NEXT_PUBLIC_API_BASE_URL ?? 'https://api.developer.privasys.org',
     appId: process.env.NEXT_PUBLIC_DRIVE_APP_ID ?? '',
-    appHost: process.env.NEXT_PUBLIC_DRIVE_APP_HOST ?? ''
+    appHost: process.env.NEXT_PUBLIC_DRIVE_APP_HOST ?? '',
+    linkClientId: process.env.NEXT_PUBLIC_DRIVE_LINK_CLIENT_ID ?? ''
 };
 
 function read(): DriveRuntimeConfig {
@@ -37,7 +41,8 @@ function read(): DriveRuntimeConfig {
     return {
         apiBase: injected?.apiBase || FALLBACK.apiBase,
         appId: injected?.appId || FALLBACK.appId,
-        appHost: injected?.appHost || FALLBACK.appHost
+        appHost: injected?.appHost || FALLBACK.appHost,
+        linkClientId: injected?.linkClientId || FALLBACK.linkClientId
     };
 }
 

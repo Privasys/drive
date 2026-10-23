@@ -1,21 +1,20 @@
 // The address of a share link, and what the landing page reads back out of it.
 //
-// A restricted link used to cost the visitor two wallet approvals. The landing
-// page signed in asking for nothing, since it could not know the link's
-// requirements before a session existed to ask the enclave with; it then
-// resolved the link, found attributes missing and ran a second ceremony naming
-// them. The visitor approved a connection that showed no attributes, then was
-// asked to approve again.
+// An address is the link's id in the query and its secret in the fragment,
+// nothing else. A fragment never reaches a server, so the secret only ever
+// travels inside the sealed session.
 //
-// The sharer's page already knows the requirements when it builds the address,
-// so the address carries their NAMES and the first ceremony asks for them. It
-// is a hint and nothing more. The enclave still checks every redeem against the
-// requirement it stored, so a hint that was stripped, stale or edited costs the
-// visitor the old second step and never costs the sharer an attribute.
+// The landing page needs to know what a restricted link requires before the
+// visitor signs in, so the one ceremony asks for it (and carries the billing
+// grant that pays for a proven attribute). It asks Drive's public surface,
+// which runs before any session exists, with `linkPreviewKey`: a key derived
+// from the secret, so the gateway that terminates that clear leg learns
+// enough to preview the link and nothing that opens it.
 //
-// The names go in the query and the secret stays in the fragment. A fragment
-// never reaches a server log; the names may, and are no secret, since the
-// visitor's wallet shows them to the visitor anyway.
+// Addresses made before the public preview existed name the requirements in
+// an `a=` query parameter. They are still read, as a hint the page uses only
+// when the preview does not answer; the enclave checks every redeem against
+// what it stored either way.
 
 /** An attribute key as the referential spells one. Anything else is dropped. */
 const KEY = /^[a-z0-9_]+(:[a-z0-9_]+)?$/;
@@ -26,15 +25,12 @@ const MAX_KEYS = 24;
 export interface LinkParams {
     id: string;
     secret: string;
-    /** Attribute keys to request up front; empty for an open link or an old one. */
+    /** The requirement hint of an older address; empty for every new one. */
     attrs: string[];
 }
 
-export function buildLinkURL(origin: string, id: string, secret: string, attrs?: readonly string[]): string {
-    const q = new URLSearchParams({ id });
-    const keys = clean(attrs ?? []);
-    if (keys.length > 0) q.set('a', keys.join(','));
-    return `${origin}/l?${q.toString()}#${secret}`;
+export function buildLinkURL(origin: string, id: string, secret: string): string {
+    return `${origin}/l?${new URLSearchParams({ id }).toString()}#${secret}`;
 }
 
 export function parseLinkURL(search: string, hash: string): LinkParams {
@@ -44,6 +40,32 @@ export function parseLinkURL(search: string, hash: string): LinkParams {
         secret: hash.replace(/^#/, ''),
         attrs: clean((q.get('a') ?? '').split(','))
     };
+}
+
+/**
+ * The key the public preview takes in place of the secret: an HMAC-SHA256
+ * keyed by the secret's bytes over a fixed label, base64url without padding.
+ * Mirrors linkPreviewKey in the service (internal/api/links.go).
+ */
+export async function linkPreviewKey(secret: string): Promise<string> {
+    const raw = fromBase64Url(secret);
+    const key = await crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode('privasys-drive link preview v1'));
+    return toBase64Url(new Uint8Array(mac));
+}
+
+function fromBase64Url(s: string): Uint8Array<ArrayBuffer> {
+    const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4);
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+}
+
+function toBase64Url(b: Uint8Array): string {
+    let bin = '';
+    for (const c of b) bin += String.fromCharCode(c);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 function clean(keys: readonly string[]): string[] {

@@ -101,7 +101,7 @@ interface AuthContextValue {
      * persistent renewal frame picks up the session via cross-origin
      * SSO and starts the silent-renewal timer.
      */
-    signInInto: (container: HTMLElement, opts?: { sessionRelayHost?: string; extraAppHosts?: string[]; requestedAttributes?: readonly string[] }) => Promise<void>;
+    signInInto: (container: HTMLElement, opts?: { sessionRelayHost?: string; extraAppHosts?: string[]; requestedAttributes?: readonly string[]; clientId?: string; billingGrant?: string }) => Promise<void>;
     /**
      * One-call gate (SDK `connect()`): silent restore → one-tap wallet
      * re-approval (enclave measurement changed) → full ceremony, all
@@ -368,7 +368,7 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
     );
 
     const signInInto = useCallback(
-        async (container: HTMLElement, opts?: { sessionRelayHost?: string; extraAppHosts?: string[]; requestedAttributes?: readonly string[] }) => {
+        async (container: HTMLElement, opts?: { sessionRelayHost?: string; extraAppHosts?: string[]; requestedAttributes?: readonly string[]; clientId?: string; billingGrant?: string }) => {
             // One-shot inline frame. We don't reuse `frameRef` because
             // `container` is a constructor-only option in @privasys/auth
             // and the persistent frame must keep its renewal iframe
@@ -387,6 +387,11 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
                 methods: DRIVE_METHODS,
                 scope: ['openid', 'offline_access'] as const,
                 attributes: opts?.requestedAttributes ?? [],
+                // A share link signs its visitor in with the client Drive binds
+                // the link's billing grant to, and passes the grant so the
+                // sharer, not the client's owner, pays for a paid attribute.
+                ...(opts?.clientId ? { clientId: opts.clientId } : {}),
+                ...(opts?.billingGrant ? { billingGrant: opts.billingGrant } : {}),
                 ...(opts?.sessionRelayHost
                     ? {
                         sessionRelay: {
