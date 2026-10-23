@@ -1,13 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { SealedSession } from '@privasys/auth';
 import {
     createLink,
+    getAttributeOffer,
     getPermissions,
     listLinks,
     revokeGrant,
     setNodeACL,
+    type AttributeOffer,
     type CreatedLink,
     type DriveNode,
     type LinkMode,
@@ -16,7 +18,13 @@ import {
     type TenantKind
 } from '~/lib/drive-api';
 import { avatarColor, granteeLabel, initials } from '~/lib/format';
-import { fetchAttributePrices, type AttributeSectionCopy, type AttributeSectionId, type CanonicalAttribute } from '@privasys/auth';
+import {
+    isBillable,
+    isGovVerified,
+    type AttributeSectionCopy,
+    type AttributeSectionId,
+    type CanonicalAttribute
+} from '@privasys/auth';
 import { PrivasysAttributePicker } from '@privasys/auth/react';
 import {
     loadReferential,
@@ -25,7 +33,6 @@ import {
     type ShareAttribute
 } from '~/lib/share-attributes';
 import { buildLinkURL } from '~/lib/share-link-url';
-import { API_BASE_URL } from '~/lib/me-api';
 import { useDrive } from '~/lib/use-drive';
 import { CloseIcon, FolderIcon, FileIcon, LinkIcon, LockIcon, TrashIcon } from './icons';
 
@@ -42,6 +49,15 @@ const PICKER_COPY: Partial<Record<AttributeSectionId, AttributeSectionCopy>> = {
             'Certified from the visitor’s government ID, so each one is charged every time a visitor ' +
             'presents it. Prices are per visitor.'
     }
+};
+
+// Why the government-backed attributes are missing from the picker, when
+// Drive says it cannot charge the sharer for one.
+const PAID_BLOCKED_COPY: Record<'no_marketplace' | 'no_payer' | 'no_referential', string> = {
+    no_marketplace: 'Attributes certified from a government ID are not available on this Drive.',
+    no_payer: 'To require attributes certified from a government ID, sign out and sign in again.',
+    no_referential:
+        'Attributes certified from a government ID are unavailable for now. Reopen this dialog to retry.'
 };
 
 // Tenant member roles an enterprise folder ACL can narrow to.
@@ -107,20 +123,24 @@ export function ShareDialog({
         };
     }, []);
 
-    // What each paid attribute costs, from the marketplace catalogue. The
-    // catalogue needs the holder's platform token; without one, or if it
-    // cannot be reached, the chips fall back to saying "Paid" rather than
-    // showing a price nobody confirmed.
+    // Whether Drive can sell this sharer a paid attribute, and at what price,
+    // asked of Drive itself: it is Drive that has to charge the sharer when
+    // the link is created, so it is the one that knows whether it can. Null
+    // while it loads. A Drive that cannot answer leaves every attribute on
+    // offer, priced "Paid", and the share itself says what is wrong.
     const { holderToken } = useDrive();
-    const [prices, setPrices] = useState<Map<string, number> | null>(null);
+    const [offer, setOffer] = useState<AttributeOffer | 'unknown' | null>(null);
     useEffect(() => {
-        if (!holderToken) return;
-        const ctrl = new AbortController();
-        fetchAttributePrices(API_BASE_URL, holderToken, ctrl.signal)
-            .then(setPrices)
-            .catch(() => undefined);
-        return () => ctrl.abort();
-    }, [holderToken]);
+        let live = true;
+        getAttributeOffer(session, holderToken)
+            .then((o) => live && setOffer(o))
+            .catch(() => live && setOffer('unknown'));
+        return () => {
+            live = false;
+        };
+    }, [session, holderToken]);
+    const prices = offer !== null && offer !== 'unknown' && offer.paid ? offer.prices : null;
+    const paidBlocked = offer !== null && offer !== 'unknown' && !offer.paid ? offer.reason : null;
 
     // The live referential, as the picker takes it. Null while it loads; an
     // empty list means the IdP could not be reached, and the dialog says so
@@ -135,6 +155,23 @@ export function ShareDialog({
             live = false;
         };
     }, []);
+
+    // What the picker offers: everything, unless Drive cannot sell a
+    // government-backed attribute here, in which case those are left out and
+    // a line under the picker says why. Memoised because a new list rebuilds
+    // the picker.
+    const offered = useMemo(
+        () =>
+            referential && paidBlocked
+                ? referential.filter((a) => !isBillable(a) && !isGovVerified(a))
+                : referential,
+        [referential, paidBlocked]
+    );
+    useEffect(() => {
+        if (!offered || !paidBlocked) return;
+        const keep = new Set(offered.map((a) => a.key));
+        setReqAttrs((cur) => (cur.every((k) => keep.has(k)) ? cur : cur.filter((k) => keep.has(k))));
+    }, [offered, paidBlocked]);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -167,7 +204,8 @@ export function ShareDialog({
             const created = await createLink(session, tenantID, node.id, {
                 mode,
                 scope: ['read'],
-                requiredAttributes: mode === 'restricted' ? reqAttrs : undefined
+                requiredAttributes: mode === 'restricted' ? reqAttrs : undefined,
+                holderToken
             });
             setGenerated(created);
             await copyLink(created, created.secret);
@@ -296,17 +334,22 @@ export function ShareDialog({
                                     a sharer meets the same sections and trust markers here
                                     as a developer registering an app. Drive only words its
                                     sections for a visitor and hands it Drive's colours. */}
-                                {referential !== null && referential.length > 0 && (
+                                {offered !== null && offered.length > 0 && offer !== null && (
                                     <PrivasysAttributePicker
                                         className="drv-attribute-picker"
                                         layout="chips"
-                                        attributes={referential}
+                                        attributes={offered}
                                         selected={reqAttrs}
                                         onChange={setReqAttrs}
                                         prices={prices}
                                         copy={PICKER_COPY}
                                         totalTemplate="Each visitor who presents what you have chosen costs {price}."
                                     />
+                                )}
+                                {offered !== null && offered.length > 0 && paidBlocked && (
+                                    <div className="mt-2 text-xs" style={{ color: 'var(--drv-text-muted)' }}>
+                                        {PAID_BLOCKED_COPY[paidBlocked]}
+                                    </div>
                                 )}
                             </div>
                         )}

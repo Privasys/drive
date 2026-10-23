@@ -179,7 +179,12 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Pri
 	}
 	// Fund the disclosure before the link exists: a link whose attributes
 	// look required but cannot be proven is worse than no link at all.
-	state, err := s.armLinkBilling(r.Context(), p, &meta)
+	payer, err := s.withHolderToken(r, p)
+	if err != nil {
+		writeMarketError(w, err)
+		return
+	}
+	state, err := s.armLinkBilling(r.Context(), payer, &meta)
 	if err != nil {
 		writeMarketError(w, err)
 		return
@@ -588,7 +593,12 @@ func (s *Server) handleRearmLinkBilling(w http.ResponseWriter, r *http.Request, 
 	// Re-price against the attributes the link already commits to, not
 	// against anything the caller sends: re-arming funds the share that
 	// exists, it does not redefine it.
-	grant, err := s.mintLinkBillingGrant(r.Context(), p, meta.PaidAttrs)
+	payer, err := s.withHolderToken(r, p)
+	if err != nil {
+		writeMarketError(w, err)
+		return
+	}
+	grant, err := s.mintLinkBillingGrant(r.Context(), payer, meta.PaidAttrs)
 	if err != nil {
 		writeMarketError(w, err)
 		return

@@ -52,6 +52,11 @@ var errNoPayer = errors.New("requiring paid attributes needs a platform bearer t
 // live from the platform rather than mirrored here, so an attribute
 // published by a new provider is offerable without a Drive release.
 func (s *Server) handleAttributeCatalogue(w http.ResponseWriter, r *http.Request, p *Principal) {
+	p, err := s.withHolderToken(r, p)
+	if err != nil {
+		writeMarketError(w, err)
+		return
+	}
 	m, err := s.marketFor(p)
 	if err != nil {
 		writeMarketError(w, err)
@@ -69,6 +74,11 @@ func (s *Server) handleAttributeCatalogue(w http.ResponseWriter, r *http.Request
 // before the share exists. The figure comes from the same resolution the
 // reservation will use, so what the sharer is shown is what they pay.
 func (s *Server) handleAttributeQuote(w http.ResponseWriter, r *http.Request, p *Principal) {
+	p, err := s.withHolderToken(r, p)
+	if err != nil {
+		writeMarketError(w, err)
+		return
+	}
 	m, err := s.marketFor(p)
 	if err != nil {
 		writeMarketError(w, err)
@@ -87,6 +97,66 @@ func (s *Server) handleAttributeQuote(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 	writeJSON(w, http.StatusOK, q)
+}
+
+// handleAttributeOffer tells the sharer's dialog, before anything is
+// chosen, whether this Drive can sell them a paid attribute, with the
+// prices when it can. It answers 200 either way: "not here" is an answer,
+// and the dialog hides what cannot be bought rather than letting the
+// share fail after the click.
+func (s *Server) handleAttributeOffer(w http.ResponseWriter, r *http.Request, p *Principal) {
+	p, err := s.withHolderToken(r, p)
+	if err != nil {
+		writeMarketError(w, err)
+		return
+	}
+	m, err := s.marketFor(p)
+	if err == nil && s.AttrRef == nil {
+		err = errNoReferential
+	}
+	switch {
+	case errors.Is(err, errNoMarket):
+		writeJSON(w, http.StatusOK, map[string]any{"paid": false, "reason": "no_marketplace"})
+		return
+	case errors.Is(err, errNoPayer):
+		writeJSON(w, http.StatusOK, map[string]any{"paid": false, "reason": "no_payer"})
+		return
+	case errors.Is(err, errNoReferential):
+		writeJSON(w, http.StatusOK, map[string]any{"paid": false, "reason": "no_referential"})
+		return
+	}
+	attrs, err := m.Catalogue(r.Context(), p.Bearer)
+	if err != nil {
+		writeMarketError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"paid": true, "attributes": attrs})
+}
+
+// errHolderToken refuses a holder token that is not the session's own.
+var errHolderToken = errors.New("the token in " + holderTokenHeader + " is not yours or not valid")
+
+// withHolderToken lends a sealed-session sharer the platform token the
+// marketplace charges. The browser reaches Drive over a sealed session,
+// which carries an identity but no token, so it sends the holder's own in
+// X-Holder-Token, as app folders do; it is verified like a bearer and
+// must name the session's subject. Without one the principal is returned
+// as it came, and the caller meets errNoPayer.
+func (s *Server) withHolderToken(r *http.Request, p *Principal) (*Principal, error) {
+	if p.Bearer != "" || p.Via != viaSealed {
+		return p, nil
+	}
+	tok := strings.TrimSpace(r.Header.Get(holderTokenHeader))
+	if tok == "" {
+		return p, nil
+	}
+	id, err := s.Verifier.Verify(r.Context(), tok)
+	if err != nil || id == nil || id.Sub != p.Sub || (s.Revoked != nil && s.Revoked.Has(id.SID)) {
+		return nil, errHolderToken
+	}
+	q := *p
+	q.Bearer = tok
+	return &q, nil
 }
 
 // marketFor returns the marketplace client for a caller who can pay,
@@ -121,6 +191,10 @@ func writeMarketError(w http.ResponseWriter, err error) {
 	var se *attrbilling.StatusError
 	if errors.As(err, &se) {
 		http.Error(w, se.Body, se.Status)
+		return
+	}
+	if errors.Is(err, errHolderToken) {
+		httpError(w, http.StatusUnauthorized, err)
 		return
 	}
 	var ce *choiceError

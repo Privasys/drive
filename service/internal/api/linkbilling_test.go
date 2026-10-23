@@ -773,3 +773,72 @@ func TestStoredLinkWithoutRecordedClaimsKeepsTheGovernmentReading(t *testing.T) 
 		t.Fatalf("missing = %v, want the self-asserted date rejected", missing)
 	}
 }
+
+// sealedReq is the browser's call: the relay-asserted identity, no
+// Authorization, and optionally the holder's own token in X-Holder-Token.
+func sealedReq(t *testing.T, method, url, sub, holderSub, body string) *http.Request {
+	t.Helper()
+	req := bearerReq(t, method, url, sub, body)
+	req.Header.Del("Authorization")
+	req.Header.Set(relaySubHeader, sub)
+	if holderSub != "" {
+		req.Header.Set(holderTokenHeader, "dev:"+holderSub+":"+holderSub+"@privasys.org")
+	}
+	return req
+}
+
+// The web UI reaches Drive over a sealed session, which names the sharer
+// but carries no token to charge. The dialog learns that before anything
+// is chosen, and with the holder's own token in X-Holder-Token the sharer
+// pays for a government-backed attribute exactly as a bearer caller does.
+func TestSealedSharerPaysWithTheirHolderToken(t *testing.T) {
+	ts, srv, market := billedServer(t)
+	const owner = "user-1"
+	tenantID, nodeID, _ := ownerTenantWithFile(t, ts.URL, owner)
+
+	offer := func(holder string) map[string]any {
+		t.Helper()
+		code, b := doReq(t, sealedReq(t, "GET", ts.URL+"/v1/attributes/offer", owner, holder, ""))
+		if code != 200 {
+			t.Fatalf("offer: %d %s", code, b)
+		}
+		var out map[string]any
+		_ = json.Unmarshal(b, &out)
+		return out
+	}
+	if o := offer(""); o["paid"] != false || o["reason"] != "no_payer" {
+		t.Fatalf("offer without a token: %v", o)
+	}
+	if o := offer(owner); o["paid"] != true || !strings.Contains(fmt.Sprint(o["attributes"]), "privasys:given_name") {
+		t.Fatalf("offer with the holder token: %v", o)
+	}
+
+	// Someone else's token is not a way to bill them.
+	path := fmt.Sprintf("%s/v1/tenants/%s/nodes/%s/links", ts.URL, tenantID, nodeID)
+	const body = `{"mode":"restricted","scope":["read"],"required_attributes":["given_name_id"]}`
+	if code, b := doReq(t, sealedReq(t, "POST", path, owner, "user-2", body)); code != http.StatusUnauthorized {
+		t.Fatalf("another holder's token: %d %s", code, b)
+	}
+	if code, b := doReq(t, sealedReq(t, "POST", path, owner, "", body)); code != http.StatusBadRequest ||
+		!strings.Contains(string(b), "no platform token") {
+		t.Fatalf("no token: %d %s", code, b)
+	}
+	code, b := doReq(t, sealedReq(t, "POST", path, owner, owner, body))
+	if code != 201 {
+		t.Fatalf("create link: %d %s", code, b)
+	}
+	var link map[string]any
+	_ = json.Unmarshal(b, &link)
+	if link["billing_state"] != billingFunded {
+		t.Fatalf("billing_state = %v: %s", link["billing_state"], b)
+	}
+	if got := market.lastBearer(t); got != "dev:"+owner+":"+owner+"@privasys.org" {
+		t.Fatalf("grant minted with %q, want the holder's own token", got)
+	}
+
+	// No marketplace: the dialog is told so, rather than offered prices.
+	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign})
+	if o := offer(owner); o["paid"] != false || o["reason"] != "no_marketplace" {
+		t.Fatalf("offer without a marketplace: %v", o)
+	}
+}

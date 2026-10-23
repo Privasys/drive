@@ -408,6 +408,7 @@ func (s *Server) Routes() http.Handler {
 	// Attribute marketplace, for the sharer choosing what to require.
 	mux.Handle("GET /v1/attributes", s.auth(s.handleAttributeCatalogue))
 	mux.Handle("POST /v1/attributes/quote", s.auth(s.handleAttributeQuote))
+	mux.Handle("GET /v1/attributes/offer", s.auth(s.handleAttributeOffer))
 	mux.Handle("POST /v1/tenants", s.auth(s.handleCreateTenant))
 	mux.Handle("POST /v1/tenants/{tenantID}/members", s.auth(s.handleAddMember))
 	mux.Handle("GET /v1/tenants/{tenantID}/members", s.auth(s.handleListMembers))

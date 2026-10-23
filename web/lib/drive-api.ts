@@ -484,7 +484,13 @@ export interface LinkRequest {
     created_at: string;
 }
 
-/** Owner: mint a share link on a node. Secret is returned once. */
+/**
+ * Owner: mint a share link on a node. Secret is returned once.
+ *
+ * `holderToken` is the sharer's own token, which a paid attribute is charged
+ * to: the sealed session names the sharer but carries no token, so it travels
+ * in X-Holder-Token, as it does for app folders.
+ */
 export function createLink(
     session: SealedSession,
     tenantID: string,
@@ -495,15 +501,53 @@ export function createLink(
         requiredAttributes?: string[];
         expiresUnix?: number;
         label?: string;
+        holderToken?: string;
     }
 ): Promise<CreatedLink> {
-    return json<CreatedLink>(session, 'POST', `/v1/tenants/${tenantID}/nodes/${nodeID}/links`, {
-        mode: opts.mode,
-        scope: opts.scope ?? ['read'],
-        required_attributes: opts.requiredAttributes,
-        expires_unix: opts.expiresUnix,
-        label: opts.label
-    });
+    return json<CreatedLink>(
+        session,
+        'POST',
+        `/v1/tenants/${tenantID}/nodes/${nodeID}/links`,
+        {
+            mode: opts.mode,
+            scope: opts.scope ?? ['read'],
+            required_attributes: opts.requiredAttributes,
+            expires_unix: opts.expiresUnix,
+            label: opts.label
+        },
+        REQUEST_TIMEOUT_MS,
+        opts.holderToken ? holderHeaders(opts.holderToken) : undefined
+    );
+}
+
+/**
+ * Whether this Drive can sell the sharer a paid attribute, asked before they
+ * choose one. `prices` maps the marketplace key to credits when it can;
+ * `reason` says why not when it cannot.
+ */
+export type AttributeOffer =
+    | { paid: true; prices: Map<string, number> }
+    | { paid: false; reason: 'no_marketplace' | 'no_payer' | 'no_referential' };
+
+export async function getAttributeOffer(session: SealedSession, holderToken?: string): Promise<AttributeOffer> {
+    const res = await json<{
+        paid: boolean;
+        reason?: 'no_marketplace' | 'no_payer' | 'no_referential';
+        attributes?: { key?: string; price_credits?: number }[];
+    }>(
+        session,
+        'GET',
+        '/v1/attributes/offer',
+        undefined,
+        REQUEST_TIMEOUT_MS,
+        holderToken ? holderHeaders(holderToken) : undefined
+    );
+    if (!res.paid) return { paid: false, reason: res.reason ?? 'no_marketplace' };
+    const prices = new Map<string, number>();
+    for (const a of res.attributes ?? []) {
+        if (a.key && typeof a.price_credits === 'number') prices.set(a.key, a.price_credits);
+    }
+    return { paid: true, prices };
 }
 
 /** Owner: list a node's active links (no secrets). */
