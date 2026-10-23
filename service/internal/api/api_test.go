@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/Privasys/drive/service/internal/disclosure"
 	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/objectstore"
 	"github.com/Privasys/drive/service/internal/oidc"
@@ -48,6 +50,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *Server) {
 		Grants:   grants.New(db, false),
 		Verifier: oidc.DevVerifier{},
 		MEK:      mek[:],
+		Proofs:   rawProofs{},
 	}
 	// Drain fire-and-forget metric writes before the store + TempDir go
 	// (registered last, so it runs first under LIFO cleanup).
@@ -165,4 +168,16 @@ func TestUnauthenticatedReject(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("got %d", resp.StatusCode)
 	}
+}
+
+// rawProofs stands in for the identity verifier in tests that are not about
+// proofs: any non-empty value counts, as the claim it was presented as.
+// TestPaidAttributeNeedsAValidProof runs the real verifier.
+type rawProofs struct{}
+
+func (rawProofs) Verify(_ context.Context, token string, _ disclosure.Expect) (string, error) {
+	if strings.TrimSpace(token) == "" {
+		return "", disclosure.ErrNotProven
+	}
+	return token, nil
 }

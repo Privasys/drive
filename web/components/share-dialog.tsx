@@ -19,6 +19,9 @@ import {
 } from '~/lib/drive-api';
 import { avatarColor, granteeLabel, initials } from '~/lib/format';
 import {
+    CREDITS_PER_GBP,
+    disclosureCost,
+    formatCredits,
     isBillable,
     isGovVerified,
     type AttributeSectionCopy,
@@ -91,6 +94,12 @@ export function ShareDialog({
     const [reqAttrs, setReqAttrs] = useState<string[]>(['name']);
     const [generated, setGenerated] = useState<CreatedLink | null>(null);
     const [copied, setCopied] = useState<string | null>(null); // link id last copied
+    // Whether the link serves several people or closes once it has let one
+    // in, and, for a reusable link that requires paid attributes, the most
+    // the sharer agrees to pay for it in total (pounds, as typed; empty is no
+    // limit).
+    const [uses, setUses] = useState<'many' | 'once'>('many');
+    const [spendLimit, setSpendLimit] = useState('');
 
     // Whether Drive can sell this sharer a paid attribute, and at what price,
     // asked of Drive itself: it is Drive that has to charge the sharer when
@@ -145,6 +154,18 @@ export function ShareDialog({
         setReqAttrs((cur) => (cur.every((k) => keep.has(k)) ? cur : cur.filter((k) => keep.has(k))));
     }, [offered, paidBlocked, allowed]);
 
+    // What one visitor proving the chosen paid attributes costs the sharer,
+    // when any is chosen and every price is known.
+    const paidChosen =
+        mode === 'restricted' && !!offered && reqAttrs.some((k) => offered.some((a) => a.key === k && isBillable(a)));
+    const perVisit = paidChosen && offered ? disclosureCost(prices, offered, reqAttrs) : undefined;
+    const limitCredits = spendLimit.trim() === '' ? undefined : Math.round(Number(spendLimit) * CREDITS_PER_GBP);
+    const limitInvalid =
+        paidChosen &&
+        uses === 'many' &&
+        limitCredits !== undefined &&
+        (!Number.isFinite(limitCredits) || limitCredits <= 0 || (perVisit !== undefined && limitCredits < perVisit));
+
     const load = useCallback(async () => {
         setLoading(true);
         try {
@@ -177,7 +198,9 @@ export function ShareDialog({
                 mode,
                 scope: ['read'],
                 requiredAttributes: mode === 'restricted' ? reqAttrs : undefined,
-                holderToken
+                holderToken,
+                uses,
+                spendLimitCredits: paidChosen && uses === 'many' ? limitCredits : undefined
             });
             setGenerated(created);
             await copyLink(created, created.secret);
@@ -326,9 +349,50 @@ export function ShareDialog({
                             </div>
                         )}
 
+                        <div className="mt-4">
+                            <div className="mb-2 text-xs font-medium" style={{ color: 'var(--drv-text-muted)' }}>
+                                Who can use this link
+                            </div>
+                            <div className="flex gap-2">
+                                <UsesChoice selected={uses === 'many'} onSelect={() => setUses('many')} label="Several people" />
+                                <UsesChoice selected={uses === 'once'} onSelect={() => setUses('once')} label="One person only" />
+                            </div>
+                            <p className="mt-1.5 text-xs" style={{ color: 'var(--drv-text-muted)' }}>
+                                {uses === 'once'
+                                    ? 'The link stops working once it has let one person in.'
+                                    : 'Anyone you send the link to can use it, until you revoke it.'}
+                            </p>
+                        </div>
+
+                        {paidChosen && uses === 'many' && (
+                            <div className="mt-3">
+                                <label className="mb-1 block text-xs font-medium" style={{ color: 'var(--drv-text-muted)' }}>
+                                    Spending limit (optional)
+                                </label>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm">£</span>
+                                    <input
+                                        inputMode="decimal"
+                                        value={spendLimit}
+                                        onChange={(e) => setSpendLimit(e.target.value.replace(/[^0-9.]/g, ''))}
+                                        placeholder="No limit"
+                                        className="w-28 rounded-lg border px-3 py-1.5 text-sm outline-none"
+                                        style={{ borderColor: limitInvalid ? 'rgb(239 68 68)' : 'var(--drv-border)', background: 'var(--drv-surface)' }}
+                                    />
+                                </div>
+                                <p className="mt-1.5 text-xs" style={{ color: limitInvalid ? 'rgb(239 68 68)' : 'var(--drv-text-muted)' }}>
+                                    {limitInvalid
+                                        ? perVisit !== undefined
+                                            ? `The limit must cover at least one visitor (${formatCredits(perVisit)}).`
+                                            : 'Enter an amount in pounds.'
+                                        : 'You are charged only when a visitor actually proves what you require. Once the total reaches the limit, the link stops accepting new visitors.'}
+                                </p>
+                            </div>
+                        )}
+
                         <button
                             onClick={() => void generate()}
-                            disabled={busy || (mode === 'restricted' && reqAttrs.length === 0)}
+                            disabled={busy || (mode === 'restricted' && reqAttrs.length === 0) || limitInvalid}
                             className="drv-btn-primary mt-3 flex items-center gap-2 rounded-full px-4 py-2 text-sm disabled:opacity-50"
                         >
                             <LinkIcon width={16} height={16} /> Copy link
@@ -469,6 +533,23 @@ export function ShareDialog({
                 </div>
             </div>
         </div>
+    );
+}
+
+function UsesChoice({ selected, onSelect, label }: { selected: boolean; onSelect: () => void; label: string }) {
+    return (
+        <button
+            type="button"
+            onClick={onSelect}
+            className="rounded-full border px-3 py-1.5 text-sm"
+            style={
+                selected
+                    ? { borderColor: 'var(--drv-accent)', background: 'var(--drv-accent-weak)', color: 'var(--drv-accent)' }
+                    : { borderColor: 'var(--drv-border)' }
+            }
+        >
+            {label}
+        </button>
     );
 }
 

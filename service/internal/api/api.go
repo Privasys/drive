@@ -64,6 +64,11 @@ type Server struct {
 	// assurance nobody chose.
 	AttrRef *attrref.Client
 
+	// Proofs verifies the proof a visitor presents for a paid attribute
+	// (the identity verifier's signed disclosure). Nil verifies nothing,
+	// so no paid attribute ever counts as proven.
+	Proofs ProofVerifier
+
 	// MEKs provisions and loads per-tenant vault-held MEKs. Nil
 	// disables vault-held tenant keys (tenants stay on the instance
 	// MEK).
@@ -1440,7 +1445,34 @@ func (s *Server) handleRevokeGrant(w http.ResponseWriter, r *http.Request, p *Pr
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.withdrawLinkFunding(r, p, tenantID, grantID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// withdrawLinkFunding revokes the standing billing grant of a link that was
+// just revoked, so the sharer's payment authorisation ends with the link.
+// Best effort: it needs the sharer's own token, and a link that no longer
+// exists cannot be previewed, so its grant is never handed out again anyway.
+func (s *Server) withdrawLinkFunding(r *http.Request, p *Principal, tenantID, grantID string) {
+	g, err := s.Grants.Get(r.Context(), grantID)
+	if err != nil || g.TenantID != tenantID || g.Subject != grants.SubjectLink {
+		return
+	}
+	var meta linkMeta
+	if json.Unmarshal([]byte(g.Meta), &meta) != nil || !meta.BillingStanding || meta.BillingGrant == "" {
+		return
+	}
+	payer, err := s.withHolderToken(r, p)
+	if err != nil || payer.Bearer == "" {
+		return
+	}
+	m := s.marketClient()
+	if m == nil {
+		return
+	}
+	if err := m.Revoke(r.Context(), payer.Bearer, meta.BillingGrant); err != nil {
+		log.Printf("links: withdrawing the funding of link %.8s: %v", grantID, err)
+	}
 }
 
 func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request, p *Principal) {

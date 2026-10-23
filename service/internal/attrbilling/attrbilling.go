@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -145,6 +146,42 @@ func (c *Client) Mint(ctx context.Context, bearer, clientID string, keys []strin
 	return &out, nil
 }
 
+// StandingTerms are the limits a sharer sets on a share that may be opened
+// more than once. MaxUses 1 is a one-off share; zero values mean no limit.
+type StandingTerms struct {
+	MaxUses           int
+	SpendLimitCredits int64
+}
+
+// MintStanding issues a standing grant against the bearer's own account: one
+// payment authorisation for every visitor of a share, counted by the platform
+// only when a disclosure actually happens (a reload or an abandoned sign-in
+// costs nothing), until its limits are reached or it is revoked. It does not
+// expire.
+func (c *Client) MintStanding(ctx context.Context, bearer, clientID string, keys []string, terms StandingTerms) (*Grant, error) {
+	var out Grant
+	body := map[string]any{
+		"client_id":  clientID,
+		"attributes": keys,
+		"standing":   true,
+	}
+	if terms.MaxUses > 0 {
+		body["max_uses"] = terms.MaxUses
+	}
+	if terms.SpendLimitCredits > 0 {
+		body["spend_limit_credits"] = terms.SpendLimitCredits
+	}
+	if err := c.do(ctx, http.MethodPost, "/api/v1/attribute-billing-grants", bearer, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Revoke withdraws a grant the bearer's account issued.
+func (c *Client) Revoke(ctx context.Context, bearer, grantID string) error {
+	return c.do(ctx, http.MethodDelete, "/api/v1/attribute-billing-grants/"+url.PathEscape(grantID), bearer, nil, nil)
+}
+
 func (c *Client) do(ctx context.Context, method, path, bearer string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
@@ -173,6 +210,9 @@ func (c *Client) do(ctx context.Context, method, path, bearer string, body, out 
 	}
 	if resp.StatusCode/100 != 2 {
 		return &StatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
+	}
+	if out == nil {
+		return nil
 	}
 	return json.Unmarshal(raw, out)
 }

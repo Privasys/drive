@@ -29,14 +29,18 @@ type fakeMarket struct {
 	mu       sync.Mutex
 	bearers  []string
 	mints    []mintCall
+	revoked  []string
 	refuse   bool          // mint answers 400, as it does for an unfundable set
 	grantTTL time.Duration // expiry handed back on a mint (negative = already lapsed)
 }
 
 type mintCall struct {
-	ClientID   string   `json:"client_id"`
-	Attributes []string `json:"attributes"`
-	TTLSeconds int64    `json:"ttl_seconds"`
+	ClientID          string   `json:"client_id"`
+	Attributes        []string `json:"attributes"`
+	TTLSeconds        int64    `json:"ttl_seconds"`
+	Standing          bool     `json:"standing"`
+	MaxUses           int      `json:"max_uses"`
+	SpendLimitCredits int64    `json:"spend_limit_credits"`
 }
 
 // marketCatalogue is the fixture catalogue: priced gov attributes, a free
@@ -110,6 +114,13 @@ func newFakeMarket(t *testing.T) *fakeMarket {
 		m.record(r)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, marketCatalogue)
+	})
+	mux.HandleFunc("DELETE /api/v1/attribute-billing-grants/{id}", func(w http.ResponseWriter, r *http.Request) {
+		m.record(r)
+		m.mu.Lock()
+		m.revoked = append(m.revoked, r.PathValue("id"))
+		m.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 	})
 	mux.HandleFunc("POST /api/v1/attribute-billing-grants/quote", func(w http.ResponseWriter, r *http.Request) {
 		m.record(r)
@@ -328,8 +339,10 @@ func TestShareLinkMintsABillingGrantForThePricedAttributes(t *testing.T) {
 	if fmt.Sprint(mints[0].Attributes) != "[privasys:document_valid]" {
 		t.Fatalf("grant attributes = %v, want the namespaced priced set", mints[0].Attributes)
 	}
-	if mints[0].TTLSeconds != int64(linkBillingTTL/time.Second) {
-		t.Fatalf("grant ttl = %d", mints[0].TTLSeconds)
+	// One standing grant for the link, with no expiry and, for a reusable
+	// link with no spend limit chosen, no limits.
+	if !mints[0].Standing || mints[0].TTLSeconds != 0 || mints[0].MaxUses != 0 || mints[0].SpendLimitCredits != 0 {
+		t.Fatalf("grant terms = %+v", mints[0])
 	}
 	if got := market.lastBearer(t); got != "dev:"+owner+":"+owner+"@privasys.org" {
 		t.Fatalf("grant minted with %q, want the sharer's own token", got)
@@ -929,5 +942,62 @@ func TestLinkPreviewKeyVector(t *testing.T) {
 	raw, _ := base64.RawURLEncoding.DecodeString("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc")
 	if got := linkPreviewKey(raw); got != "urExxQiXkVuo6HKpYJOnNLetpELWRuayjBd9bf0DtgQ" {
 		t.Fatalf("preview key = %s", got)
+	}
+}
+
+// A one-off link's grant funds one visitor, and the link closes once it
+// has let someone in. A reusable link carries the sharer's spend limit, and
+// revoking it withdraws its funding.
+func TestLinkUsesAndSpendLimit(t *testing.T) {
+	ts, _, market := billedServer(t)
+	const owner, visitor = "user-1", "user-2"
+	tenantID, nodeID, _ := ownerTenantWithFile(t, ts.URL, owner)
+
+	once := createLink(t, ts.URL, tenantID, nodeID, owner,
+		`{"mode":"open","uses":"once"}`)
+	if once["one_off"] != true {
+		t.Fatalf("one_off = %v", once["one_off"])
+	}
+	redeem := func(link map[string]any, sub string) int {
+		t.Helper()
+		code, _ := doReq(t, bearerReq(t, "POST", fmt.Sprintf("%s/v1/links/%s/redeem", ts.URL, link["id"]), sub,
+			`{"secret":"`+link["secret"].(string)+`"}`))
+		return code
+	}
+	if code := redeem(once, visitor); code != 200 {
+		t.Fatalf("first redeem: %d", code)
+	}
+	if code := redeem(once, "user-3"); code == 200 {
+		t.Fatal("a one-off link let a second person in")
+	}
+
+	paidOnce := createLink(t, ts.URL, tenantID, nodeID, owner,
+		`{"mode":"restricted","required_attributes":["document_valid"],"uses":"once","spend_limit_credits":500}`)
+	many := createLink(t, ts.URL, tenantID, nodeID, owner,
+		`{"mode":"restricted","required_attributes":["document_valid"],"uses":"many","spend_limit_credits":500}`)
+	market.mu.Lock()
+	mints := append([]mintCall(nil), market.mints...)
+	market.mu.Unlock()
+	if len(mints) != 2 {
+		t.Fatalf("mints = %d", len(mints))
+	}
+	if !mints[0].Standing || mints[0].MaxUses != 1 || mints[0].SpendLimitCredits != 0 {
+		t.Fatalf("one-off grant terms = %+v", mints[0])
+	}
+	if !mints[1].Standing || mints[1].MaxUses != 0 || mints[1].SpendLimitCredits != 500 {
+		t.Fatalf("reusable grant terms = %+v", mints[1])
+	}
+	if paidOnce["billing_state"] != billingFunded || many["billing_state"] != billingFunded {
+		t.Fatalf("billing states: %v %v", paidOnce["billing_state"], many["billing_state"])
+	}
+
+	if code, b := doReq(t, bearerReq(t, "DELETE", fmt.Sprintf("%s/v1/tenants/%s/grants/%s", ts.URL, tenantID, many["id"]), owner, "")); code != http.StatusNoContent {
+		t.Fatalf("revoke: %d %s", code, b)
+	}
+	market.mu.Lock()
+	revoked := append([]string(nil), market.revoked...)
+	market.mu.Unlock()
+	if len(revoked) != 1 || revoked[0] != many["billing_grant"] && revoked[0] != "grant-2" {
+		t.Fatalf("revoked grants = %v", revoked)
 	}
 }

@@ -424,6 +424,10 @@ export interface ShareLink {
     revoked: boolean;
     /** Owner-only: lets the link be re-copied. Absent on pre-existing links. */
     secret?: string;
+    /** Closes once it has let one person in. */
+    one_off?: boolean;
+    /** The most its paid attributes may cost the sharer in total, in credits. */
+    spend_limit_credits?: number;
 }
 
 export interface CreatedLink {
@@ -434,6 +438,8 @@ export interface CreatedLink {
     node_id: string;
     required_attributes?: string[];
     expires_at?: string;
+    one_off?: boolean;
+    spend_limit_credits?: number;
 }
 
 export interface ResolvedLink {
@@ -457,6 +463,12 @@ export interface ResolvedLink {
      * those.
      */
     attribute_claims?: Record<string, string>;
+    /**
+     * The paid attributes this visitor has not proven yet. Only the enclave can
+     * tell a valid proof from a typed value, so the page lists these as missing
+     * alongside the ones it can check itself.
+     */
+    unproven_attributes?: string[];
     tenant_id: string;
     owner_name: string;
     already_granted: boolean;
@@ -502,6 +514,10 @@ export function createLink(
         expiresUnix?: number;
         label?: string;
         holderToken?: string;
+        /** "once" closes the link after it has let one person in. */
+        uses?: 'once' | 'many';
+        /** Cap on what a reusable link's paid attributes may cost, in credits. */
+        spendLimitCredits?: number;
     }
 ): Promise<CreatedLink> {
     return json<CreatedLink>(
@@ -513,7 +529,9 @@ export function createLink(
             scope: opts.scope ?? ['read'],
             required_attributes: opts.requiredAttributes,
             expires_unix: opts.expiresUnix,
-            label: opts.label
+            label: opts.label,
+            uses: opts.uses,
+            spend_limit_credits: opts.spendLimitCredits
         },
         REQUEST_TIMEOUT_MS,
         opts.holderToken ? holderHeaders(opts.holderToken) : undefined
@@ -575,9 +593,19 @@ export async function listLinks(
 export function resolveLink(
     session: SealedSession,
     linkID: string,
-    secret: string
+    secret: string,
+    holderToken?: string
 ): Promise<ResolvedLink> {
-    return json<ResolvedLink>(session, 'POST', `/v1/links/${linkID}/resolve`, { secret });
+    // The visitor's own token lets the enclave say which paid attributes it
+    // has proven (see unproven_attributes).
+    return json<ResolvedLink>(
+        session,
+        'POST',
+        `/v1/links/${linkID}/resolve`,
+        { secret },
+        REQUEST_TIMEOUT_MS,
+        holderToken ? holderHeaders(holderToken) : undefined
+    );
 }
 
 /** Recipient: redeem a link. Open -> granted; restricted -> pending request. */

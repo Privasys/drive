@@ -10,10 +10,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/Privasys/drive/service/internal/attrbilling"
 	"github.com/Privasys/drive/service/internal/crypto"
 	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/store"
@@ -88,6 +90,19 @@ type linkMeta struct {
 	// reads their meaning back off the referential rather than assuming
 	// the cheaper one.
 	ProvenAttrs map[string]string `json:"proven_attrs,omitempty"`
+
+	// OneOff closes the link once it has let one person in (an open link's
+	// first redeem, a restricted link's first approval). Otherwise it stays
+	// usable by whoever holds it until it is revoked or expires.
+	OneOff bool `json:"one_off,omitempty"`
+	// BillingStanding marks BillingGrant as a standing grant: one payment
+	// authorisation for every visitor, which the platform counts only when a
+	// disclosure happens, until its limits are reached. A one-off link's
+	// grant funds one visitor; SpendLimitCredits caps a reusable one's total
+	// (0 = no cap). Links minted before standing grants carry a single-use
+	// grant and are re-armed per visitor, as they always were.
+	BillingStanding   bool  `json:"billing_standing,omitempty"`
+	SpendLimitCredits int64 `json:"spend_limit_credits,omitempty"`
 }
 
 const (
@@ -108,11 +123,6 @@ const (
 	billingUnavailable = "unavailable"
 )
 
-// linkBillingTTL is how long a funding promise stays open. A share link
-// is opened when the recipient gets round to it, not when it is created,
-// so the grant takes the longest window the platform allows (its own
-// ceiling is 24h); past that the sharer re-arms.
-const linkBillingTTL = 24 * time.Hour
 
 // --- Owner: create / list -------------------------------------------------
 
@@ -122,6 +132,13 @@ type createLinkRequest struct {
 	RequiredAttributes []string `json:"required_attributes"` // restricted
 	ExpiresUnix        int64    `json:"expires_unix,omitempty"`
 	Label              string   `json:"label,omitempty"`
+	// Uses is "once" (the link closes after letting one person in) or
+	// "many" (the default: usable until revoked or expired).
+	Uses string `json:"uses,omitempty"`
+	// SpendLimitCredits caps what a reusable link's paid attributes may
+	// cost the sharer in total. Ignored for a one-off link, which pays for
+	// one visitor, and for a link that requires nothing paid.
+	SpendLimitCredits int64 `json:"spend_limit_credits,omitempty"`
 }
 
 type createLinkResponse struct {
@@ -139,6 +156,8 @@ type createLinkResponse struct {
 	BillingState   string   `json:"billing_state,omitempty"`
 	BillingCredits int64    `json:"billing_credits,omitempty"`
 	BillingExpires string   `json:"billing_grant_expires_at,omitempty"`
+	OneOff         bool     `json:"one_off,omitempty"`
+	SpendLimit     int64    `json:"spend_limit_credits,omitempty"`
 }
 
 func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -174,7 +193,20 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Pri
 	}
 	secret := base64.RawURLEncoding.EncodeToString(secretBytes)
 	sum := sha256.Sum256(secretBytes)
-	meta := linkMeta{SecretHash: hex.EncodeToString(sum[:]), Secret: secret, Mode: mode, Label: req.Label}
+	uses := strings.ToLower(strings.TrimSpace(req.Uses))
+	if uses != "" && uses != "once" && uses != "many" {
+		httpError(w, http.StatusBadRequest, errors.New("uses must be once or many"))
+		return
+	}
+	if req.SpendLimitCredits < 0 {
+		httpError(w, http.StatusBadRequest, errors.New("spend_limit_credits must not be negative"))
+		return
+	}
+	meta := linkMeta{SecretHash: hex.EncodeToString(sum[:]), Secret: secret, Mode: mode, Label: req.Label,
+		OneOff: uses == "once"}
+	if !meta.OneOff {
+		meta.SpendLimitCredits = req.SpendLimitCredits
+	}
 	if mode == linkModeRestricted {
 		meta.Attrs = req.RequiredAttributes
 	}
@@ -228,6 +260,8 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Pri
 		BillingState:       state,
 		BillingCredits:     meta.BillingCredits,
 		BillingExpires:     meta.BillingExpires,
+		OneOff:             meta.OneOff,
+		SpendLimit:         meta.SpendLimitCredits,
 	})
 }
 
@@ -284,13 +318,13 @@ func (s *Server) armLinkBilling(ctx context.Context, p *Principal, meta *linkMet
 	if len(paid) == 0 {
 		return billingFree, nil
 	}
-	g, err := s.mintLinkBillingGrant(ctx, p, paid)
+	g, err := s.mintLinkBillingGrant(ctx, p, meta, paid)
 	if err != nil {
 		return "", err
 	}
 	meta.PaidAttrs = paid
 	meta.BillingGrant = g.ID
-	meta.BillingExpires = g.ExpiresAt.UTC().Format(time.RFC3339)
+	meta.BillingExpires = grantExpiry(g)
 	meta.BillingCredits = g.QuotedCredits
 	return billingFunded, nil
 }
@@ -394,6 +428,9 @@ func (m *linkMeta) billingStateOf(now time.Time) string {
 	if m.BillingGrant == "" {
 		return billingUnavailable
 	}
+	if m.BillingStanding && m.BillingExpires == "" {
+		return billingFunded
+	}
 	if exp, err := time.Parse(time.RFC3339, m.BillingExpires); err == nil && !exp.After(now) {
 		return billingExpired
 	}
@@ -419,6 +456,8 @@ type linkView struct {
 	BillingState   string   `json:"billing_state,omitempty"`
 	BillingCredits int64    `json:"billing_credits,omitempty"`
 	BillingExpires string   `json:"billing_grant_expires_at,omitempty"`
+	OneOff         bool     `json:"one_off,omitempty"`
+	SpendLimit     int64    `json:"spend_limit_credits,omitempty"`
 }
 
 func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -451,6 +490,8 @@ func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request, p *Prin
 			BillingState:   meta.billingStateOf(time.Now().UTC()),
 			BillingCredits: meta.BillingCredits,
 			BillingExpires: meta.BillingExpires,
+			OneOff:         meta.OneOff,
+			SpendLimit:     meta.SpendLimitCredits,
 		}
 		if g.ExpiresAt != nil {
 			iso := g.ExpiresAt.UTC().Format(time.RFC3339)
@@ -595,6 +636,15 @@ func (s *Server) handlePublicLinkPreview(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, previewOf(g, &meta))
 }
 
+// grantExpiry is a grant's expiry as the link records it: empty for a
+// standing grant, which lasts as long as the link.
+func grantExpiry(g *attrbilling.Grant) string {
+	if g.ExpiresAt.IsZero() {
+		return ""
+	}
+	return g.ExpiresAt.UTC().Format(time.RFC3339)
+}
+
 func previewOf(g *grants.Grant, meta *linkMeta) previewLinkResponse {
 	out := previewLinkResponse{
 		LinkID:             g.ID,
@@ -650,13 +700,13 @@ func (s *Server) handleRearmLinkBilling(w http.ResponseWriter, r *http.Request, 
 		writeMarketError(w, err)
 		return
 	}
-	grant, err := s.mintLinkBillingGrant(r.Context(), payer, meta.PaidAttrs)
+	grant, err := s.mintLinkBillingGrant(r.Context(), payer, &meta, meta.PaidAttrs)
 	if err != nil {
 		writeMarketError(w, err)
 		return
 	}
 	meta.BillingGrant = grant.ID
-	meta.BillingExpires = grant.ExpiresAt.UTC().Format(time.RFC3339)
+	meta.BillingExpires = grantExpiry(grant)
 	meta.BillingCredits = grant.QuotedCredits
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -709,8 +759,26 @@ func (s *Server) handleResolveLink(w http.ResponseWriter, r *http.Request, p *Pr
 	if ag, aerr := s.Grants.ActiveForSubjectOnNode(r.Context(), g.TenantID, g.NodeID, p.Sub); aerr == nil && ag != nil {
 		granted = true
 	}
-	// Restricted: surface any pending request state for this caller.
+	// Restricted: surface any pending request state for this caller, and
+	// which paid attributes their sign-in has not proven. The browser cannot
+	// tell a valid proof from a typed value, so it asks here.
 	requestStatus := ""
+	unproven := []string{}
+	if meta.Mode == linkModeRestricted && len(meta.PaidAttrs) > 0 {
+		if proven, perr := s.provenClaims(r.Context(), meta); perr == nil {
+			visitor := p
+			if q, herr := s.withHolderToken(r, p); herr == nil {
+				visitor = q
+			}
+			presented, missing := linkAttributeEvidence(visitor, meta, proven, nil)
+			missing = append(missing, s.checkProofs(r.Context(), visitor, proven, presented)...)
+			for _, k := range missing {
+				if _, paid := proven[k]; paid {
+					unproven = append(unproven, k)
+				}
+			}
+		}
+	}
 	if meta.Mode == linkModeRestricted {
 		if lr, lerr := s.Store.PendingLinkRequestFor(r.Context(), g.ID, p.Sub); lerr == nil && lr != nil {
 			requestStatus = lr.Status
@@ -731,6 +799,8 @@ func (s *Server) handleResolveLink(w http.ResponseWriter, r *http.Request, p *Pr
 		// proven by, which is what a step-up asks the wallet for.
 		"paid_attributes":  meta.PaidAttrs,
 		"attribute_claims": meta.ProvenAttrs,
+		// The paid ones this visitor has not proven yet.
+		"unproven_attributes": unproven,
 		"billing_state":    meta.billingStateOf(time.Now().UTC()),
 		"tenant_id":        g.TenantID,
 		"owner_name":       ownerName,
@@ -832,6 +902,7 @@ func (s *Server) redeemLinkFor(ctx context.Context, p *Principal, g *grants.Gran
 			return linkRedeemOutcome{}, &linkMarketError{err}
 		}
 		presented, missing := linkAttributeEvidence(p, meta, proven, claimed)
+		missing = append(missing, s.checkProofs(ctx, p, proven, presented)...)
 		if len(missing) > 0 {
 			return linkRedeemOutcome{Status: linkMissingAttrs, Missing: missing}, nil
 		}
@@ -1025,7 +1096,28 @@ func (s *Server) mintSubjectGrant(ctx context.Context, tenantID, nodeID, sub str
 	if err := s.Grants.Create(ctx, g); err != nil {
 		return nil, err
 	}
+	s.closeOneOffLink(ctx, tenantID, linkID)
 	return g, nil
+}
+
+// closeOneOffLink revokes a one-off link once it has let someone in. A
+// request already filed against it can still be approved: the owner
+// decides those one by one.
+func (s *Server) closeOneOffLink(ctx context.Context, tenantID, linkID string) {
+	if linkID == "" {
+		return
+	}
+	l, err := s.Grants.Get(ctx, linkID)
+	if err != nil || l.TenantID != tenantID || l.Subject != grants.SubjectLink {
+		return
+	}
+	var meta linkMeta
+	if json.Unmarshal([]byte(l.Meta), &meta) != nil || !meta.OneOff {
+		return
+	}
+	if err := s.Grants.Revoke(ctx, tenantID, linkID); err != nil {
+		log.Printf("links: closing one-off link %.8s: %v", linkID, err)
+	}
 }
 
 func normaliseLinkScope(in []string) []grants.Scope {

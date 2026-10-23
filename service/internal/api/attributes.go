@@ -8,11 +8,13 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/Privasys/drive/service/internal/attrbilling"
 	"github.com/Privasys/drive/service/internal/attrref"
+	"github.com/Privasys/drive/service/internal/disclosure"
 	"github.com/Privasys/drive/service/internal/oidc"
 )
 
@@ -439,12 +441,73 @@ func attributeClaim(id *oidc.Identity, claim string) string {
 }
 
 // mintLinkBillingGrant issues a grant covering the paid attributes,
-// charged to the sharer making the request. One grant funds one
-// recipient's sign-in.
-func (s *Server) mintLinkBillingGrant(ctx context.Context, p *Principal, paid []string) (*attrbilling.Grant, error) {
+// charged to the sharer making the request: a standing grant that funds
+// every visitor of the link (one, for a one-off link) up to its spend
+// limit, counted by the platform only when a disclosure happens. It marks
+// meta as funded by it.
+func (s *Server) mintLinkBillingGrant(ctx context.Context, p *Principal, meta *linkMeta, paid []string) (*attrbilling.Grant, error) {
 	m, err := s.marketFor(p)
 	if err != nil {
 		return nil, err
 	}
-	return m.Mint(ctx, p.Bearer, s.CurrentConfig().OIDCClientID, paid, linkBillingTTL)
+	terms := attrbilling.StandingTerms{SpendLimitCredits: meta.SpendLimitCredits}
+	if meta.OneOff {
+		terms = attrbilling.StandingTerms{MaxUses: 1}
+	}
+	g, err := m.MintStanding(ctx, p.Bearer, s.CurrentConfig().OIDCClientID, paid, terms)
+	if err != nil {
+		return nil, err
+	}
+	meta.BillingStanding = true
+	return g, nil
+}
+
+// ProofVerifier checks a paid attribute's proof (see package disclosure).
+type ProofVerifier interface {
+	Verify(ctx context.Context, token string, want disclosure.Expect) (string, error)
+}
+
+// checkProofs verifies the proof behind every paid attribute the visitor
+// presented, replacing the token with the value it proves (what the sharer
+// is shown), and returns those that do not hold up. The IdP carries a
+// paid attribute's value from the wallet unverified, so a value is only
+// proven once its signature, issuer, subject, relying party and claim
+// check out and it is not a failure receipt or a "no".
+func (s *Server) checkProofs(ctx context.Context, p *Principal, proven map[string]string, presented map[string]string) []string {
+	var failed []string
+	aud := ""
+	if cfg := s.CurrentConfig(); cfg != nil {
+		aud = cfg.OIDCClientID
+	}
+	var ref *attrref.Referential
+	if s.AttrRef != nil {
+		ref, _ = s.AttrRef.Load(ctx)
+	}
+	for k, claim := range proven {
+		raw, ok := presented[k]
+		if !ok {
+			continue // already reported missing
+		}
+		want := disclosure.Expect{Claim: claim, Subject: p.Sub, Audience: aud}
+		if ref != nil {
+			if a, ok := ref.Lookup(claim); ok {
+				want.Claim = a.ProofClaim()
+			}
+		}
+		if s.Proofs == nil {
+			delete(presented, k)
+			failed = append(failed, k)
+			continue
+		}
+		v, err := s.Proofs.Verify(ctx, raw, want)
+		if err != nil {
+			log.Printf("links: %s presented without a valid proof: %v", k, err)
+			delete(presented, k)
+			failed = append(failed, k)
+			continue
+		}
+		presented[k] = v
+	}
+	sort.Strings(failed)
+	return failed
 }

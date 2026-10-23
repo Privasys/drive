@@ -61,6 +61,18 @@ type Attribute struct {
 	Assurance   string       `json:"assurance"`
 	GovKey      string       `json:"govKey"`
 	Marketplace *Marketplace `json:"marketplace"`
+	// CertifiedField is the document field the identity verifier certifies
+	// for this key, and so the claim its proof names, when it differs from
+	// the key (given_name_id is proven as "given_name").
+	CertifiedField string `json:"certifiedField"`
+}
+
+// ProofClaim is the claim a proof of this key carries.
+func (a Attribute) ProofClaim() string {
+	if a.CertifiedField != "" {
+		return a.CertifiedField
+	}
+	return a.Key
 }
 
 // AssuranceLevel is this key's own assurance, with the fallback the

@@ -233,7 +233,7 @@ function LinkLanding() {
         if (!session || !params.id || !params.secret) return;
         setError(null);
         try {
-            const r = await resolveLink(session, params.id, params.secret);
+            const r = await resolveLink(session, params.id, params.secret, holderToken);
             setResolved(r);
             if (r.already_granted) {
                 setState('granted');
@@ -249,15 +249,20 @@ function LinkLanding() {
             // no request is filed (the server enforces this too) and the
             // visitor is told what to share instead.
             //
-            // Only the attributes this page can actually supply are checked
-            // here. A PROVEN one lives in the sealed token and is invisible
-            // to the browser, so treating it as absent would send a visitor
-            // who has already disclosed it back round the consent screen for
-            // ever; the enclave answers for those.
+            // The page checks what it can read off the visitor's token. A
+            // PROVEN attribute is a signed proof the browser cannot verify,
+            // so the enclave reports which of those are still unproven
+            // (unproven_attributes), and the visitor is asked for all of
+            // them in one step.
             const attrs = presentedAttributes(r);
             const proven = new Set(r.paid_attributes ?? []);
             if (r.mode === 'restricted') {
-                const missing = (r.required_attributes ?? []).filter((k) => !proven.has(k) && !attrs?.[k]);
+                // The paid ones come from the enclave, which alone can check a
+                // proof; the rest are checked here against the visitor's token.
+                const missing = [
+                    ...(r.required_attributes ?? []).filter((k) => !proven.has(k) && !attrs?.[k]),
+                    ...(r.unproven_attributes ?? [])
+                ];
                 if (missing.length > 0) {
                     setMissingAttrs(missing);
                     setState('missing-attrs');
@@ -301,7 +306,7 @@ function LinkLanding() {
         if (state !== 'pending' || !session) return;
         const t = setInterval(async () => {
             try {
-                const r = await resolveLink(session, params.id, params.secret);
+                const r = await resolveLink(session, params.id, params.secret, holderToken);
                 if (r.already_granted) {
                     setResolved(r);
                     setState('granted');
@@ -314,7 +319,7 @@ function LinkLanding() {
             }
         }, 8000);
         return () => clearInterval(t);
-    }, [state, session, params]);
+    }, [state, session, params, holderToken]);
 
     // A shared folder downloads whole, as a ZIP the enclave assembles from
     // the recipient's grant on it (the same route the Drive's own selection

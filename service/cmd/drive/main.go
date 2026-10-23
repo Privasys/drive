@@ -37,6 +37,7 @@ import (
 	"github.com/Privasys/drive/service/internal/api"
 	"github.com/Privasys/drive/service/internal/attrref"
 	"github.com/Privasys/drive/service/internal/config"
+	"github.com/Privasys/drive/service/internal/disclosure"
 	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/objectstore"
 	"github.com/Privasys/drive/service/internal/oidc"
@@ -185,6 +186,9 @@ func serve(args []string) error {
 		MEKs:     meks,
 		Revoked:  revoked,
 		AttrRef:  attrRef,
+		// Paid attributes are proven by the identity verifier's signed
+		// disclosures; only these issuers are believed.
+		Proofs:   &disclosure.Verifier{Issuers: strings.Split(env("DRIVE_ATTRIBUTE_ISSUERS", disclosure.DefaultIssuer), ",")},
 		Platform: pf,
 		StateDir: *state,
 		DevMode:  *dev,
