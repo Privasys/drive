@@ -146,3 +146,15 @@ func scanLinkRequest(row rowScanner) (*LinkRequest, error) {
 	}
 	return &r, nil
 }
+
+// ClearStaleRequestDetails removes the presented attributes from requests
+// created before cutoff that are still waiting. A decided request already
+// lost them when it was decided.
+func (s *Store) ClearStaleRequestDetails(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE link_requests SET attributes = '' WHERE attributes <> '' AND created_at < ?`), cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}

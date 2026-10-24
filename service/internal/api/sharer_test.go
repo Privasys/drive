@@ -1,16 +1,19 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
-// A visitor sees a link as shared by the name its sharer signed in with,
-// never by a personal Drive's name; and the sharer sees what a visitor
-// presented while the request waits, not after deciding it.
+// A visitor never sees a personal Drive's name (its owner's subject), and
+// Drive keeps no sharer's name to show instead. The sharer sees what a
+// visitor presented while the request waits, not after deciding it, nor
+// once requestDetailsRetention has passed.
 func TestSharerNameAndRequestDetails(t *testing.T) {
 	ts, srv := newTestServer(t)
 	const owner, visitor = "user-1", "user-2"
@@ -30,21 +33,14 @@ func TestSharerNameAndRequestDetails(t *testing.T) {
 		return r.OwnerName
 	}
 
-	// Made before the sharer's name was recorded: no name rather than the
-	// personal Drive's name.
-	anon := createLink(t, ts.URL, tenantID, nodeID, owner, `{"mode":"open"}`)
-	if got := resolveOwner(anon); got != "" {
-		t.Fatalf("a personal Drive's name was shown: %q", got)
-	}
-
 	srv.Verifier = claimsVerifier{bySub: map[string]map[string]any{
 		owner:   {"name": "Ada Sharer"},
 		visitor: {"name": "Vic Visitor"},
 	}}
 	named := createLink(t, ts.URL, tenantID, nodeID, owner,
 		`{"mode":"restricted","required_attributes":["name"]}`)
-	if got := resolveOwner(named); got != "Ada Sharer" {
-		t.Fatalf("shared by %q, want the sharer's name", got)
+	if got := resolveOwner(named); got != "" {
+		t.Fatalf("shared by %q, want no name", got)
 	}
 
 	if code, b := doReq(t, bearerReq(t, "POST", fmt.Sprintf("%s/v1/links/%s/redeem", ts.URL, named["id"]), visitor,
@@ -66,6 +62,13 @@ func TestSharerNameAndRequestDetails(t *testing.T) {
 	reqs := list()
 	if len(reqs) != 1 || reqs[0].Attributes["name"] != "Vic Visitor" {
 		t.Fatalf("the sharer cannot see what was presented: %+v", reqs)
+	}
+	// Nobody decides for a week: the sweep clears them.
+	if n, err := srv.Store.ClearStaleRequestDetails(context.Background(), time.Now().Add(time.Minute)); err != nil || n != 1 {
+		t.Fatalf("stale details cleared: %d %v", n, err)
+	}
+	if r := list(); len(r[0].Attributes) != 0 {
+		t.Fatalf("details kept past retention: %+v", r)
 	}
 	if code, b := doReq(t, bearerReq(t, "POST",
 		fmt.Sprintf("%s/v1/tenants/%s/link-requests/%s/approve", ts.URL, tenantID, reqs[0].ID), owner, "")); code != http.StatusOK {

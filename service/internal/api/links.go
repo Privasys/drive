@@ -103,12 +103,6 @@ type linkMeta struct {
 	// grant and are re-armed per visitor, as they always were.
 	BillingStanding   bool  `json:"billing_standing,omitempty"`
 	SpendLimitCredits int64 `json:"spend_limit_credits,omitempty"`
-
-	// SharedBy is the name a visitor sees the link as shared by: the
-	// sharer's display name from their own sign-in when they made it. A
-	// personal Drive is named by its owner's subject, which is never shown
-	// to anyone else, so without this the visitor sees no name at all.
-	SharedBy string `json:"shared_by,omitempty"`
 }
 
 const (
@@ -223,7 +217,6 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Pri
 		writeMarketError(w, err)
 		return
 	}
-	meta.SharedBy = attributeClaim(payer.ID, "name")
 	state, err := s.armLinkBilling(r.Context(), payer, &meta)
 	if err != nil {
 		writeMarketError(w, err)
@@ -643,14 +636,11 @@ func (s *Server) handlePublicLinkPreview(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, previewOf(g, &meta))
 }
 
-// linkSharerName is who a visitor sees a link as shared by: the name the
-// sharer signed in with when they made it, or a workspace's own name.
-// Never a personal Drive's name, which is its owner's subject. Empty when
-// there is nothing fit to show; callers word around it.
-func (s *Server) linkSharerName(ctx context.Context, g *grants.Grant, meta *linkMeta) string {
-	if meta != nil && strings.TrimSpace(meta.SharedBy) != "" {
-		return strings.TrimSpace(meta.SharedBy)
-	}
+// linkSharerName is who a visitor sees a link as shared by: a workspace's
+// own name, which people chose to show. Never a personal Drive's name,
+// which is its owner's subject, and Drive keeps no sharer's name to show
+// instead: empty, and callers say "shared with you".
+func (s *Server) linkSharerName(ctx context.Context, g *grants.Grant, _ *linkMeta) string {
 	return s.tenantDisplayName(ctx, g.TenantID)
 }
 
@@ -935,8 +925,9 @@ func (s *Server) redeemLinkFor(ctx context.Context, p *Principal, g *grants.Gran
 		// sharer's wallet in the notification, and stay on the request,
 		// inside the enclave, only while it waits for a decision, so the
 		// sharer can review them in Drive or their wallet even if the push
-		// never arrived. The decision clears them; afterwards the drive keeps
-		// only the sub, scope and timestamps.
+		// never arrived. The decision clears them, and so does
+		// requestDetailsRetention without one (StartExpirySweep); after
+		// that the drive keeps only the sub, scope and timestamps.
 		attrsJSON, _ := json.Marshal(presented)
 		lr := &store.LinkRequest{
 			TenantID: g.TenantID, LinkID: g.ID, NodeID: g.NodeID,
@@ -983,6 +974,10 @@ func redeemResult(status string, g *grants.Grant, n *store.Node, requestID strin
 
 // --- Owner: restricted-request review ------------------------------------
 
+// requestDetailsRetention is how long a visitor's presented attributes
+// stay on a request nobody has decided.
+const requestDetailsRetention = 7 * 24 * time.Hour
+
 type linkRequestView struct {
 	ID         string            `json:"id"`
 	NodeID     string            `json:"node_id"`
@@ -1009,7 +1004,10 @@ func (s *Server) handleListLinkRequests(w http.ResponseWriter, r *http.Request, 
 	out := make([]linkRequestView, 0, len(rs))
 	for _, lr := range rs {
 		var attrs map[string]string
-		_ = json.Unmarshal([]byte(lr.Attributes), &attrs)
+		// Past the retention the sweep clears them; never show them meanwhile.
+		if time.Since(lr.CreatedAt) < requestDetailsRetention {
+			_ = json.Unmarshal([]byte(lr.Attributes), &attrs)
+		}
 		name := ""
 		if n, nerr := s.Store.GetNode(r.Context(), tenantID, lr.NodeID); nerr == nil {
 			name = n.Name

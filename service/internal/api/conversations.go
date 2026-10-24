@@ -121,6 +121,12 @@ func (s *Server) StartExpirySweep(ctx context.Context, interval time.Duration) {
 				} else if n > 0 {
 					log.Printf("expiry sweep: removed %d expired attachment(s)", n)
 				}
+				// A visitor's details on a request nobody decided.
+				if n, err := s.Store.ClearStaleRequestDetails(ctx, time.Now().Add(-requestDetailsRetention)); err != nil {
+					log.Printf("expiry sweep: request details: %v", err)
+				} else if n > 0 {
+					log.Printf("expiry sweep: cleared the details of %d undecided request(s)", n)
+				}
 			}
 		}
 	}()
