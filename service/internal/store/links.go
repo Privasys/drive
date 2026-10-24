@@ -109,7 +109,7 @@ func (s *Store) ListLinkRequests(ctx context.Context, tenantID, status string) (
 // on status so a concurrent double-decision cannot mint twice.
 func (s *Store) DecideLinkRequest(ctx context.Context, tenantID, id, status, grantID, decidedBy string) error {
 	res, err := s.DB.ExecContext(ctx, s.q(
-		`UPDATE link_requests SET status = ?, grant_id = ?, decided_at = ?, decided_by = ?
+		`UPDATE link_requests SET status = ?, grant_id = ?, decided_at = ?, decided_by = ?, attributes = ''
 		 WHERE tenant_id = ? AND id = ? AND status = 'pending'`),
 		status, grantID, Now(), decidedBy, tenantID, id)
 	if err != nil {

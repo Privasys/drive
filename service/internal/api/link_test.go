@@ -234,8 +234,11 @@ func TestRestrictedLinkShare(t *testing.T) {
 	if len(lr.Requests) != 1 || lr.Requests[0].Requester == "" {
 		t.Fatalf("requests unexpected: %s", b)
 	}
-	if len(lr.Requests[0].Attributes) != 0 {
-		t.Fatalf("attributes must not persist on the drive: %s", b)
+	// What the visitor presented stays on the request while it waits, so
+	// the owner can review it; the decision clears it (see
+	// TestSharerNameAndRequestDetails).
+	if lr.Requests[0].Attributes["name"] != "Alice Example" {
+		t.Fatalf("the owner cannot review what was presented: %s", b)
 	}
 
 	// Owner approves -> recipient gains access.

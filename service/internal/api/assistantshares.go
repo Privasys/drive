@@ -181,10 +181,7 @@ func (s *Server) toolOpenLink(w http.ResponseWriter, r *http.Request, p *Princip
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
-	ownerName := ""
-	if t, terr := s.Store.GetTenant(r.Context(), g.TenantID); terr == nil {
-		ownerName = t.Name
-	}
+	ownerName := s.linkSharerName(r.Context(), g, meta)
 	res := map[string]any{
 		"status":     out.Status,
 		"node_id":    n.ID,
@@ -241,10 +238,7 @@ func (s *Server) toolListShares(w http.ResponseWriter, r *http.Request, p *Princ
 		if err != nil {
 			continue
 		}
-		owner := ""
-		if t, terr := s.Store.GetTenant(r.Context(), sh.TenantID); terr == nil {
-			owner = t.Name
-		}
+		owner := s.tenantDisplayName(r.Context(), sh.TenantID)
 		out = append(out, map[string]any{
 			"node_id": n.ID, "name": n.Name, "kind": string(n.Kind), "owner_name": owner,
 		})

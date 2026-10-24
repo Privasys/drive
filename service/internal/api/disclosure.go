@@ -237,10 +237,7 @@ func (s *Server) openLinkForAssistant(ctx context.Context, p *Principal, g *gran
 			claimOf[k] = k
 		}
 	}
-	ownerName := "its owner"
-	if t, terr := s.Store.GetTenant(ctx, g.TenantID); terr == nil && strings.TrimSpace(t.Name) != "" {
-		ownerName = t.Name
-	}
+	ownerName := orDefault(s.linkSharerName(ctx, g, meta), "its owner")
 	purpose := fmt.Sprintf("To open %q, shared by %s", n.Name, ownerName)
 	grant := ""
 	if meta.billingStateOf(time.Now().UTC()) == billingFunded {

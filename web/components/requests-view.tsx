@@ -14,12 +14,25 @@ import {
     type Tenant
 } from '~/lib/drive-api';
 import { FileIcon, PeopleIcon } from './icons';
+import { attributeLabel, loadShareAttributes, type ShareAttribute } from '~/lib/share-attributes';
 
 export function RequestsView({ session, tenant }: { session: SealedSession; tenant: Tenant }) {
     const [requests, setRequests] = useState<LinkRequest[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState<string | null>(null);
+    // Labels for the attribute keys a request carries, from the canonical
+    // referential; the raw key shows until it arrives.
+    const [labels, setLabels] = useState<ShareAttribute[]>([]);
+    useEffect(() => {
+        let live = true;
+        loadShareAttributes()
+            .then((a) => live && setLabels(a))
+            .catch(() => undefined);
+        return () => {
+            live = false;
+        };
+    }, []);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -100,7 +113,8 @@ export function RequestsView({ session, tenant }: { session: SealedSession; tena
                                             className="rounded-full px-2.5 py-1 text-xs"
                                             style={{ background: 'var(--drv-surface-2)', color: 'var(--drv-text)' }}
                                         >
-                                            <span style={{ color: 'var(--drv-text-muted)' }}>{k}:</span> {v}
+                                            <span style={{ color: 'var(--drv-text-muted)' }}>{attributeLabel(labels, k)}:</span>{' '}
+                                            {v === 'true' ? 'Yes' : v}
                                         </span>
                                     ))
                                 )}

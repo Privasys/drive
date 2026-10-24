@@ -103,6 +103,12 @@ type linkMeta struct {
 	// grant and are re-armed per visitor, as they always were.
 	BillingStanding   bool  `json:"billing_standing,omitempty"`
 	SpendLimitCredits int64 `json:"spend_limit_credits,omitempty"`
+
+	// SharedBy is the name a visitor sees the link as shared by: the
+	// sharer's display name from their own sign-in when they made it. A
+	// personal Drive is named by its owner's subject, which is never shown
+	// to anyone else, so without this the visitor sees no name at all.
+	SharedBy string `json:"shared_by,omitempty"`
 }
 
 const (
@@ -217,6 +223,7 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Pri
 		writeMarketError(w, err)
 		return
 	}
+	meta.SharedBy = attributeClaim(payer.ID, "name")
 	state, err := s.armLinkBilling(r.Context(), payer, &meta)
 	if err != nil {
 		writeMarketError(w, err)
@@ -636,6 +643,27 @@ func (s *Server) handlePublicLinkPreview(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, previewOf(g, &meta))
 }
 
+// linkSharerName is who a visitor sees a link as shared by: the name the
+// sharer signed in with when they made it, or a workspace's own name.
+// Never a personal Drive's name, which is its owner's subject. Empty when
+// there is nothing fit to show; callers word around it.
+func (s *Server) linkSharerName(ctx context.Context, g *grants.Grant, meta *linkMeta) string {
+	if meta != nil && strings.TrimSpace(meta.SharedBy) != "" {
+		return strings.TrimSpace(meta.SharedBy)
+	}
+	return s.tenantDisplayName(ctx, g.TenantID)
+}
+
+// tenantDisplayName is a tenant's name when it is one a person chose (a
+// workspace), and empty for a personal Drive.
+func (s *Server) tenantDisplayName(ctx context.Context, tenantID string) string {
+	t, err := s.Store.GetTenant(ctx, tenantID)
+	if err != nil || t.Kind != store.TenantEnterprise {
+		return ""
+	}
+	return strings.TrimSpace(t.Name)
+}
+
 // grantExpiry is a grant's expiry as the link records it: empty for a
 // standing grant, which lasts as long as the link.
 func grantExpiry(g *attrbilling.Grant) string {
@@ -784,10 +812,7 @@ func (s *Server) handleResolveLink(w http.ResponseWriter, r *http.Request, p *Pr
 			requestStatus = lr.Status
 		}
 	}
-	ownerName := ""
-	if t, terr := s.Store.GetTenant(r.Context(), g.TenantID); terr == nil {
-		ownerName = t.Name
-	}
+	ownerName := s.linkSharerName(r.Context(), g, meta)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"link_id":             g.ID,
 		"mode":                meta.Mode,
@@ -907,11 +932,16 @@ func (s *Server) redeemLinkFor(ctx context.Context, p *Principal, g *grants.Gran
 			return linkRedeemOutcome{Status: linkMissingAttrs, Missing: missing}, nil
 		}
 		// PII boundary (§7.6): the presented attributes ride out to the
-		// sharer's wallet in the notification and are NOT persisted —
-		// the drive keeps only the sub, scope and timestamps.
+		// sharer's wallet in the notification, and stay on the request,
+		// inside the enclave, only while it waits for a decision, so the
+		// sharer can review them in Drive or their wallet even if the push
+		// never arrived. The decision clears them; afterwards the drive keeps
+		// only the sub, scope and timestamps.
+		attrsJSON, _ := json.Marshal(presented)
 		lr := &store.LinkRequest{
 			TenantID: g.TenantID, LinkID: g.ID, NodeID: g.NodeID,
 			RequesterSub: p.Sub,
+			Attributes:   string(attrsJSON),
 			Scope:        joinScopeStrings(g.Scope),
 		}
 		err = s.Store.CreateLinkRequest(ctx, lr)
