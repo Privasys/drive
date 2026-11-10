@@ -15,6 +15,10 @@ import (
 // service ever scales out).
 var personalMu sync.Mutex
 
+// errGuestOwnsNothing refuses a drive or a key to a person who signed in
+// without the wallet (Principal.Guest).
+var errGuestOwnsNothing = errors.New("a drive of your own needs the Privasys Wallet")
+
 type meTenantJSON struct {
 	ID   string `json:"id"`
 	Kind string `json:"kind"`
@@ -42,7 +46,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, p *Principal) 
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sub": p.Sub, "email": p.ID.Email, "tenants": out,
+		"sub": p.Sub, "email": p.ID.Email, "tenants": out, "guest": p.Guest,
 	})
 }
 
@@ -52,6 +56,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, p *Principal) 
 func (s *Server) ensurePersonalTenant(ctx context.Context, p *Principal) (t *store.Tenant, created bool, status int, err error) {
 	if !p.IsUser() {
 		return nil, false, http.StatusForbidden, errors.New("user principals only")
+	}
+	if p.Guest {
+		return nil, false, http.StatusForbidden, errGuestOwnsNothing
 	}
 	personalMu.Lock()
 	defer personalMu.Unlock()

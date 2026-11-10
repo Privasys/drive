@@ -9,7 +9,7 @@ import {
     useState,
     type ReactNode
 } from 'react';
-import { AuthFrame, type AuthFrameConfig, type SealedSession } from '@privasys/auth';
+import { AuthFrame, type AuthFrameConfig, type SealedSession, type SealedSessionState } from '@privasys/auth';
 
 // Auth context for the Privasys Chat front-end.
 //
@@ -221,20 +221,39 @@ interface PrivasysAuthProviderProps {
     config: AuthFrameConfig;
 }
 
-// Drive's transport constraint, applied to EVERY sign-in path here.
-//
-// The Drive API is reachable only over the wallet-attested sealed channel:
-// the enclave serves a self-signed RA-TLS certificate, and only the wallet
-// can verify it and relay a session. A social or passkey sign-in therefore
-// authenticates the visitor and then has nowhere to go, so offering those
-// options is a promise the product cannot keep — a share-link recipient who
-// picked "Continue with Google" would sign in and still be unable to open
-// the file.
-//
-// It lives here rather than at each call site because it was previously
-// passed only by connectInto, so the share-link flow (signInInto) silently
-// offered every provider. Lift it once a wallet-less transport exists.
-const DRIVE_METHODS = ['wallet'] as const;
+// Every sign-in path here offers the wallet, a passkey and the federated
+// providers. A wallet sign-in reaches Drive over the sealed session, which
+// the wallet attested; any other reaches it over Drive's direct name (TLS
+// ends in the enclave and the runtime checks the bearer), as a guest who
+// opens what was shared with them and owns no drive. The frame config's
+// `direct` is what lets the SDK pick; without it a non-wallet sign-in has
+// nowhere to go.
+const DRIVE_METHODS = ['wallet', 'passkey', 'social'] as const;
+
+// directSession presents the frame's direct transport as a SealedSession, the
+// type Drive's API client takes, so every view works unchanged for a guest.
+// It has no WebSocket: a browser cannot put a bearer on one.
+function directSession(frame: AuthFrame, appHost: string): SealedSession {
+    const state: SealedSessionState = { status: 'ok' };
+    return {
+        sessionId: 'direct',
+        appHost,
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        state,
+        onState: () => () => {},
+        async request(method, path, body, init) {
+            const r = await frame.request(method, path, body, init);
+            return { status: r.status, headers: r.headers, body: r.body, sealed: false };
+        },
+        async stream(method, path, body, init) {
+            const r = await frame.stream(method, path, body, init);
+            return { status: r.status, headers: r.headers, body: r.body, sealed: false };
+        },
+        openWebSocket() {
+            throw new Error('Live updates need the Privasys Wallet.');
+        }
+    };
+}
 
 export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderProps) {
     const [session, setSession] = useState<AuthSession | null>(null);
@@ -339,9 +358,11 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
             // includes the SDK pubkey. The persistent frame (used for SSO
             // check + silent renewal) doesn't need it.
             if (opts?.sessionRelayHost) {
+                // signIn() opens no direct transport, so this path stays
+                // wallet-only; connectInto and signInInto offer the rest.
                 const oneShot = new AuthFrame({
                     ...config,
-                    methods: DRIVE_METHODS,
+                    methods: ['wallet'],
                     sessionRelay: {
                         appHost: opts.sessionRelayHost,
                         ...(opts.extraAppHosts?.length ? { extraAppHosts: opts.extraAppHosts } : {})
@@ -404,17 +425,20 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
             const inline = new AuthFrame(inlineConfig);
             inlineFrameRef.current = inline;
             try {
-                const result = await inline.signIn();
-                acceptResultToken(result.accessToken ?? result.sessionToken);
-                if (opts?.sessionRelayHost && result.sessionRelay) {
-                    try {
-                        const s = await inline.session();
-                        setSealedSession(s);
-                        setStaleReason(null);
-                    } catch (err) {
-                        console.warn('[drive-auth] sealed session install failed:', err);
-                    }
+                // connect() rather than signIn(): it decides the transport,
+                // sealed for a wallet sign-in and direct for any other.
+                const res = await inline.connect({ container });
+                const appHost = opts?.sessionRelayHost;
+                // The session is adopted for the host BEFORE the token, whose
+                // arrival is what makes Drive look the session up.
+                if (appHost && res.session) {
+                    sealedByHost.current.set(appHost, { frame: inline, session: res.session });
+                    setSealedSession(res.session);
+                    setStaleReason(null);
+                } else if (appHost && res.transport === 'direct') {
+                    sealedByHost.current.set(appHost, { frame: inline, session: directSession(inline, appHost) });
                 }
+                acceptResultToken(res.accessToken);
             } finally {
                 if (inlineFrameRef.current === inline) inlineFrameRef.current = null;
             }
@@ -458,8 +482,17 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
                     sealedByHostInFlight.current.delete(opts.appHost);
                     follow(res.session);
                     setStaleReason(null);
+                    return res.session;
                 }
-                return res.session;
+                if (res.transport === 'direct') {
+                    // A sign-in without the wallet: Drive is reached over its
+                    // direct name, through this frame.
+                    const d = directSession(frame, opts.appHost);
+                    sealedByHost.current.set(opts.appHost, { frame, session: d });
+                    sealedByHostInFlight.current.delete(opts.appHost);
+                    return d;
+                }
+                return null;
             } finally {
                 if (inlineFrameRef.current === frame) inlineFrameRef.current = null;
             }

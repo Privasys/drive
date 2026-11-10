@@ -12,7 +12,8 @@
     "surfaces": {
         "public": [
             { "method": "POST", "path": "/v1/public/links/preview" }
-        ]
+        ],
+        "direct": "private"
     },
     "configure": {
         "name": "configure",

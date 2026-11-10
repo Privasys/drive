@@ -150,10 +150,13 @@ export function DriveProvider({ children }: { children: ReactNode }) {
             // need a beat before the first request lands (the enclave-side
             // session is still settling); retry briefly instead of
             // surfacing a scary banner on first sign-in.
-            let meRes!: Me, tenantRes!: Tenant;
+            let meRes!: Me, tenantRes!: Tenant | null;
             for (let attempt = 0; ; attempt++) {
                 try {
-                    [meRes, tenantRes] = await Promise.all([getMe(s), ensurePersonalTenant(s)]);
+                    meRes = await getMe(s);
+                    // A guest (no wallet) owns no drive: only what was shared
+                    // with them, and any workspace they were made a member of.
+                    tenantRes = meRes.guest ? (meRes.tenants[0] ?? null) : await ensurePersonalTenant(s);
                     break;
                 } catch (e) {
                     if (attempt >= 2) throw e;
@@ -278,14 +281,6 @@ export function DriveProvider({ children }: { children: ReactNode }) {
         try {
             const s = await auth.connectInto(el, {
                 appHost: host,
-                // Drive's OWN transport constraint (not an SDK default):
-                // the Drive API speaks exclusively over the wallet-attested
-                // sealed channel today, so non-wallet sign-ins would
-                // authenticate and then have no way to reach the enclave.
-                // Lift this once a wallet-less (unverified) transport
-                // exists. A visitor missing a verified email imports it in
-                // the WALLET (link an IdP there).
-                methods: ['wallet'],
                 pitch: DRIVE_PITCH,
                 app: {
                     displayName: 'Privasys Drive',

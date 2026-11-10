@@ -99,6 +99,9 @@ export interface Me {
     sub: string;
     email?: string;
     tenants: Tenant[];
+    /** Signed in without the Privasys Wallet: opens what was shared with
+     * them, owns no drive. */
+    guest?: boolean;
 }
 
 export type Scope = 'read' | 'write' | 'share' | 'delete';

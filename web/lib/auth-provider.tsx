@@ -33,7 +33,10 @@ const SDK_CONFIG = {
     // the wallet asks them to approve at sign-in. Suggested cap £5.
     // Typed natively by @privasys/auth 0.12.0; the hosted iframe honours
     // it whatever client version renders the page.
-    spend: { cap: 5_000_000 }
+    spend: { cap: 5_000_000 },
+    // A sign-in without the wallet reaches Drive over its direct name, with a
+    // bearer whose audience is this app. Drive treats that person as a guest.
+    ...(RUNTIME.appId ? { direct: { audience: `app:${RUNTIME.appId.replace(/-/g, '')}` } } : {})
 };
 
 export function AuthProvider({ children }: { children: ReactNode }) {

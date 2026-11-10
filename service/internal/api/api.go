@@ -166,6 +166,17 @@ const (
 // is why it is never accepted for configure).
 const relaySubHeader = "X-Privasys-Sub"
 
+// On a direct name the runtime verifies the caller's bearer itself, removes
+// it and asserts the same X-Privasys-Sub, stamping how the request came
+// (X-Privasys-Transport) and how the person signed in
+// (X-Privasys-Attestation-Level: "verified" for the wallet, "unverified"
+// for a passkey or a federated sign-in). The runtime strips any inbound
+// value of both, so they are trustworthy inside the enclave.
+const (
+	transportHeader        = "X-Privasys-Transport"
+	attestationLevelHeader = "X-Privasys-Attestation-Level"
+)
+
 // Attested-peer identity published by enclave-os after it verifies an inbound
 // mutual-RA-TLS caller against this app's allowed-callers policy. Trustworthy
 // inside the enclave because enclave-os strips the whole X-Privasys-Peer-*
@@ -205,6 +216,10 @@ type Principal struct {
 	// minted the grant, may read and search their AI scope, and nothing more
 	// (no open_link, no settings changes).
 	AIGrant bool
+	// Guest marks a person who signed in without the Privasys Wallet: they
+	// open what was shared with them and own nothing. A drive of one's own
+	// belongs to a Privasys account, which the wallet holds and pays from.
+	Guest bool
 }
 
 // IsUser reports whether p is a user (OIDC bearer or sealed session).
@@ -589,7 +604,8 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 			next(w, r, p)
 		case r.Header.Get(relaySubHeader) != "":
 			sub := r.Header.Get(relaySubHeader)
-			next(w, r, &Principal{Sub: sub, Via: viaSealed, ID: &oidc.Identity{Sub: sub, Issuer: "session-relay"}})
+			guest := r.Header.Get(transportHeader) == "direct" && r.Header.Get(attestationLevelHeader) != "verified"
+			next(w, r, &Principal{Sub: sub, Via: viaSealed, ID: &oidc.Identity{Sub: sub, Issuer: "session-relay"}, Guest: guest})
 		default:
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
 			return
@@ -799,6 +815,10 @@ type createTenantRequest struct {
 func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request, p *Principal) {
 	if !p.IsUser() {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if p.Guest {
+		httpError(w, http.StatusForbidden, errGuestOwnsNothing)
 		return
 	}
 	var req createTenantRequest

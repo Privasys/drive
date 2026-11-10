@@ -31,6 +31,28 @@ export function DriveApp() {
     const [wsError, setWsError] = useState<string | null>(null);
     const [wsBusy, setWsBusy] = useState(false);
 
+    // A guest signed in without the wallet and owns no drive: what was shared
+    // with them is all there is to show.
+    if (session && !tenant && me?.guest) {
+        return (
+            <div className="flex min-h-screen flex-col" style={{ background: 'var(--drv-surface)' }}>
+                <Navbar
+                    brandSuffix="Drive"
+                    fullWidth
+                    trailing={<UserMenu name={name} email={me.email} onSignOut={signOut} note="Signed in without the Privasys Wallet" />}
+                />
+                <main className="flex min-w-0 flex-1 flex-col pt-14" style={{ background: 'var(--drv-surface-2)' }}>
+                    <SharedView session={session} />
+                </main>
+                <Footer
+                    className="!mt-0"
+                    companyLine="Every file is sealed inside a hardware-protected enclave. A drive of your own comes with the Privasys Wallet."
+                    links={FOOTER_LINKS}
+                />
+            </div>
+        );
+    }
+
     if (!session || !tenant) return null;
 
     const personal = tenants.find((t) => t.kind === 'user');
@@ -248,11 +270,13 @@ export function DriveApp() {
 function UserMenu({
     name,
     email,
-    onSignOut
+    onSignOut,
+    note = 'Your personal drive'
 }: {
     name: string;
     email?: string;
     onSignOut: () => void;
+    note?: string;
 }) {
     const [open, setOpen] = useState(false);
     const label = name || email || 'You';
@@ -281,7 +305,7 @@ function UserMenu({
                                 </div>
                             )}
                             <div className="mt-0.5 text-xs" style={{ color: 'var(--drv-text-muted)' }}>
-                                Your personal drive
+                                {note}
                             </div>
                         </div>
                         <button

@@ -248,6 +248,10 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 		httpError(w, http.StatusForbidden, errors.New("user principals only"))
 		return
 	}
+	if p.Guest {
+		httpError(w, http.StatusForbidden, errGuestOwnsNothing)
+		return
+	}
 	if s.MEKs == nil {
 		httpError(w, http.StatusNotImplemented, errors.New("vault-held tenant keys are not available on this instance"))
 		return
