@@ -232,7 +232,6 @@ const DRIVE_METHODS = ['wallet', 'passkey', 'social'] as const;
 
 // directSession presents the frame's direct transport as a SealedSession, the
 // type Drive's API client takes, so every view works unchanged for a guest.
-// It has no WebSocket: a browser cannot put a bearer on one.
 function directSession(frame: AuthFrame, appHost: string): SealedSession {
     const state: SealedSessionState = { status: 'ok' };
     return {
@@ -249,8 +248,8 @@ function directSession(frame: AuthFrame, appHost: string): SealedSession {
             const r = await frame.stream(method, path, body, init);
             return { status: r.status, headers: r.headers, body: r.body, sealed: false };
         },
-        openWebSocket() {
-            throw new Error('Live updates need the Privasys Wallet.');
+        openWebSocket(path) {
+            return frame.openWebSocket(path);
         }
     };
 }
@@ -641,19 +640,15 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
     // so nothing may make it open a gate: it only runs on a stored session
     // (none would mean a ceremony), the frame asks for exactly what that
     // session was minted for (a wider ask would mean an approval), and it
-    // carries no spend ask (a spend consent is a gate too). A wallet session
-    // is left to the gate, which may need a re-approval. The frame host
-    // records `wallet` on the session (false for a passkey or federated
-    // sign-in); a session stored before that record is told apart by the
-    // wallet's pushToken, which a later non-wallet sign-in on the same device
-    // can wrongly keep, so such a guest still sees the gate.
+    // carries no spend ask (a spend consent is a gate too). Only a session the
+    // frame host recorded as a non-wallet sign-in (`wallet: false`) is
+    // reopened here: a wallet session may need a re-approval, and a session
+    // stored before the record cannot be told apart, so both go to the gate.
     const resumeDirect = useCallback(
         async (appHost: string): Promise<SealedSession | null> => {
             if (!config.direct) return null;
             const existing = await getFrame().getSession().catch(() => null);
-            if (!existing?.token) return null;
-            const wallet = (existing as { wallet?: boolean }).wallet;
-            if (wallet === true || (wallet === undefined && existing.pushToken)) return null;
+            if (!existing?.token || existing.wallet !== false) return null;
             const frame = new AuthFrame({
                 ...config,
                 scope: (existing.scope ?? 'openid offline_access').split(/\s+/).filter(Boolean) as NonNullable<AuthFrameConfig['scope']>,
