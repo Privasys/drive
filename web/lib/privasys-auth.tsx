@@ -634,16 +634,15 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
         [config]
     );
 
-    // getSealedSession returns (and caches) a sealed session for an arbitrary
-    // enclave appHost, independent of the primary instance session. Used to
-    // reach the chat-service back-end (a separate enclave) without the bearer
-    // or tool data ever crossing the gateway's terminate path.
     // resumeDirect reopens Drive's direct transport after a reload, for a
     // person who signed in without the wallet and so never had a sealed
     // session to resume. Without it the gate showed for a moment before its
-    // connect() came to the same answer. The frame asks for exactly what the
-    // session was minted for, so connect() restores it and never opens a
-    // ceremony; a wallet session (pushToken) is left to the gate.
+    // connect() came to the same answer. connect() runs container-less here,
+    // so nothing may make it open a gate: it only runs on a stored session
+    // (none would mean a ceremony), the frame asks for exactly what that
+    // session was minted for (a wider ask would mean an approval), and it
+    // carries no spend ask (a spend consent is a gate too). A session holding
+    // a wallet's pushToken is left to the gate, which may need a re-approval.
     const resumeDirect = useCallback(
         async (appHost: string): Promise<SealedSession | null> => {
             if (!config.direct) return null;
@@ -653,6 +652,7 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
                 ...config,
                 scope: (existing.scope ?? 'openid offline_access').split(/\s+/).filter(Boolean) as NonNullable<AuthFrameConfig['scope']>,
                 attributes: existing.requestedAttributes ?? [],
+                spend: undefined,
                 sessionRelay: { appHost }
             });
             try {
@@ -671,6 +671,10 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
         [config, getFrame]
     );
 
+    // getSealedSession returns (and caches) a sealed session for an arbitrary
+    // enclave appHost, independent of the primary instance session. Used to
+    // reach the chat-service back-end (a separate enclave) without the bearer
+    // or tool data ever crossing the gateway's terminate path.
     const getSealedSession = useCallback(
         async (appHost: string): Promise<SealedSession | null> => {
             if (!session) return null;
