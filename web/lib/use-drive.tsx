@@ -85,7 +85,7 @@ interface DriveContextValue {
     signInInto: (
         el: HTMLElement,
         requestedAttributes?: readonly string[],
-        link?: { clientId?: string; billingGrant?: string }
+        link?: { clientId?: string; billingGrant?: string; methods?: readonly ('wallet' | 'passkey' | 'social')[] }
     ) => Promise<void>;
     /**
      * The one-call gate (SDK connect()): mounts the whole sign-in surface
@@ -251,7 +251,7 @@ export function DriveProvider({ children }: { children: ReactNode }) {
         async (
             el: HTMLElement,
             requestedAttributes?: readonly string[],
-            link?: { clientId?: string; billingGrant?: string }
+            link?: { clientId?: string; billingGrant?: string; methods?: readonly ('wallet' | 'passkey' | 'social')[] }
         ) => {
             setError(null);
             try {

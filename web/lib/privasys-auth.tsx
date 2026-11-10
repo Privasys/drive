@@ -101,7 +101,7 @@ interface AuthContextValue {
      * persistent renewal frame picks up the session via cross-origin
      * SSO and starts the silent-renewal timer.
      */
-    signInInto: (container: HTMLElement, opts?: { sessionRelayHost?: string; extraAppHosts?: string[]; requestedAttributes?: readonly string[]; clientId?: string; billingGrant?: string }) => Promise<void>;
+    signInInto: (container: HTMLElement, opts?: { sessionRelayHost?: string; extraAppHosts?: string[]; requestedAttributes?: readonly string[]; clientId?: string; billingGrant?: string; methods?: readonly ('wallet' | 'passkey' | 'social')[] }) => Promise<void>;
     /**
      * One-call gate (SDK `connect()`): silent restore → one-tap wallet
      * re-approval (enclave measurement changed) → full ceremony, all
@@ -389,7 +389,7 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
     );
 
     const signInInto = useCallback(
-        async (container: HTMLElement, opts?: { sessionRelayHost?: string; extraAppHosts?: string[]; requestedAttributes?: readonly string[]; clientId?: string; billingGrant?: string }) => {
+        async (container: HTMLElement, opts?: { sessionRelayHost?: string; extraAppHosts?: string[]; requestedAttributes?: readonly string[]; clientId?: string; billingGrant?: string; methods?: readonly ('wallet' | 'passkey' | 'social')[] }) => {
             // One-shot inline frame. We don't reuse `frameRef` because
             // `container` is a constructor-only option in @privasys/auth
             // and the persistent frame must keep its renewal iframe
@@ -405,7 +405,7 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
             const inlineConfig = {
                 ...config,
                 container,
-                methods: DRIVE_METHODS,
+                methods: opts?.methods ?? DRIVE_METHODS,
                 scope: ['openid', 'offline_access'] as const,
                 attributes: opts?.requestedAttributes ?? [],
                 // A share link signs its visitor in with the client Drive binds
@@ -638,6 +638,39 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
     // enclave appHost, independent of the primary instance session. Used to
     // reach the chat-service back-end (a separate enclave) without the bearer
     // or tool data ever crossing the gateway's terminate path.
+    // resumeDirect reopens Drive's direct transport after a reload, for a
+    // person who signed in without the wallet and so never had a sealed
+    // session to resume. Without it the gate showed for a moment before its
+    // connect() came to the same answer. The frame asks for exactly what the
+    // session was minted for, so connect() restores it and never opens a
+    // ceremony; a wallet session (pushToken) is left to the gate.
+    const resumeDirect = useCallback(
+        async (appHost: string): Promise<SealedSession | null> => {
+            if (!config.direct) return null;
+            const existing = await getFrame().getSession().catch(() => null);
+            if (!existing?.token || existing.pushToken) return null;
+            const frame = new AuthFrame({
+                ...config,
+                scope: (existing.scope ?? 'openid offline_access').split(/\s+/).filter(Boolean) as NonNullable<AuthFrameConfig['scope']>,
+                attributes: existing.requestedAttributes ?? [],
+                sessionRelay: { appHost }
+            });
+            try {
+                const res = await frame.connect();
+                if (res.transport === 'direct') {
+                    const d = directSession(frame, appHost);
+                    sealedByHost.current.set(appHost, { frame, session: d });
+                    return d;
+                }
+            } catch {
+                /* the gate takes over */
+            }
+            frame.destroy();
+            return null;
+        },
+        [config, getFrame]
+    );
+
     const getSealedSession = useCallback(
         async (appHost: string): Promise<SealedSession | null> => {
             if (!session) return null;
@@ -653,8 +686,13 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
                     return s;
                 } catch (err) {
                     frame.destroy();
+                    const msg = (err as Error).message ?? '';
+                    if (msg.startsWith('no-voucher')) {
+                        const d = await resumeDirect(appHost);
+                        if (d) return d;
+                    }
                     // no-voucher / rejected / unavailable — caller degrades.
-                    console.log(`[chat-auth] sealed session for ${appHost} unavailable:`, (err as Error).message);
+                    console.log(`[chat-auth] sealed session for ${appHost} unavailable:`, msg);
                     return null;
                 }
             })();
@@ -665,7 +703,7 @@ export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderP
                 sealedByHostInFlight.current.delete(appHost);
             }
         },
-        [config, session]
+        [config, session, resumeDirect]
     );
 
     const signOut = useCallback(async () => {

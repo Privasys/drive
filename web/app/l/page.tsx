@@ -56,7 +56,7 @@ export default function LinkPage() {
 }
 
 function LinkLanding() {
-    const { status, error: driveError, session, signInInto, holderToken, reconnect, signOut } = useDrive();
+    const { status, error: driveError, session, me, signInInto, holderToken, reconnect, signOut } = useDrive();
     // A Drive session that failed, or is taking far longer than it should,
     // is shown for what it is, with a way out. This page used to render
     // only its own errors, so a connection that never came up read as
@@ -153,6 +153,22 @@ function LinkLanding() {
     );
     const unfunded = !!preview && (preview.paid_attributes ?? []).length > 0 && !preview.billing_grant;
 
+    // A fact certified from an official ID reaches Drive only as a proof the
+    // Privasys Wallet presents; a passkey or Google/Microsoft sign-in has no
+    // way to carry one. Such a link offers the wallet alone, and says why.
+    const certified = useCallback(
+        (keys: readonly string[]): boolean => {
+            const paid = new Set([...(preview?.paid_attributes ?? []), ...(resolved?.paid_attributes ?? [])]);
+            return keys.some((k) => paid.has(k) || shareAttrs.find((a) => a.key === k)?.assurance === 'gov');
+        },
+        [preview, resolved, shareAttrs]
+    );
+    const walletOnly = preview?.mode === 'restricted' && certified(preview.required_attributes ?? []);
+    const linkMethods = useMemo(
+        () => ({ ...linkSignIn, ...(walletOnly ? { methods: ['wallet'] as const } : {}) }),
+        [linkSignIn, walletOnly]
+    );
+
     useEffect(() => {
         if (status !== 'signed-out' || ceremonyError || started.current || !ceremonyRef.current) return;
         if (preview === undefined) return;
@@ -162,11 +178,11 @@ function LinkLanding() {
                 ? askable(preview.required_attributes ?? [])
                 : []
             : params.attrs;
-        signInInto(ceremonyRef.current, ask.length > 0 ? ask : undefined, linkSignIn).catch(() => {
+        signInInto(ceremonyRef.current, ask.length > 0 ? ask : undefined, linkMethods).catch(() => {
             started.current = false;
             setCeremonyError('The sign-in did not complete. Scan the code again to open the link.');
         });
-    }, [status, signInInto, ceremonyError, params.attrs, preview, askable, linkSignIn]);
+    }, [status, signInInto, ceremonyError, params.attrs, preview, askable, linkMethods]);
 
     // Restricted-link step-up: re-run the ceremony requesting exactly the
     // attributes the link requires, then resolve + redeem again.
@@ -180,7 +196,7 @@ function LinkLanding() {
             // link states that mapping; the referential answers for links
             // created before it did.
             try {
-                await signInInto(ceremonyRef.current!, askable(missingAttrs), linkSignIn);
+                await signInInto(ceremonyRef.current!, askable(missingAttrs), linkMethods);
             } catch {
                 stepUpStarted.current = false;
                 setCeremonyError('The sign-in did not complete. Scan the code again to open the link.');
@@ -191,7 +207,7 @@ function LinkLanding() {
             stepUpStarted.current = false;
             setState('resolving');
         })();
-    }, [stepUp, ceremonyError, missingAttrs, askable, linkSignIn, signInInto]);
+    }, [stepUp, ceremonyError, missingAttrs, askable, linkMethods, signInInto]);
 
     // The attributes the visitor already consented to share at sign-in,
     // matched against what the link requires.
@@ -387,8 +403,14 @@ function LinkLanding() {
                                 <div className="mt-1 text-xs" style={{ color: 'var(--drv-text-muted)' }}>
                                     {stepUp
                                         ? `This private link asks you to share ${missingAttrs.map((k) => attributeLabel(shareAttrs, k)).join(', ')}.`
-                                        : 'Sign in with the Privasys Wallet, or install it, to open it securely.'}
+                                        : 'Sign in to open it securely.'}
                                 </div>
+                                {walletOnly && !stepUp && (
+                                    <div className="mt-2 text-xs" style={{ color: 'var(--drv-text-muted)' }}>
+                                        This link asks for details certified from an official ID, which only
+                                        the Privasys Wallet can share. <WalletLink />
+                                    </div>
+                                )}
                                 {unfunded && (
                                     <div className="mt-2 text-xs" style={{ color: 'var(--drv-text-muted)' }}>
                                         This link asks for details certified from a government ID, and the
@@ -507,6 +529,31 @@ function LinkLanding() {
                                 <div className="mt-5 rounded-lg border px-3 py-3 text-sm" style={{ borderColor: 'var(--drv-border)', color: 'var(--drv-text-muted)' }}>
                                     The owner declined this request.
                                 </div>
+                            ) : state === 'missing-attrs' && me?.guest && certified(missingAttrs) ? (
+                                <div className="mt-5 rounded-lg border px-3 py-3 text-sm" style={{ borderColor: 'var(--drv-border)', color: 'var(--drv-text-muted)' }}>
+                                    <p>
+                                        The owner asks visitors to share{' '}
+                                        <span style={{ color: 'var(--drv-text)' }}>
+                                            {missingAttrs.map((k) => attributeLabel(shareAttrs, k)).join(', ')}
+                                        </span>
+                                        , certified from an official ID. Only the Privasys Wallet can share
+                                        that, and you signed in without it.
+                                    </p>
+                                    <p className="mt-2">
+                                        <WalletLink />, then sign in with it to open this link.
+                                    </p>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            signOut();
+                                            window.location.reload();
+                                        }}
+                                        className="mt-3 w-full rounded-lg px-3 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+                                        style={{ background: 'var(--drv-accent)' }}
+                                    >
+                                        Sign in with the Privasys Wallet
+                                    </button>
+                                </div>
                             ) : state === 'missing-attrs' ? (
                                 <div className="mt-5 rounded-lg border px-3 py-3 text-sm" style={{ borderColor: 'var(--drv-border)', color: 'var(--drv-text-muted)' }}>
                                     <p>
@@ -573,6 +620,20 @@ function asNode(r: ResolvedLink): DriveNode {
         name: r.node.name,
         size_bytes: r.node.size_bytes
     };
+}
+
+function WalletLink() {
+    return (
+        <a
+            href="https://privasys.org/solutions/wallet/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline"
+            style={{ color: 'var(--drv-accent)' }}
+        >
+            Get the Privasys Wallet
+        </a>
+    );
 }
 
 function Card({ children }: { children: React.ReactNode }) {
