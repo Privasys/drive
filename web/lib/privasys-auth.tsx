@@ -230,6 +230,9 @@ interface PrivasysAuthProviderProps {
 // nowhere to go.
 const DRIVE_METHODS = ['wallet', 'passkey', 'social'] as const;
 
+/** Shown when the runtime refuses a direct sign-in; the gate offers a new one. */
+export const DIRECT_SIGN_IN_REFUSED = 'Your sign-in is not valid for Drive. Sign in again to continue.';
+
 // directSession presents the frame's direct transport as a SealedSession, the
 // type Drive's API client takes, so every view works unchanged for a guest.
 function directSession(frame: AuthFrame, appHost: string): SealedSession {
@@ -242,6 +245,11 @@ function directSession(frame: AuthFrame, appHost: string): SealedSession {
         onState: () => () => {},
         async request(method, path, body, init) {
             const r = await frame.request(method, path, body, init);
+            // The runtime refused the sign-in itself, not Drive a request:
+            // retrying sends the same token, so only a new sign-in helps.
+            if (r.status === 401 && new TextDecoder().decode(r.body).includes('not valid for this app')) {
+                throw new Error(DIRECT_SIGN_IN_REFUSED);
+            }
             return { status: r.status, headers: r.headers, body: r.body, sealed: false };
         },
         async stream(method, path, body, init) {

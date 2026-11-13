@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useDrive } from '~/lib/use-drive';
+import { DIRECT_SIGN_IN_REFUSED } from '~/lib/privasys-auth';
 
 // Full-page sign-in gate. The auth SDK renders the ENTIRE surface (page
 // presentation, Option C): a templated header with Drive's logo and name,
@@ -11,7 +12,7 @@ import { useDrive } from '~/lib/use-drive';
 // and reactions to three outcomes: ready (drive bootstraps), cancelled
 // (a quiet closed panel with a way back in), error (banner with retry).
 export function SignInGate() {
-    const { status, error, connectInto } = useDrive();
+    const { status, error, connectInto, signOut } = useDrive();
     const ceremonyRef = useRef<HTMLDivElement>(null);
     const started = useRef(false);
     const [closed, setClosed] = useState(false);
@@ -71,12 +72,23 @@ export function SignInGate() {
             {status === 'error' && (
                 <div className="mx-auto mt-6 flex max-w-md items-center gap-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">
                     <span className="flex-1">{error ?? 'Could not connect to Drive.'}</span>
-                    <button
-                        onClick={start}
-                        className="shrink-0 rounded-full border border-red-500/40 px-3 py-1 text-xs font-medium hover:bg-red-500/10"
-                    >
-                        Try again
-                    </button>
+                    {error === DIRECT_SIGN_IN_REFUSED ? (
+                        // Signing out drops the refused session; the gate
+                        // then runs a fresh sign-in.
+                        <button
+                            onClick={signOut}
+                            className="shrink-0 rounded-full border border-red-500/40 px-3 py-1 text-xs font-medium hover:bg-red-500/10"
+                        >
+                            Sign in again
+                        </button>
+                    ) : (
+                        <button
+                            onClick={start}
+                            className="shrink-0 rounded-full border border-red-500/40 px-3 py-1 text-xs font-medium hover:bg-red-500/10"
+                        >
+                            Try again
+                        </button>
+                    )}
                 </div>
             )}
             {/* The SDK gate fills the viewport (page presentation). */}
