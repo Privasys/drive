@@ -144,8 +144,15 @@ func TestWebUIRedirectsToItsOrigin(t *testing.T) {
 			t.Fatalf("%s = %d -> %q, want %q", path, rec.Code, rec.Header().Get("Location"), want)
 		}
 	}
-	if rec := get(t, h, "drive.example.org", "/"); rec.Code != http.StatusOK {
-		t.Fatalf("on the origin itself: %d", rec.Code)
+	// On a direct name the runtime still hands the app the platform
+	// hostname; the leg says where the person is.
+	direct := httptest.NewRequest(http.MethodGet, "/", nil)
+	direct.Host = platformHost
+	direct.Header.Set("X-Privasys-Transport", "direct")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, direct)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("on a direct name: %d -> %q", rec.Code, rec.Header().Get("Location"))
 	}
 	if rec := get(t, h, platformHost, "/v1/nope"); rec.Code == http.StatusPermanentRedirect {
 		t.Fatal("the API must not move")

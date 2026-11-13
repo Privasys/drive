@@ -77,13 +77,16 @@ func (s *Server) mountWebUI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /privasys-config.js", s.handleWebUIConfig)
 }
 
-// toUIOrigin sends a page asked for on any host but the configured UI origin
-// there, path and query kept (the browser keeps a link's #secret). The
-// bundle and the API are left alone: only the pages a person opens move.
+// toUIOrigin sends a page asked for on the platform hostname to the
+// configured UI origin, path and query kept (the browser keeps a link's
+// #secret). A page that came on a direct name stays: the runtime hands the
+// app the platform hostname as Host on every leg, so the leg, not the Host,
+// says where the person is. The bundle and the API are left alone: only the
+// pages a person opens move.
 func (s *Server) toUIOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.CurrentConfig()
-		if cfg == nil || cfg.UIOrigin == "" || strings.EqualFold("https://"+r.Host, cfg.UIOrigin) {
+		if cfg == nil || cfg.UIOrigin == "" || r.Header.Get(transportHeader) == "direct" {
 			next.ServeHTTP(w, r)
 			return
 		}
