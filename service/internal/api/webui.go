@@ -62,19 +62,37 @@ func (s *Server) mountWebUI(mux *http.ServeMux) {
 		if err != nil {
 			continue
 		}
-		mux.Handle("GET "+route, s.webUIPage(page))
+		mux.Handle("GET "+route, s.toUIOrigin(s.webUIPage(page)))
 	}
 	// Share links are /l?id=…#secret; the export's page is /l/. The browser
 	// carries the fragment across the redirect.
-	mux.HandleFunc("GET /l", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /l", s.toUIOrigin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		target := "/l/"
 		if r.URL.RawQuery != "" {
 			target += "?" + r.URL.RawQuery
 		}
 		http.Redirect(w, r, target, http.StatusPermanentRedirect)
-	})
+	})))
 	// Kept for pages a browser cached before the config went inline.
 	mux.HandleFunc("GET /privasys-config.js", s.handleWebUIConfig)
+}
+
+// toUIOrigin sends a page asked for on any host but the configured UI origin
+// there, path and query kept (the browser keeps a link's #secret). The
+// bundle and the API are left alone: only the pages a person opens move.
+func (s *Server) toUIOrigin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.CurrentConfig()
+		if cfg == nil || cfg.UIOrigin == "" || strings.EqualFold("https://"+r.Host, cfg.UIOrigin) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		target := cfg.UIOrigin + r.URL.EscapedPath()
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+	})
 }
 
 // webUIPage serves one exported page with this request's config as the

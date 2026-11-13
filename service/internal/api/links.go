@@ -554,6 +554,8 @@ type previewLinkResponse struct {
 	BillingGrant    string            `json:"billing_grant,omitempty"`
 	BillingState    string            `json:"billing_state,omitempty"`
 	BillingExpires  string            `json:"billing_grant_expires_at,omitempty"`
+	// OpensWithoutSignIn: the link's own secret reads it (links_anon.go).
+	OpensWithoutSignIn bool `json:"opens_without_sign_in,omitempty"`
 }
 
 // handlePreviewLink serves the one thing a visitor needs BEFORE they
@@ -672,6 +674,7 @@ func previewOf(g *grants.Grant, meta *linkMeta) previewLinkResponse {
 		AttributeClaims:    meta.ProvenAttrs,
 		BillingState:       meta.billingStateOf(time.Now().UTC()),
 		BillingExpires:     meta.BillingExpires,
+		OpensWithoutSignIn: opensWithoutSignIn(g, meta),
 	}
 	// A lapsed grant is withheld, not passed on: spending it would fail
 	// the sign-in with a billing error the visitor cannot act on, whereas

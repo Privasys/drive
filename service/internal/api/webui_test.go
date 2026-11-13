@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/platform"
 )
 
@@ -112,5 +113,45 @@ func TestNoWebDirServesAPIOnly(t *testing.T) {
 	h := srv.Handler("")
 	if rec := get(t, h, "x.apps.privasys.org", "/privasys-config.js"); rec.Code == http.StatusOK {
 		t.Fatalf("config served without a UI: %d", rec.Code)
+	}
+}
+
+// With a UI origin configured, the pages move there from any other host,
+// path, query and (in the browser) a link's #secret kept; the bundle and the
+// API stay where they are.
+func TestWebUIRedirectsToItsOrigin(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"index.html":   "<html><head></head><body>drive</body></html>",
+		"l/index.html": "<html><head></head><body>link</body></html>",
+	} {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		_ = os.WriteFile(p, []byte(body), 0o644)
+	}
+	srv := &Server{WebDir: dir, Platform: platform.Env{AppID: "02104572ca2f41e8ae2d24c0294e6f5e"}}
+	srv.cfg = &config.Config{Mode: config.ModeSovereign, UIOrigin: "https://drive.example.org"}
+	h := srv.Handler("")
+
+	const platformHost = "drive-demo.apps.test.privasys.org"
+	for path, want := range map[string]string{
+		"/":               "https://drive.example.org/",
+		"/l/?id=abc":      "https://drive.example.org/l/?id=abc",
+		"/l?id=abc&a=one": "https://drive.example.org/l?id=abc&a=one",
+	} {
+		rec := get(t, h, platformHost, path)
+		if rec.Code != http.StatusPermanentRedirect || rec.Header().Get("Location") != want {
+			t.Fatalf("%s = %d -> %q, want %q", path, rec.Code, rec.Header().Get("Location"), want)
+		}
+	}
+	if rec := get(t, h, "drive.example.org", "/"); rec.Code != http.StatusOK {
+		t.Fatalf("on the origin itself: %d", rec.Code)
+	}
+	if rec := get(t, h, platformHost, "/v1/nope"); rec.Code == http.StatusPermanentRedirect {
+		t.Fatal("the API must not move")
+	}
+	if (&config.Config{UIOrigin: "https://drive.example.org/"}).Validate() == nil ||
+		(&config.Config{UIOrigin: "http://drive.example.org"}).Validate() == nil {
+		t.Fatal("ui_origin must be an https origin with no path")
 	}
 }

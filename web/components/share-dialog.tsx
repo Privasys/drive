@@ -296,8 +296,7 @@ export function ShareDialog({
                         </div>
                         <p className="mt-1.5 text-xs" style={{ color: 'var(--drv-text-muted)' }}>
                             A link keeps this {node.kind === 'folder' ? 'folder' : 'file'} sealed
-                            inside the enclave. The recipient opens it with the Privasys Wallet,
-                            or is invited to install it (a passkey works once available).
+                            inside the enclave, which alone serves it to whoever opens the link.
                         </p>
 
                         <div className="mt-3 space-y-2">
@@ -305,13 +304,17 @@ export function ShareDialog({
                                 selected={mode === 'open'}
                                 onSelect={() => setMode('open')}
                                 title="Anyone with the link"
-                                body="Whoever holds the link can open it after signing in."
+                                body={
+                                    uses === 'once'
+                                        ? 'The first person to open it signs in, and the link then closes.'
+                                        : 'Whoever holds the link can open it, with no sign-in. Revoking the link cuts everyone off.'
+                                }
                             />
                             <LinkModeChoice
                                 selected={mode === 'restricted'}
                                 onSelect={() => setMode('restricted')}
                                 title="Restricted to people you approve"
-                                body="The visitor presents the attributes you choose; you approve each request."
+                                body="The visitor signs in to present the attributes you choose; you approve each request."
                             />
                         </div>
 

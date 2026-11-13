@@ -157,6 +157,7 @@ const (
 	viaAppGrant  authVia = "appgrant"  // Ed25519 AppGrant token
 	viaSealed    authVia = "sealed"    // session-relay sealed transport (X-Privasys-Sub)
 	viaAssistant authVia = "assistant" // confidential-AI enclave acting for a user (§8.7 RAG)
+	viaLink      authVia = "link"      // an open link's own secret, read-only (links_anon.go)
 )
 
 // relaySubHeader is the relay-asserted subject. The enclave-os
@@ -220,6 +221,9 @@ type Principal struct {
 	// open what was shared with them and own nothing. A drive of one's own
 	// belongs to a Privasys account, which the wallet holds and pays from.
 	Guest bool
+	// Link marks a reader who holds an open link and nothing else
+	// (links_anon.go): Grant is the link, and only reading beneath it passes.
+	Link bool
 }
 
 // IsUser reports whether p is a user (OIDC bearer or sealed session).
@@ -435,7 +439,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("PATCH /v1/tenants/{tenantID}/members/{sub}", s.auth(s.handleSetMemberRole))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/members/{sub}", s.auth(s.handleRemoveMember))
 	mux.Handle("POST /v1/tenants/{tenantID}/folders", s.auth(s.handleCreateFolder))
-	mux.Handle("GET /v1/tenants/{tenantID}/folders/{folderID}", s.auth(s.handleListFolder))
+	mux.Handle("GET /v1/tenants/{tenantID}/folders/{folderID}", s.linkReader(s.handleListFolder))
 	mux.Handle("GET /v1/tenants/{tenantID}/root", s.auth(s.handleListRoot))
 	mux.Handle("POST /v1/tenants/{tenantID}/files", s.auth(s.handleUploadFile))
 	// Chunked uploads: large files arrive as an upload session with
@@ -444,10 +448,11 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("PUT /v1/tenants/{tenantID}/uploads/{uploadID}/chunks/{index}", s.auth(s.handleUploadPart))
 	mux.Handle("POST /v1/tenants/{tenantID}/uploads/{uploadID}/finalize", s.auth(s.handleFinalizeUpload))
 	mux.Handle("DELETE /v1/tenants/{tenantID}/uploads/{uploadID}", s.auth(s.handleAbortUpload))
-	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}", s.auth(s.handleDownloadFile))
+	mux.Handle("GET /v1/tenants/{tenantID}/files/{fileID}", s.linkReader(s.handleDownloadFile))
 	// A selection of files and folders leaves as one ZIP, built in the
 	// enclave: a browser cannot write a folder tree to disk itself.
-	mux.Handle("POST /v1/tenants/{tenantID}/download.zip", s.auth(s.handleDownloadZip))
+	mux.Handle("POST /v1/tenants/{tenantID}/download.zip", s.linkReader(s.handleDownloadZip))
+	mux.Handle("GET /v1/links/{linkID}/view", s.linkReader(s.handleViewLink))
 	mux.Handle("GET /v1/tenants/{tenantID}/metrics", s.auth(s.handleTenantMetrics))
 	// Conversations in Drive (§8.7).
 	mux.Handle("POST /v1/tenants/{tenantID}/conversations", s.auth(s.handleCreateConversation))
@@ -1664,8 +1669,12 @@ func (s *Server) allowNode(ctx context.Context, p *Principal, tenantID, nodeID s
 		}
 		return s.canWrite(ctx, tenantID, p.Sub) && s.aclAllows(ctx, tenantID, nodeID, p.Sub)
 	}
-	// App principal: exact tenant, granted scope, node inside the
-	// granted subtree.
+	// A link reader only ever reads; the subtree check below confines it.
+	if p.Link && need != grants.ScopeRead {
+		return false
+	}
+	// App principal (or link reader): exact tenant, granted scope, node
+	// inside the granted subtree.
 	if p.Grant == nil || p.Grant.TenantID != tenantID {
 		return false
 	}

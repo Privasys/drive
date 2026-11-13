@@ -108,6 +108,14 @@ type Config struct {
 	// Mutable ops setting.
 	OIDCClientID string `json:"oidc_client_id,omitempty"`
 
+	// UIOrigin is the one address people open Drive at, a direct name
+	// such as https://drive.privasys.org. When set, a page asked for on any
+	// other host (the platform hostname) is redirected there: sign-in is
+	// registered for that origin only, share links take the address of the
+	// page they were made on, and only a direct name carries a link opened
+	// without a sign-in. Mutable ops setting.
+	UIOrigin string `json:"ui_origin,omitempty"`
+
 	// Semantic-index embedding backend: an OpenAI-compatible embeddings
 	// endpoint (the confidential-AI fleet), tried first; the local CPU
 	// embedder is the fallback. Mutable ops settings.
@@ -190,6 +198,13 @@ type Config struct {
 	Recovery  *RecoveryPolicy `json:"recovery,omitempty"`
 }
 
+// IsOrigin reports whether s is an https origin: a scheme and a host, with
+// no path, query or credentials.
+func IsOrigin(s string) bool {
+	host, ok := strings.CutPrefix(s, "https://")
+	return ok && host != "" && !strings.ContainsAny(host, "/?#@ ")
+}
+
 // DefaultIssuer is used when a recovery policy omits its issuer.
 const DefaultIssuer = "https://privasys.id"
 
@@ -198,6 +213,9 @@ func (c *Config) Validate() error {
 	if c.MgmtBaseURL != "" &&
 		!strings.HasPrefix(c.MgmtBaseURL, "https://") && !strings.HasPrefix(c.MgmtBaseURL, "http://") {
 		return errors.New("mgmt_base_url must be an http(s) URL")
+	}
+	if c.UIOrigin != "" && !IsOrigin(c.UIOrigin) {
+		return errors.New("ui_origin must be an https origin, such as https://drive.example.org")
 	}
 	switch c.ObjectBackend {
 	case "", "local", "gcs", "s3", "ovh":

@@ -13,6 +13,7 @@
 // and never reaches a server log.
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { SealedSession } from '@privasys/auth';
 import { Navbar, Footer } from '@privasys/ui';
 import { useDrive } from '~/lib/use-drive';
 import { claimString, decodeTokenClaims } from '~/lib/token-claims';
@@ -22,9 +23,11 @@ import {
     DriveError,
     downloadFile,
     downloadZip,
+    linkReader,
     previewLinkPublic,
     redeemLink,
     resolveLink,
+    viewLink,
     type DriveNode,
     type LinkPreview,
     type ResolvedLink
@@ -153,6 +156,45 @@ function LinkLanding() {
     );
     const unfunded = !!preview && (preview.paid_attributes ?? []).length > 0 && !preview.billing_grant;
 
+    // An open, reusable, read-only link that asks for nothing opens with the
+    // link alone: the secret is the whole authority, so a sign-in would name
+    // the visitor without deciding anything. Signing in stays one click away,
+    // to keep the item in "Shared with you". Any link that needs the visitor
+    // to provide something (a restricted link's details) signs them in, which
+    // is how those details are sourced. If Drive refuses the link-only read
+    // (this page is not on the direct name), the sign-in takes over.
+    const [linkOnly, setLinkOnly] = useState<SealedSession | null>(null);
+    const [linkOnlyFailed, setLinkOnlyFailed] = useState(false);
+    const [wantsSignIn, setWantsSignIn] = useState(false);
+    const opensWithLink = !!preview?.opens_without_sign_in && !wantsSignIn && !linkOnlyFailed && status === 'signed-out';
+    useEffect(() => {
+        if (!opensWithLink || linkOnly || !params.id || !params.secret) return;
+        let live = true;
+        const reader = linkReader(params.id, params.secret);
+        viewLink(reader, params.id)
+            .then((r) => {
+                if (!live) return;
+                setLinkOnly(reader);
+                setResolved(r);
+                setState('granted');
+                if (r.node.kind === 'file' && canPreview(asNode(r))) setViewing(true);
+            })
+            .catch(() => live && setLinkOnlyFailed(true));
+        return () => {
+            live = false;
+        };
+    }, [opensWithLink, linkOnly, params.id, params.secret]);
+    const keepInSharedWithYou = () => {
+        setWantsSignIn(true);
+        setLinkOnly(null);
+        setResolved(null);
+        setViewing(false);
+        setState('resolving');
+        started.current = false;
+    };
+    // Whatever reads the shared content: the visitor's own session, or the link.
+    const reader = session ?? linkOnly;
+
     // A fact certified from an official ID reaches Drive only as a proof the
     // Privasys Wallet presents; a passkey or Google/Microsoft sign-in has no
     // way to carry one. Such a link offers the wallet alone, and says why.
@@ -171,7 +213,7 @@ function LinkLanding() {
 
     useEffect(() => {
         if (status !== 'signed-out' || ceremonyError || started.current || !ceremonyRef.current) return;
-        if (preview === undefined) return;
+        if (preview === undefined || opensWithLink) return;
         started.current = true;
         const ask = preview
             ? preview.mode === 'restricted'
@@ -182,7 +224,7 @@ function LinkLanding() {
             started.current = false;
             setCeremonyError('The sign-in did not complete. Scan the code again to open the link.');
         });
-    }, [status, signInInto, ceremonyError, params.attrs, preview, askable, linkMethods]);
+    }, [status, signInInto, ceremonyError, params.attrs, preview, askable, linkMethods, opensWithLink]);
 
     // Restricted-link step-up: re-run the ceremony requesting exactly the
     // attributes the link requires, then resolve + redeem again.
@@ -342,10 +384,10 @@ function LinkLanding() {
     // download uses).
     const [zipping, setZipping] = useState(false);
     const downloadAll = async () => {
-        if (!session || !resolved) return;
+        if (!reader || !resolved) return;
         setZipping(true);
         try {
-            const bytes = await downloadZip(session, resolved.tenant_id, [resolved.node.id], resolved.node.name);
+            const bytes = await downloadZip(reader, resolved.tenant_id, [resolved.node.id], resolved.node.name);
             const blob = new Blob([bytes as BlobPart], { type: 'application/zip' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -363,9 +405,9 @@ function LinkLanding() {
     };
 
     const download = async () => {
-        if (!session || !resolved) return;
+        if (!reader || !resolved) return;
         try {
-            const bytes = await downloadFile(session, resolved.tenant_id, resolved.node.id);
+            const bytes = await downloadFile(reader, resolved.tenant_id, resolved.node.id);
             const blob = new Blob([bytes as BlobPart], { type: 'application/octet-stream' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -394,7 +436,7 @@ function LinkLanding() {
                                 This link is incomplete. Ask the sender for the full link.
                             </p>
                         </Card>
-                    ) : status === 'signed-out' || stepUp ? (
+                    ) : (status === 'signed-out' && !opensWithLink && !linkOnly) || stepUp ? (
                         <Card>
                             <div className="mb-3 text-center">
                                 <div className="text-lg font-semibold">
@@ -470,7 +512,7 @@ function LinkLanding() {
                                         {' · sealed end-to-end inside the enclave'}
                                     </div>
                                 </div>
-                                {session && (
+                                {reader && (
                                     <button
                                         onClick={() => void downloadAll()}
                                         disabled={zipping}
@@ -482,9 +524,9 @@ function LinkLanding() {
                                 )}
                             </div>
                             {error && <p className="mb-3 text-sm text-red-500">{error}</p>}
-                            {session && (
+                            {reader && (
                                 <SharedBrowser
-                                    session={session}
+                                    session={reader}
                                     tenantID={resolved.tenant_id}
                                     rootID={resolved.node.id}
                                     rootName={resolved.node.name}
@@ -587,15 +629,24 @@ function LinkLanding() {
                         </Card>
                     )}
 
+                    {linkOnly && state === 'granted' && (
+                        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm" style={{ borderColor: 'var(--drv-border)', background: 'var(--drv-surface)', color: 'var(--drv-text-muted)' }}>
+                            <span>Opened with the link, no sign-in needed.</span>
+                            <button onClick={keepInSharedWithYou} className="drv-btn-primary rounded-full px-4 py-1.5 text-sm">
+                                Save to Shared with you
+                            </button>
+                        </div>
+                    )}
+
                     <div className="mt-4 flex items-center justify-center gap-1.5 text-xs" style={{ color: 'var(--drv-text-muted)' }}>
                         <ShieldCheck width={13} height={13} /> Attestation-verified confidential computing
                     </div>
                 </div>
             </main>
 
-            {viewing && resolved && session && (
+            {viewing && resolved && reader && (
                 <FileViewer
-                    session={session}
+                    session={reader}
                     tenantID={resolved.tenant_id}
                     node={asNode(resolved)}
                     onClose={() => setViewing(false)}

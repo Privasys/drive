@@ -640,6 +640,9 @@ export interface LinkPreview {
     attribute_claims?: Record<string, string>;
     billing_grant?: string;
     billing_state?: string;
+    /** The link's own secret reads it: an open, reusable, read-only link
+     * that asks for nothing. */
+    opens_without_sign_in?: boolean;
 }
 
 /**
@@ -660,6 +663,63 @@ export async function previewLinkPublic(linkID: string, previewKey: string): Pro
     } catch {
         return null;
     }
+}
+
+/**
+ * A reader holding nothing but an open link. Drive's API client takes a
+ * SealedSession, so this presents the link as one: each request goes to this
+ * page's own origin, a direct name where TLS ends in the enclave, with the
+ * link itself as the credential. Drive lets it read the shared node and what
+ * is beneath it, and nothing else.
+ */
+export function linkReader(linkID: string, secret: string): SealedSession {
+    const send = async (method: string, path: string, body?: unknown, init?: RequestInit): Promise<Response> => {
+        const headers = new Headers(init?.headers);
+        headers.set('Authorization', `DriveLink ${linkID}.${secret}`);
+        let payload: BodyInit | undefined;
+        if (body instanceof Uint8Array || typeof body === 'string') {
+            payload = body as BodyInit;
+        } else if (body !== undefined) {
+            payload = JSON.stringify(body);
+            headers.set('Content-Type', 'application/json');
+        }
+        if (!path.startsWith('/') || path.startsWith('//')) throw new Error('link reader: path must stay on this origin');
+        return fetch(path, { ...init, method, headers, body: payload, credentials: 'omit', redirect: 'error' });
+    };
+    const record = (h: Headers): Record<string, string> => Object.fromEntries(h.entries());
+    return {
+        sessionId: 'link',
+        appHost: typeof window === 'undefined' ? '' : window.location.host,
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        state: { status: 'ok' },
+        onState: () => () => {},
+        async request(method, path, body, init) {
+            const r = await send(method, path, body, init);
+            return { status: r.status, headers: record(r.headers), body: new Uint8Array(await r.arrayBuffer()), sealed: false };
+        },
+        async stream(method, path, body, init) {
+            const r = await send(method, path, body, init);
+            return {
+                status: r.status,
+                headers: record(r.headers),
+                body: r.body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() }),
+                sealed: false
+            };
+        },
+        openWebSocket() {
+            throw new Error('Sign in to get live updates.');
+        }
+    };
+}
+
+/** What an open link shares, read with the link alone (see linkReader). */
+export async function viewLink(reader: SealedSession, linkID: string): Promise<ResolvedLink> {
+    const r = await json<Omit<ResolvedLink, 'already_granted' | 'request_status'>>(
+        reader,
+        'GET',
+        `/v1/links/${encodeURIComponent(linkID)}/view`
+    );
+    return { ...r, already_granted: true, request_status: '' };
 }
 
 /** Owner: list restricted-link access requests (default pending). */

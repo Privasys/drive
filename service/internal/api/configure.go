@@ -98,6 +98,8 @@ type configureRequest struct {
 	// OIDCClientID binds the billing grants that fund attribute-gated
 	// shares to the front end's OAuth client (see config.Config).
 	OIDCClientID *string `json:"oidc_client_id"`
+	// UIOrigin is the address pages redirect to (see config.Config).
+	UIOrigin *string `json:"ui_origin"`
 	// Semantic-index embedding backend (see config.Config). The
 	// dependency pin makes every embeddings call verify the fleet's
 	// attested identity before sending data.
@@ -143,6 +145,9 @@ func (req *configureRequest) overlay(cur *config.Config) *config.Config {
 	}
 	if req.OIDCClientID != nil {
 		cfg.OIDCClientID = *req.OIDCClientID
+	}
+	if req.UIOrigin != nil {
+		cfg.UIOrigin = *req.UIOrigin
 	}
 	if req.EmbeddingsBaseURL != nil {
 		cfg.EmbeddingsBaseURL = *req.EmbeddingsBaseURL
