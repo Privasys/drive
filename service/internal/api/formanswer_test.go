@@ -188,7 +188,8 @@ func TestFormAnswer(t *testing.T) {
 	if got := answer(token, "approve"); got != http.StatusOK {
 		t.Fatalf("answer: want 200, got %d", got)
 	}
-	if r := next(appMessage); r.Sub != recipient || r.Payload["kind"] != "response" {
+	if r := next(appMessage); r.Sub != recipient || r.Payload["kind"] != "response" ||
+		r.Payload["path"] != "/#shared/"+tenantID+"/"+nodeID {
 		t.Fatalf("response push: %+v", r)
 	}
 	code, b = doReq(t, bearerReq(t, "GET", fmt.Sprintf("%s/v1/tenants/%s/files/%s", ts.URL, tenantID, nodeID), recipient, ""))

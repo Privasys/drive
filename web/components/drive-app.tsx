@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Navbar, Footer } from '@privasys/ui';
 import { useDrive } from '~/lib/use-drive';
+import { parseDeepLink, type SharedFocus } from '~/lib/deep-link';
 import { avatarColor, initials } from '~/lib/format';
 import { FileBrowser } from './file-browser';
 import { SharedView } from './shared-view';
@@ -19,15 +20,6 @@ import { AppsIcon, ChartIcon, FolderIcon, GraphIcon, HomeIcon, InboxIcon, People
 
 type View = 'files' | 'shared' | 'requests' | 'members' | 'insights' | 'graph' | 'security' | 'apps' | 'app-folders';
 
-// Deep links: a notification opens Drive at `/#requests` (optionally
-// `/#requests/<tenant id>` for a workspace's requests) or `/#shared`.
-const LINKED_VIEWS: View[] = ['files', 'shared', 'requests'];
-
-function linkedView(hash: string): { view: View; tenantID?: string } | null {
-    const [v, tenantID] = hash.replace(/^#\/?/, '').split('/');
-    return LINKED_VIEWS.includes(v as View) ? { view: v as View, tenantID: tenantID || undefined } : null;
-}
-
 const FOOTER_LINKS = [{ label: 'Legal', href: 'https://privasys.org/legal/', external: true }];
 
 export function DriveApp() {
@@ -42,14 +34,18 @@ export function DriveApp() {
 
     // Open the view a deep link names, once the drive is there to show it,
     // and again whenever the hash changes on an open page.
-    const ready = !!session && !!tenant;
+    // A shared item is brought forward in Shared with me, which a guest
+    // (no drive of their own) also sees, so they follow links too.
+    const [sharedFocus, setSharedFocus] = useState<SharedFocus | null>(null);
+    const ready = !!session && (!!tenant || !!me?.guest);
     useEffect(() => {
         if (!ready) return;
         const apply = () => {
-            const link = linkedView(window.location.hash);
+            const link = parseDeepLink(window.location.hash);
             if (!link) return;
             const t = link.tenantID ? tenants.find((x) => x.id === link.tenantID) : undefined;
             if (t) switchTenant(t);
+            setSharedFocus(link.item ?? null);
             setView(link.view);
             // One-shot: the link has done its job, and a stale hash must not
             // pull the page back later.
@@ -71,7 +67,7 @@ export function DriveApp() {
                     trailing={<UserMenu name={name} email={me.email} onSignOut={signOut} note="Signed in without the Privasys Wallet" />}
                 />
                 <main className="flex min-w-0 flex-1 flex-col pt-14" style={{ background: 'var(--drv-surface-2)' }}>
-                    <SharedView session={session} />
+                    <SharedView session={session} focus={sharedFocus} />
                 </main>
                 <Footer
                     className="!mt-0"
@@ -266,7 +262,7 @@ export function DriveApp() {
                     {view === 'files' ? (
                         <FileBrowser key={tenant.id} session={session} tenant={tenant} me={me} />
                     ) : view === 'shared' ? (
-                        <SharedView session={session} />
+                        <SharedView session={session} focus={sharedFocus} />
                     ) : view === 'requests' ? (
                         <RequestsView session={session} tenant={tenant} />
                     ) : view === 'insights' ? (

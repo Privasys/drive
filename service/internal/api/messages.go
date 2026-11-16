@@ -114,10 +114,16 @@ func formDigest(form string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// responseMessage tells a requester that the sharer decided. Whatever the
-// decision, the place to look is Shared with me.
-func responseMessage() map[string]any {
-	return map[string]any{"kind": "response", "path": "/#shared"}
+// responseMessage tells a requester that the sharer decided. An approval
+// leads to the item itself, "/#shared/<tenant id>/<node id>", the ids
+// Shared with me lists it under; a refusal has nothing to open and leads to
+// Shared with me. Ids only: the payload carries no name.
+func responseMessage(lr *store.LinkRequest, status string) map[string]any {
+	path := "/#shared"
+	if status == "approved" {
+		path += "/" + lr.TenantID + "/" + lr.NodeID
+	}
+	return map[string]any{"kind": "response", "path": path}
 }
 
 func (s *Server) appMessages() bool {
@@ -153,7 +159,7 @@ func (s *Server) notifyShareRequest(ctx context.Context, g *grants.Grant, lr *st
 // notifyShareDecision tells the requester that the sharer decided.
 func (s *Server) notifyShareDecision(ctx context.Context, lr *store.LinkRequest, status string) {
 	if s.appMessages() {
-		s.Notifier().Fire(lr.RequesterSub, appMessage, responseMessage())
+		s.Notifier().Fire(lr.RequesterSub, appMessage, responseMessage(lr, status))
 		return
 	}
 	nodeName := ""

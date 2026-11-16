@@ -16,9 +16,15 @@ func validPath(p string) bool {
 }
 
 func TestAppMessagePaths(t *testing.T) {
-	m := responseMessage()
-	if m["kind"] != "response" || !validPath(m["path"].(string)) {
-		t.Fatalf("response message: %v", m)
+	lr := &store.LinkRequest{TenantID: "031b5151-c496-4373-8377-5f17b72795dc", NodeID: "9d0c6f1e-2b7a-4c55-8e3f-6a1b2c3d4e5f"}
+	for status, want := range map[string]string{
+		"approved": "/#shared/031b5151-c496-4373-8377-5f17b72795dc/9d0c6f1e-2b7a-4c55-8e3f-6a1b2c3d4e5f",
+		"denied":   "/#shared",
+	} {
+		m := responseMessage(lr, status)
+		if m["kind"] != "response" || m["path"] != want || !validPath(want) {
+			t.Fatalf("%s: response message: %v", status, m)
+		}
 	}
 }
 

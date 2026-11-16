@@ -3,15 +3,18 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { SealedSession } from '@privasys/auth';
 import { downloadFile, listShared, type SharedItem } from '~/lib/drive-api';
+import type { SharedFocus } from '~/lib/deep-link';
 import { avatarColor, formatBytes, granteeLabel, initials } from '~/lib/format';
 import { SharedBrowser } from './shared-browser';
 import { ChevronRight, DownloadIcon, FileIcon, FolderIcon, PeopleIcon } from './icons';
 
-export function SharedView({ session }: { session: SealedSession }) {
+export function SharedView({ session, focus }: { session: SealedSession; focus?: SharedFocus | null }) {
     const [items, setItems] = useState<SharedItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [browsing, setBrowsing] = useState<SharedItem | null>(null);
+    // The item a deep link named: a folder opens, a file is highlighted.
+    const [focused, setFocused] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -28,6 +31,19 @@ export function SharedView({ session }: { session: SealedSession }) {
     useEffect(() => {
         void load();
     }, [load]);
+
+    useEffect(() => {
+        if (!focus || loading) return;
+        const it = items.find((x) => x.tenant_id === focus.tenantID && x.node_id === focus.nodeID);
+        if (!it) return;
+        if (it.kind === 'folder') {
+            setBrowsing(it);
+        } else {
+            setBrowsing(null);
+            setFocused(it.grant_id);
+            document.getElementById(`shared-${it.grant_id}`)?.scrollIntoView({ block: 'center' });
+        }
+    }, [focus, items, loading]);
 
     const download = async (it: SharedItem) => {
         try {
@@ -103,8 +119,12 @@ export function SharedView({ session }: { session: SealedSession }) {
                         {items.map((it) => (
                             <div
                                 key={it.grant_id}
+                                id={`shared-${it.grant_id}`}
                                 className={`group flex items-center gap-3 px-4 py-3 hover:bg-[var(--drv-hover)]${it.kind === 'folder' ? ' cursor-pointer' : ''}`}
-                                style={{ borderBottom: '1px solid var(--drv-border)' }}
+                                style={{
+                                    borderBottom: '1px solid var(--drv-border)',
+                                    background: focused === it.grant_id ? 'var(--drv-accent-weak)' : undefined
+                                }}
                                 onClick={it.kind === 'folder' ? () => setBrowsing(it) : undefined}
                             >
                                 {it.kind === 'folder' ? (
