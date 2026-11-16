@@ -168,8 +168,11 @@ func TestFormAnswer(t *testing.T) {
 	}
 
 	// The wallet's check that the form is Drive's own and still open.
+	// Through the whole handler, as the runtime reaches it.
+	full := httptest.NewServer(srv.Handler(""))
+	t.Cleanup(full.Close)
 	open := func(id, digest string) (int, []byte) {
-		return doReq(t, mustReq(t, "GET", ts.URL+"/.well-known/privasys/app-form?id="+id+"&digest="+digest, ""))
+		return doReq(t, mustReq(t, "GET", full.URL+"/.well-known/privasys/app-form?id="+id+"&digest="+digest, ""))
 	}
 	if code, b := open(rr.RequestID, formDigest(form)); code != 200 || !strings.Contains(string(b), `"open":true`) {
 		t.Fatalf("open form: %d %s", code, b)
