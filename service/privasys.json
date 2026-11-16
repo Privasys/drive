@@ -11,8 +11,7 @@
     },
     "surfaces": {
         "public": [
-            { "method": "POST", "path": "/v1/public/links/preview" },
-            { "method": "POST", "path": "/v1/link-requests/answer" }
+            { "method": "POST", "path": "/v1/public/links/preview" }
         ],
         "direct": "private"
     },

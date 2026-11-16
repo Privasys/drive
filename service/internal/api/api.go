@@ -541,7 +541,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/links/{linkID}/resolve", s.auth(s.handleResolveLink))
 	mux.Handle("POST /v1/links/{linkID}/redeem", s.auth(s.handleRedeemLink))
 	// The sharer's answer from the wallet: the IdP's answer token is the
-	// authority, not a Drive sign-in (formanswer.go).
+	// authority, not a Drive sign-in (formanswer.go); it arrives on the wallet's RA-TLS leg (attested), never the public one.
 	mux.HandleFunc("POST /v1/link-requests/answer", s.handleFormAnswer)
 	mux.Handle("GET /v1/tenants/{tenantID}/link-requests", s.auth(s.handleListLinkRequests))
 	mux.Handle("POST /v1/tenants/{tenantID}/link-requests/{reqID}/{decision}", s.auth(s.handleDecideLinkRequest))
