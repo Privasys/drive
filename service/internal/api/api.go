@@ -543,6 +543,9 @@ func (s *Server) Routes() http.Handler {
 	// The sharer's answer from the wallet: the IdP's answer token is the
 	// authority, not a Drive sign-in (formanswer.go); it arrives on the wallet's RA-TLS leg (attested), never the public one.
 	mux.HandleFunc("POST /v1/link-requests/answer", s.handleFormAnswer)
+	// The wallet checks a form is Drive's own and still open before it
+	// shows the buttons; same attested leg.
+	mux.HandleFunc("GET /.well-known/privasys/app-form", s.handleFormOpen)
 	mux.Handle("GET /v1/tenants/{tenantID}/link-requests", s.auth(s.handleListLinkRequests))
 	mux.Handle("POST /v1/tenants/{tenantID}/link-requests/{reqID}/{decision}", s.auth(s.handleDecideLinkRequest))
 	mux.Handle("GET /v1/tenants/{tenantID}/changes", s.auth(s.handleChangesV2))

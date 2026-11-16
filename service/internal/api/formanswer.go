@@ -127,3 +127,25 @@ func (s *Server) decideLinkRequest(ctx context.Context, lr *store.LinkRequest, d
 	s.notifyShareDecision(ctx, cur, "approved")
 	return "approved", g.ID, nil
 }
+
+// handleFormOpen lets the wallet confirm, over its attested channel, that
+// Drive itself sent the form it is about to show and that the form is still
+// waiting: 200 only for an open request whose stored digest is the one
+// asked about, and the same bare 404 for anything else, so the answer never
+// says whether an id exists.
+func (s *Server) handleFormOpen(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	digest := strings.ToLower(r.URL.Query().Get("digest"))
+	notFound := func() { http.Error(w, "not found", http.StatusNotFound) }
+	if !s.appMessages() || id == "" || len(digest) != 64 {
+		notFound()
+		return
+	}
+	lr, err := s.Store.LinkRequestByID(r.Context(), id)
+	if err != nil || lr.Status != "pending" || lr.FormDigest == "" ||
+		subtle.ConstantTimeCompare([]byte(digest), []byte(lr.FormDigest)) != 1 {
+		notFound()
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"open": true, "form_id": lr.ID, "form_digest": lr.FormDigest})
+}

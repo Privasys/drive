@@ -167,6 +167,20 @@ func TestFormAnswer(t *testing.T) {
 		t.Fatalf("a refused answer granted access: %d", code)
 	}
 
+	// The wallet's check that the form is Drive's own and still open.
+	open := func(id, digest string) (int, []byte) {
+		return doReq(t, mustReq(t, "GET", ts.URL+"/.well-known/privasys/app-form?id="+id+"&digest="+digest, ""))
+	}
+	if code, b := open(rr.RequestID, formDigest(form)); code != 200 || !strings.Contains(string(b), `"open":true`) {
+		t.Fatalf("open form: %d %s", code, b)
+	}
+	if code, _ := open("5b1e4c1a-0d6f-4b36-9a43-7d1f3b0c2e11", formDigest(form)); code != http.StatusNotFound {
+		t.Fatalf("unknown id: want 404, got %d", code)
+	}
+	if code, _ := open(rr.RequestID, formDigest(form+" ")); code != http.StatusNotFound {
+		t.Fatalf("wrong digest: want 404, got %d", code)
+	}
+
 	token := idp.mint(t, nil, good)
 	if got := answer(token, "approve"); got != http.StatusOK {
 		t.Fatalf("answer: want 200, got %d", got)
@@ -177,6 +191,10 @@ func TestFormAnswer(t *testing.T) {
 	code, b = doReq(t, bearerReq(t, "GET", fmt.Sprintf("%s/v1/tenants/%s/files/%s", ts.URL, tenantID, nodeID), recipient, ""))
 	if code != 200 || string(b) != string(payload) {
 		t.Fatalf("approved read: %d", code)
+	}
+
+	if code, _ := open(rr.RequestID, formDigest(form)); code != http.StatusNotFound {
+		t.Fatalf("answered form: want 404, got %d", code)
 	}
 
 	// Single use: the same answer again, or another one, is refused.
