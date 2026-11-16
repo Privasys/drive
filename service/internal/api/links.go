@@ -512,11 +512,45 @@ type redeemLinkRequest struct {
 // loadLink fetches an active `link` grant and constant-time-verifies the
 // presented secret against the stored hash.
 func (s *Server) loadLink(ctx context.Context, linkID, secret string) (*grants.Grant, *linkMeta, error) {
+	g, meta, err := s.verifyLink(ctx, linkID, secret)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !g.IsActive(time.Now().UTC()) {
+		return nil, nil, store.ErrNotFound
+	}
+	return g, meta, nil
+}
+
+// loadLinkFor is loadLink for a signed-in visitor, who keeps reaching a
+// link that has closed (a one-off link closes when it lets them in, and
+// an owner may revoke a link after approving) as long as they hold the
+// access that link gave them. Without it, a visitor waiting on approval
+// would see "invalid or expired" the moment the sharer approved. Anyone
+// else still finds a closed link gone.
+func (s *Server) loadLinkFor(ctx context.Context, linkID, secret, sub string) (*grants.Grant, *linkMeta, error) {
+	g, meta, err := s.verifyLink(ctx, linkID, secret)
+	if err != nil {
+		return nil, nil, err
+	}
+	if g.IsActive(time.Now().UTC()) {
+		return g, meta, nil
+	}
+	if ag, aerr := s.Grants.ActiveForSubjectOnNode(ctx, g.TenantID, g.NodeID, sub); aerr == nil && ag != nil &&
+		ag.CreatedBy == "link:"+g.ID {
+		return g, meta, nil
+	}
+	return nil, nil, store.ErrNotFound
+}
+
+// verifyLink reads a link and checks its secret, whether or not the link
+// is still open.
+func (s *Server) verifyLink(ctx context.Context, linkID, secret string) (*grants.Grant, *linkMeta, error) {
 	g, err := s.Grants.Get(ctx, linkID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if g.Subject != grants.SubjectLink || !g.IsActive(time.Now().UTC()) {
+	if g.Subject != grants.SubjectLink {
 		return nil, nil, store.ErrNotFound
 	}
 	var meta linkMeta
@@ -765,7 +799,7 @@ func (s *Server) handleResolveLink(w http.ResponseWriter, r *http.Request, p *Pr
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	g, meta, err := s.loadLink(r.Context(), linkID, req.Secret)
+	g, meta, err := s.loadLinkFor(r.Context(), linkID, req.Secret, p.Sub)
 	if err != nil {
 		writeLinkError(w, err)
 		return
@@ -841,7 +875,7 @@ func (s *Server) handleRedeemLink(w http.ResponseWriter, r *http.Request, p *Pri
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	g, meta, err := s.loadLink(r.Context(), linkID, req.Secret)
+	g, meta, err := s.loadLinkFor(r.Context(), linkID, req.Secret, p.Sub)
 	if err != nil {
 		writeLinkError(w, err)
 		return
