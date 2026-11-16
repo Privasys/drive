@@ -116,6 +116,12 @@ type Config struct {
 	// without a sign-in. Mutable ops setting.
 	UIOrigin string `json:"ui_origin,omitempty"`
 
+	// AppMessages sends share requests and decisions to the wallet as the
+	// platform's generic app message instead of Drive's own types. Only
+	// for an instance whose users all run a wallet that reads them.
+	// Mutable ops setting.
+	AppMessages bool `json:"app_messages,omitempty"`
+
 	// Semantic-index embedding backend: an OpenAI-compatible embeddings
 	// endpoint (the confidential-AI fleet), tried first; the local CPU
 	// embedder is the fallback. Mutable ops settings.

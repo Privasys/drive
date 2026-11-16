@@ -100,6 +100,9 @@ type configureRequest struct {
 	OIDCClientID *string `json:"oidc_client_id"`
 	// UIOrigin is the address pages redirect to (see config.Config).
 	UIOrigin *string `json:"ui_origin"`
+	// AppMessages switches wallet notifications to the generic app
+	// message (see config.Config).
+	AppMessages *bool `json:"app_messages"`
 	// Semantic-index embedding backend (see config.Config). The
 	// dependency pin makes every embeddings call verify the fleet's
 	// attested identity before sending data.
@@ -148,6 +151,9 @@ func (req *configureRequest) overlay(cur *config.Config) *config.Config {
 	}
 	if req.UIOrigin != nil {
 		cfg.UIOrigin = *req.UIOrigin
+	}
+	if req.AppMessages != nil {
+		cfg.AppMessages = *req.AppMessages
 	}
 	if req.EmbeddingsBaseURL != nil {
 		cfg.EmbeddingsBaseURL = *req.EmbeddingsBaseURL

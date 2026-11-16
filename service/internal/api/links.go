@@ -946,7 +946,7 @@ func (s *Server) redeemLinkFor(ctx context.Context, p *Principal, g *grants.Gran
 		if err != nil {
 			return linkRedeemOutcome{}, err
 		}
-		s.Notifier().Fire(g.CreatedBy, appMessage, requestMessage(g.TenantID, presented))
+		s.notifyShareRequest(g, lr, n, p.Sub, presented)
 		return linkRedeemOutcome{Status: "pending", RequestID: lr.ID}, nil
 	default:
 		return linkRedeemOutcome{}, errors.New("unknown link mode")
@@ -1042,7 +1042,7 @@ func (s *Server) handleDecideLinkRequest(w http.ResponseWriter, r *http.Request,
 			writeStoreError(w, err)
 			return
 		}
-		s.Notifier().Fire(lr.RequesterSub, appMessage, responseMessage())
+		s.notifyShareDecision(r.Context(), lr, "denied")
 		writeJSON(w, http.StatusOK, map[string]any{"status": "denied"})
 		return
 	}
@@ -1056,7 +1056,7 @@ func (s *Server) handleDecideLinkRequest(w http.ResponseWriter, r *http.Request,
 		writeStoreError(w, err)
 		return
 	}
-	s.Notifier().Fire(lr.RequesterSub, appMessage, responseMessage())
+	s.notifyShareDecision(r.Context(), lr, "approved")
 	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "grant_id": g.ID})
 }
 
