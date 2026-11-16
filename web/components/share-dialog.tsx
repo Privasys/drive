@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SealedSession } from '@privasys/auth';
 import {
     createLink,
@@ -87,6 +87,12 @@ export function ShareDialog({
     const [links, setLinks] = useState<ShareLink[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    // The error sits at the top of a scrolling body: a sharer who clicked
+    // Copy link at the bottom would never see it, so it is brought into view.
+    const errorRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (error) errorRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, [error]);
     const [busy, setBusy] = useState(false);
 
     // Link builder
@@ -281,7 +287,7 @@ export function ShareDialog({
 
                 <div className="max-h-[70vh] overflow-auto p-5">
                     {error && (
-                        <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-500">
+                        <div ref={errorRef} className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-500">
                             {error}
                         </div>
                     )}
