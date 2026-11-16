@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Navbar, Footer } from '@privasys/ui';
 import { useDrive } from '~/lib/use-drive';
 import { avatarColor, initials } from '~/lib/format';
@@ -19,6 +19,15 @@ import { AppsIcon, ChartIcon, FolderIcon, GraphIcon, HomeIcon, InboxIcon, People
 
 type View = 'files' | 'shared' | 'requests' | 'members' | 'insights' | 'graph' | 'security' | 'apps' | 'app-folders';
 
+// Deep links: a notification opens Drive at `/#requests` (optionally
+// `/#requests/<tenant id>` for a workspace's requests) or `/#shared`.
+const LINKED_VIEWS: View[] = ['files', 'shared', 'requests'];
+
+function linkedView(hash: string): { view: View; tenantID?: string } | null {
+    const [v, tenantID] = hash.replace(/^#\/?/, '').split('/');
+    return LINKED_VIEWS.includes(v as View) ? { view: v as View, tenantID: tenantID || undefined } : null;
+}
+
 const FOOTER_LINKS = [{ label: 'Legal', href: 'https://privasys.org/legal/', external: true }];
 
 export function DriveApp() {
@@ -30,6 +39,26 @@ export function DriveApp() {
     const [wsName, setWsName] = useState('');
     const [wsError, setWsError] = useState<string | null>(null);
     const [wsBusy, setWsBusy] = useState(false);
+
+    // Open the view a deep link names, once the drive is there to show it,
+    // and again whenever the hash changes on an open page.
+    const ready = !!session && !!tenant;
+    useEffect(() => {
+        if (!ready) return;
+        const apply = () => {
+            const link = linkedView(window.location.hash);
+            if (!link) return;
+            const t = link.tenantID ? tenants.find((x) => x.id === link.tenantID) : undefined;
+            if (t) switchTenant(t);
+            setView(link.view);
+            // One-shot: the link has done its job, and a stale hash must not
+            // pull the page back later.
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+        };
+        apply();
+        window.addEventListener('hashchange', apply);
+        return () => window.removeEventListener('hashchange', apply);
+    }, [ready, tenants, switchTenant]);
 
     // A guest signed in without the wallet and owns no drive: what was shared
     // with them is all there is to show.
