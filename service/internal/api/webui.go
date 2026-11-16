@@ -162,7 +162,7 @@ func controlPlaneFor(host string) string {
 		return v
 	}
 	if strings.HasSuffix(host, ".apps.test.privasys.org") {
-		return "https://api-test.developer.privasys.org"
+		return "https://api.developer.test.privasys.org"
 	}
 	return "https://api.developer.privasys.org"
 }

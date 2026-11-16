@@ -26,7 +26,7 @@ type IdentityHeaders func(ctx context.Context) (identityB64, challengeB64, evide
 
 // Client posts notifications to the control plane.
 type Client struct {
-	BaseURL string // e.g. https://api-test.developer.privasys.org
+	BaseURL string // e.g. https://api.developer.test.privasys.org
 	Headers IdentityHeaders
 	HC      *http.Client
 }

@@ -57,7 +57,7 @@ the gateway names it by, and the root layout loads it before the app's code
 ```bash
 cd web
 NODE_AUTH_TOKEN=<packages:read token> npm ci
-NEXT_PUBLIC_DRIVE_APP_HOST=drive-demo.apps.test.privasys.org NEXT_PUBLIC_API_BASE_URL=https://api-test.developer.privasys.org NEXT_PUBLIC_DRIVE_APP_ID=02104572-ca2f-41e8-ae2d-24c0294e6f5e   npm run dev   # http://localhost:4215
+NEXT_PUBLIC_DRIVE_APP_HOST=drive-demo.apps.test.privasys.org NEXT_PUBLIC_API_BASE_URL=https://api.developer.test.privasys.org NEXT_PUBLIC_DRIVE_APP_ID=02104572-ca2f-41e8-ae2d-24c0294e6f5e   npm run dev   # http://localhost:4215
 npm test
 ```
 

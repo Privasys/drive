@@ -95,7 +95,7 @@ type Config struct {
 	QuotaDefaultBytes int64 `json:"quota_default_bytes,omitempty"`
 
 	// MgmtBaseURL is the control-plane API base (e.g.
-	// https://api-test.developer.privasys.org). When set, the instance
+	// https://api.developer.test.privasys.org). When set, the instance
 	// refreshes stale vault attestation tokens itself via its
 	// manager-minted app identity instead of waiting for an owner
 	// re-arm. Mutable (an ops setting, not part of the trust contract).

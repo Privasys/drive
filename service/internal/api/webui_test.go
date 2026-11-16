@@ -85,7 +85,7 @@ func TestWebUIServesTheExport(t *testing.T) {
 func TestWebUIConfigNamesThePlatform(t *testing.T) {
 	h := webUIServer(t)
 	cases := map[string]string{
-		"drive-demo.apps.test.privasys.org": `"apiBase":"https://api-test.developer.privasys.org"`,
+		"drive-demo.apps.test.privasys.org": `"apiBase":"https://api.developer.test.privasys.org"`,
 		"privasys-drive.apps.privasys.org":  `"apiBase":"https://api.developer.privasys.org"`,
 	}
 	for host, want := range cases {
