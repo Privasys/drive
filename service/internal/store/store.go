@@ -401,6 +401,18 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate link_requests: %w", err)
 		}
 	}
+	// The wallet form a share request was sent as (store/links.go).
+	for _, col := range []string{
+		`ALTER TABLE link_requests ADD COLUMN form_digest TEXT DEFAULT ''`,
+		`ALTER TABLE link_requests ADD COLUMN form_sub TEXT DEFAULT ''`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, col); err != nil {
+			msg := strings.ToLower(err.Error())
+			if !strings.Contains(msg, "duplicate") && !strings.Contains(msg, "exists") {
+				return fmt.Errorf("migrate: %q: %w", col, err)
+			}
+		}
+	}
 	// Section tree: deterministic document structure (headings, page
 	// provenance) built at index time. Both dialects — sections need no
 	// pgvector, and the doc tree exists even where embeddings do not.

@@ -946,7 +946,7 @@ func (s *Server) redeemLinkFor(ctx context.Context, p *Principal, g *grants.Gran
 		if err != nil {
 			return linkRedeemOutcome{}, err
 		}
-		s.notifyShareRequest(g, lr, n, p.Sub, presented)
+		s.notifyShareRequest(ctx, g, lr, n, p.Sub, presented)
 		return linkRedeemOutcome{Status: "pending", RequestID: lr.ID}, nil
 	default:
 		return linkRedeemOutcome{}, errors.New("unknown link mode")
@@ -1033,31 +1033,20 @@ func (s *Server) handleDecideLinkRequest(w http.ResponseWriter, r *http.Request,
 		writeStoreError(w, err)
 		return
 	}
-	if lr.Status != "pending" {
-		httpError(w, http.StatusConflict, errors.New("request already decided"))
+	status, grantID, err := s.decideLinkRequest(r.Context(), lr, decision, p.Sub)
+	if errors.Is(err, errRequestDecided) {
+		httpError(w, http.StatusConflict, err)
 		return
 	}
-	if decision == "deny" {
-		if err := s.Store.DecideLinkRequest(r.Context(), tenantID, reqID, "denied", "", p.Sub); err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		s.notifyShareDecision(r.Context(), lr, "denied")
-		writeJSON(w, http.StatusOK, map[string]any{"status": "denied"})
-		return
-	}
-	// Approve: mint the recipient's grant, then record the decision.
-	g, err := s.mintSubjectGrant(r.Context(), tenantID, lr.NodeID, lr.RequesterSub, splitScopeStrings(lr.Scope), lr.LinkID)
 	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if err := s.Store.DecideLinkRequest(r.Context(), tenantID, reqID, "approved", g.ID, p.Sub); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	s.notifyShareDecision(r.Context(), lr, "approved")
-	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "grant_id": g.ID})
+	out := map[string]any{"status": status}
+	if grantID != "" {
+		out["grant_id"] = grantID
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // --- helpers --------------------------------------------------------------

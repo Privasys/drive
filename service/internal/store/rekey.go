@@ -36,6 +36,7 @@ var subjectColumns = []struct {
 	{"recovery_approvals", "approver_sub", ""},
 	{"link_requests", "requester_sub", ""},
 	{"link_requests", "decided_by", ""},
+	{"link_requests", "form_sub", ""},
 	{"access_events", "sub", ""},
 }
 

@@ -24,6 +24,12 @@ type LinkRequest struct {
 	CreatedAt    time.Time
 	DecidedAt    *time.Time
 	DecidedBy    string
+	// The wallet form the sharer was sent (app-form): the hex SHA-256 of
+	// its exact bytes and the subject it was addressed to. An answer
+	// must commit to both. The form itself is not kept: it carries the
+	// requester's attributes.
+	FormDigest string
+	FormSub    string
 }
 
 // CreateLinkRequest persists a fresh pending request. The partial unique
@@ -56,11 +62,31 @@ func (s *Store) CreateLinkRequest(ctx context.Context, r *LinkRequest) error {
 	return nil
 }
 
+// LinkRequestByID returns a request by its id alone, for an answer that
+// arrives from the wallet with nothing but the id it was sent.
+func (s *Store) LinkRequestByID(ctx context.Context, id string) (*LinkRequest, error) {
+	row := s.DB.QueryRowContext(ctx, s.q(
+		`SELECT id, tenant_id, link_id, node_id, requester_sub, attributes, scope,
+		        status, grant_id, created_at, decided_at, decided_by,
+		        COALESCE(form_digest, ''), COALESCE(form_sub, '')
+		 FROM link_requests WHERE id = ?`), id)
+	return scanLinkRequest(row)
+}
+
+// SetLinkRequestForm records the form a pending request was sent as.
+func (s *Store) SetLinkRequestForm(ctx context.Context, tenantID, id, digest, sub string) error {
+	_, err := s.DB.ExecContext(ctx, s.q(
+		`UPDATE link_requests SET form_digest = ?, form_sub = ?
+		 WHERE tenant_id = ? AND id = ? AND status = 'pending'`), digest, sub, tenantID, id)
+	return err
+}
+
 // GetLinkRequest returns a request scoped to its tenant.
 func (s *Store) GetLinkRequest(ctx context.Context, tenantID, id string) (*LinkRequest, error) {
 	row := s.DB.QueryRowContext(ctx, s.q(
 		`SELECT id, tenant_id, link_id, node_id, requester_sub, attributes, scope,
-		        status, grant_id, created_at, decided_at, decided_by
+		        status, grant_id, created_at, decided_at, decided_by,
+		        COALESCE(form_digest, ''), COALESCE(form_sub, '')
 		 FROM link_requests WHERE tenant_id = ? AND id = ?`), tenantID, id)
 	return scanLinkRequest(row)
 }
@@ -71,7 +97,8 @@ func (s *Store) GetLinkRequest(ctx context.Context, tenantID, id string) (*LinkR
 func (s *Store) PendingLinkRequestFor(ctx context.Context, linkID, requesterSub string) (*LinkRequest, error) {
 	row := s.DB.QueryRowContext(ctx, s.q(
 		`SELECT id, tenant_id, link_id, node_id, requester_sub, attributes, scope,
-		        status, grant_id, created_at, decided_at, decided_by
+		        status, grant_id, created_at, decided_at, decided_by,
+		        COALESCE(form_digest, ''), COALESCE(form_sub, '')
 		 FROM link_requests WHERE link_id = ? AND requester_sub = ? AND status = 'pending'`),
 		linkID, requesterSub)
 	return scanLinkRequest(row)
@@ -81,7 +108,8 @@ func (s *Store) PendingLinkRequestFor(ctx context.Context, linkID, requesterSub 
 // "" for all), newest first.
 func (s *Store) ListLinkRequests(ctx context.Context, tenantID, status string) ([]*LinkRequest, error) {
 	query := `SELECT id, tenant_id, link_id, node_id, requester_sub, attributes, scope,
-	                 status, grant_id, created_at, decided_at, decided_by
+	                 status, grant_id, created_at, decided_at, decided_by,
+		        COALESCE(form_digest, ''), COALESCE(form_sub, '')
 	          FROM link_requests WHERE tenant_id = ?`
 	args := []any{tenantID}
 	if status != "" {
@@ -133,7 +161,7 @@ func scanLinkRequest(row rowScanner) (*LinkRequest, error) {
 	)
 	if err := row.Scan(&r.ID, &r.TenantID, &r.LinkID, &nodeID, &r.RequesterSub,
 		&r.Attributes, &r.Scope, &r.Status, &r.GrantID, &r.CreatedAt,
-		&decided, &r.DecidedBy); err != nil {
+		&decided, &r.DecidedBy, &r.FormDigest, &r.FormSub); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
 		}

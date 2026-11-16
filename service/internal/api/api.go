@@ -50,6 +50,9 @@ type Server struct {
 	Backend  objectstore.Backend
 	Grants   *grants.Repo
 	Verifier oidc.Verifier
+	// FormAnswers verifies the IdP's answer to a wallet form Drive sent
+	// (formanswer.go). Nil refuses every answer.
+	FormAnswers oidc.Verifier
 	MEK      []byte // single tenant MEK for `--dev`. Production: fetched per tenant from vault.
 
 	// Revoked rejects tokens whose IdP session was revoked (long-lived
@@ -128,6 +131,8 @@ type Server struct {
 	// notifier pushes wallet notifications via the control plane
 	// (share requests/decisions). Nil off-platform or before configure.
 	notifyMu sync.Mutex
+	// decideMu takes share-request decisions one at a time (formanswer.go).
+	decideMu sync.Mutex
 	notifier *notify.Client
 
 	// market talks to the attribute marketplace for the sharer who is
@@ -535,6 +540,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/public/links/preview", s.handlePublicLinkPreview)
 	mux.Handle("POST /v1/links/{linkID}/resolve", s.auth(s.handleResolveLink))
 	mux.Handle("POST /v1/links/{linkID}/redeem", s.auth(s.handleRedeemLink))
+	// The sharer's answer from the wallet: the IdP's answer token is the
+	// authority, not a Drive sign-in (formanswer.go).
+	mux.HandleFunc("POST /v1/link-requests/answer", s.handleFormAnswer)
 	mux.Handle("GET /v1/tenants/{tenantID}/link-requests", s.auth(s.handleListLinkRequests))
 	mux.Handle("POST /v1/tenants/{tenantID}/link-requests/{reqID}/{decision}", s.auth(s.handleDecideLinkRequest))
 	mux.Handle("GET /v1/tenants/{tenantID}/changes", s.auth(s.handleChangesV2))

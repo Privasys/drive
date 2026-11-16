@@ -196,6 +196,10 @@ func serve(args []string) error {
 		WebDir:   os.Getenv("DRIVE_WEB_DIR"),
 	}
 
+	if !*dev && pf.AppID != "" {
+		srv.FormAnswers = oidc.NewJWKSVerifier(issuer, api.FormAnswerAudience(pf.AppID)).WithType(api.FormAnswerType)
+	}
+
 	// Re-apply persisted config on restart: the manager re-arms the
 	// configure-then-freeze gate on every container load, so read the
 	// sealed config and re-lift the gate ourselves (no owner needed

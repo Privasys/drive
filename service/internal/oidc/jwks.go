@@ -29,6 +29,7 @@ import (
 type JWKSVerifier struct {
 	issuer   string
 	audience string // required aud; empty skips the check
+	typ      string // required JOSE typ (WithType); also demands ES256 and exp
 
 	client *http.Client
 
@@ -48,6 +49,14 @@ func NewJWKSVerifier(issuer, audience string) *JWKSVerifier {
 	}
 }
 
+// WithType returns a verifier that also requires the JOSE header typ, an
+// ES256 signature and an exp claim: for a purpose-made IdP token, such as a
+// wallet form answer, that must never pass for anything else.
+func (v *JWKSVerifier) WithType(typ string) *JWKSVerifier {
+	v.typ = typ
+	return v
+}
+
 // Verify validates the token's signature, issuer, audience and expiry.
 func (v *JWKSVerifier) Verify(ctx context.Context, token string) (*Identity, error) {
 	parts := strings.SplitN(token, ".", 3)
@@ -62,9 +71,14 @@ func (v *JWKSVerifier) Verify(ctx context.Context, token string) (*Identity, err
 	var header struct {
 		Alg string `json:"alg"`
 		Kid string `json:"kid"`
+		Typ string `json:"typ"`
 	}
 	if err := json.Unmarshal(headerJSON, &header); err != nil {
 		return nil, fmt.Errorf("oidc: header parse: %w", err)
+	}
+
+	if v.typ != "" && (header.Typ != v.typ || header.Alg != "ES256") {
+		return nil, fmt.Errorf("oidc: token type %q/%s, want %q/ES256", header.Typ, header.Alg, v.typ)
 	}
 
 	key, err := v.signingKey(ctx, header.Kid, header.Alg)
@@ -100,6 +114,8 @@ func (v *JWKSVerifier) Verify(ctx context.Context, token string) (*Identity, err
 		if time.Now().Unix() > int64(exp) {
 			return nil, errors.New("oidc: token expired")
 		}
+	} else if v.typ != "" {
+		return nil, errors.New("oidc: token has no exp")
 	}
 
 	id := &Identity{Issuer: v.issuer, Audience: v.audience, Roles: rolesClaim(claims), Claims: claims}
