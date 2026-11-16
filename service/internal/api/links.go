@@ -946,15 +946,7 @@ func (s *Server) redeemLinkFor(ctx context.Context, p *Principal, g *grants.Gran
 		if err != nil {
 			return linkRedeemOutcome{}, err
 		}
-		s.Notifier().Fire(g.CreatedBy, "share-request", map[string]any{
-			"tenant_id":     g.TenantID,
-			"request_id":    lr.ID,
-			"node_id":       g.NodeID,
-			"node_name":     n.Name,
-			"requester_sub": p.Sub,
-			"attributes":    presented,
-			"scope":         scopeStrings(g.Scope),
-		})
+		s.Notifier().Fire(g.CreatedBy, appMessage, requestMessage(g.TenantID, presented))
 		return linkRedeemOutcome{Status: "pending", RequestID: lr.ID}, nil
 	default:
 		return linkRedeemOutcome{}, errors.New("unknown link mode")
@@ -1045,19 +1037,12 @@ func (s *Server) handleDecideLinkRequest(w http.ResponseWriter, r *http.Request,
 		httpError(w, http.StatusConflict, errors.New("request already decided"))
 		return
 	}
-	nodeName := ""
-	if n, nerr := s.Store.GetNode(r.Context(), tenantID, lr.NodeID); nerr == nil {
-		nodeName = n.Name
-	}
 	if decision == "deny" {
 		if err := s.Store.DecideLinkRequest(r.Context(), tenantID, reqID, "denied", "", p.Sub); err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		s.Notifier().Fire(lr.RequesterSub, "share-decision", map[string]any{
-			"tenant_id": tenantID, "request_id": reqID,
-			"node_id": lr.NodeID, "node_name": nodeName, "status": "denied",
-		})
+		s.Notifier().Fire(lr.RequesterSub, appMessage, responseMessage())
 		writeJSON(w, http.StatusOK, map[string]any{"status": "denied"})
 		return
 	}
@@ -1071,10 +1056,7 @@ func (s *Server) handleDecideLinkRequest(w http.ResponseWriter, r *http.Request,
 		writeStoreError(w, err)
 		return
 	}
-	s.Notifier().Fire(lr.RequesterSub, "share-decision", map[string]any{
-		"tenant_id": tenantID, "request_id": reqID,
-		"node_id": lr.NodeID, "node_name": nodeName, "status": "approved",
-	})
+	s.Notifier().Fire(lr.RequesterSub, appMessage, responseMessage())
 	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "grant_id": g.ID})
 }
 
