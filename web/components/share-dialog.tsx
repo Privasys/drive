@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { SealedSession } from '@privasys/auth';
 import {
     createLink,
@@ -87,12 +87,9 @@ export function ShareDialog({
     const [links, setLinks] = useState<ShareLink[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    // The error sits at the top of a scrolling body: a sharer who clicked
-    // Copy link at the bottom would never see it, so it is brought into view.
-    const errorRef = useRef<HTMLDivElement>(null);
-    useEffect(() => {
-        if (error) errorRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }, [error]);
+    // A link that could not be created says so under Copy link, where the
+    // sharer is looking, not at the top of a body they have scrolled past.
+    const [linkError, setLinkError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
 
     // Link builder
@@ -145,20 +142,27 @@ export function ShareDialog({
     // a line under the picker says why. Memoised because a new list rebuilds
     // the picker.
     const allowed = offer !== null && offer !== 'unknown' ? offer.allowed : undefined;
+    const unsold = offer !== null && offer !== 'unknown' && offer.paid ? offer.unsold : undefined;
     const offered = useMemo(() => {
         if (!referential) return referential;
         // Only what the visitor's sign-in may ask for: the IdP keeps anything
         // else from the wallet, and a link requiring it could never be met.
+        // Nor a certified attribute this marketplace does not sell, which
+        // Drive would refuse when the link is created.
         const allow = allowed ? new Set(allowed) : null;
+        const notSold = new Set(unsold ?? []);
         return referential.filter(
-            (a) => (!allow || allow.has(a.key)) && (!paidBlocked || (!isBillable(a) && !isGovVerified(a)))
+            (a) =>
+                (!allow || allow.has(a.key)) &&
+                !notSold.has(a.key) &&
+                (!paidBlocked || (!isBillable(a) && !isGovVerified(a)))
         );
-    }, [referential, paidBlocked, allowed]);
+    }, [referential, paidBlocked, allowed, unsold]);
     useEffect(() => {
-        if (!offered || (!paidBlocked && !allowed)) return;
+        if (!offered || (!paidBlocked && !allowed && !unsold?.length)) return;
         const keep = new Set(offered.map((a) => a.key));
         setReqAttrs((cur) => (cur.every((k) => keep.has(k)) ? cur : cur.filter((k) => keep.has(k))));
-    }, [offered, paidBlocked, allowed]);
+    }, [offered, paidBlocked, allowed, unsold]);
 
     // What one visitor proving the chosen paid attributes costs the sharer,
     // when any is chosen and every price is known.
@@ -196,7 +200,7 @@ export function ShareDialog({
     // intent behind "Copy link" is to paste it somewhere next.
     const generate = async () => {
         setBusy(true);
-        setError(null);
+        setLinkError(null);
         setGenerated(null);
         setCopied(null);
         try {
@@ -212,7 +216,7 @@ export function ShareDialog({
             await copyLink(created, created.secret);
             await load();
         } catch (e) {
-            setError(e instanceof Error ? e.message : 'Could not create the link.');
+            setLinkError(e instanceof Error ? e.message : 'Could not create the link.');
         } finally {
             setBusy(false);
         }
@@ -287,7 +291,7 @@ export function ShareDialog({
 
                 <div className="max-h-[70vh] overflow-auto p-5">
                     {error && (
-                        <div ref={errorRef} className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-500">
+                        <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-500">
                             {error}
                         </div>
                     )}
@@ -406,6 +410,12 @@ export function ShareDialog({
                         >
                             <LinkIcon width={16} height={16} /> Copy link
                         </button>
+
+                        {linkError && (
+                            <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-500">
+                                {linkError}
+                            </div>
+                        )}
 
                         {generated && copied === generated.id && (
                             <div

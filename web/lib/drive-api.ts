@@ -547,7 +547,13 @@ export function createLink(
  * `reason` says why not when it cannot.
  */
 export type AttributeOffer = (
-    | { paid: true; prices: Map<string, number> }
+    | {
+          paid: true;
+          prices: Map<string, number>;
+          /** Certified attributes this marketplace does not sell: a link
+           * requiring one would be refused, so the dialog leaves them out. */
+          unsold: string[];
+      }
     | { paid: false; reason: 'no_marketplace' | 'no_payer' | 'no_referential' }
 ) & {
     /** What a visitor's sign-in may ask for at all (the sign-in client's
@@ -561,6 +567,7 @@ export async function getAttributeOffer(session: SealedSession, holderToken?: st
         reason?: 'no_marketplace' | 'no_payer' | 'no_referential';
         attributes?: { key?: string; price_credits?: number }[];
         allowed?: string[];
+        unsold?: string[];
     }>(
         session,
         'GET',
@@ -575,7 +582,7 @@ export async function getAttributeOffer(session: SealedSession, holderToken?: st
     for (const a of res.attributes ?? []) {
         if (a.key && typeof a.price_credits === 'number') prices.set(a.key, a.price_credits);
     }
-    return { paid: true, prices, allowed };
+    return { paid: true, prices, unsold: Array.isArray(res.unsold) ? res.unsold : [], allowed };
 }
 
 /** Owner: list a node's active links (no secrets). */

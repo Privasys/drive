@@ -146,6 +146,18 @@ func (s *Server) handleAttributeOffer(w http.ResponseWriter, r *http.Request, p 
 			return
 		}
 		out["paid"], out["attributes"] = true, attrs
+		// Certified attributes this marketplace does not sell (a registry
+		// seeded with only some of them): a link requiring one would be
+		// refused at creation, so the dialog leaves them out.
+		if ref, rerr := s.AttrRef.Load(r.Context()); rerr == nil {
+			sold := make(map[string]bool, len(attrs))
+			for _, a := range attrs {
+				sold[a.Key] = true
+			}
+			if unsold := ref.Unsold(func(k string) bool { return sold[k] }); len(unsold) > 0 {
+				out["unsold"] = unsold
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -156,6 +157,23 @@ func (r *Referential) ForMarketplaceKey(key string) (Attribute, bool) {
 	}
 	a, ok := r.byMarket[key]
 	return a, ok
+}
+
+// Unsold lists, sorted, the government-backed keys whose disclosure the
+// registry sells under a marketplace key that sold does not hold: a share
+// requiring one could not be paid for, so a dialog should not offer it.
+func (r *Referential) Unsold(sold func(marketKey string) bool) []string {
+	if r == nil {
+		return nil
+	}
+	var out []string
+	for k, a := range r.byKey {
+		if mk := a.MarketplaceKey(); a.GovBacked() && mk != "" && !sold(mk) {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Client fetches the referential from an issuer and holds it for a while.

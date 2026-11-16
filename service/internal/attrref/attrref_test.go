@@ -42,3 +42,24 @@ func TestAssuranceFallsBackToTheIdentityScope(t *testing.T) {
 		t.Fatal("an attribute the registry sells nothing for gained a row")
 	}
 }
+
+// A dialog leaves out a certified attribute the marketplace does not sell;
+// one the registry sells nothing for, and a self-asserted one, stay.
+func TestUnsold(t *testing.T) {
+	r, err := Parse([]byte(`{"attributes":[
+	{"key":"name","label":"Display Name","scope":"profile"},
+	{"key":"age_over_18","label":"18 or older","scope":"identity","assurance":"gov_verified","marketplace":{"key":"privasys:age_over_18","billable":true}},
+	{"key":"birthdate_id","label":"Date of Birth (ID)","scope":"identity","assurance":"gov_verified","marketplace":{"key":"privasys:birthdate","billable":true}},
+	{"key":"document_number","label":"Passport Number","scope":"identity","assurance":"gov_verified"}
+]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := r.Unsold(func(k string) bool { return k == "privasys:birthdate" })
+	if len(got) != 1 || got[0] != "age_over_18" {
+		t.Fatalf("unsold: %v", got)
+	}
+	if got := r.Unsold(func(string) bool { return true }); len(got) != 0 {
+		t.Fatalf("everything sold: %v", got)
+	}
+}

@@ -823,7 +823,7 @@ func TestSealedSharerPaysWithTheirHolderToken(t *testing.T) {
 	if o := offer(""); o["paid"] != false || o["reason"] != "no_payer" {
 		t.Fatalf("offer without a token: %v", o)
 	}
-	if o := offer(owner); o["paid"] != true || !strings.Contains(fmt.Sprint(o["attributes"]), "privasys:given_name") {
+	if o := offer(owner); o["paid"] != true || !strings.Contains(fmt.Sprint(o["attributes"]), "privasys:given_name") || o["unsold"] != nil {
 		t.Fatalf("offer with the holder token: %v", o)
 	}
 
