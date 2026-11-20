@@ -342,6 +342,12 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
+		if ref, ok := s.freshStartEmptyTenant(r.Context(), t.ID, existing, &req, p.Sub, rerr); ok {
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"status": "provisioned", "handle": ref.Handle, "fresh_start": true,
+			})
+			return
+		}
 		httpError(w, status, rerr)
 		return
 	}
@@ -502,4 +508,70 @@ func (s *Server) handleTenantKeyRevault(w http.ResponseWriter, r *http.Request, 
 		"status": "revaulted", "handle": ref.Handle,
 		"rewrapped_nodes": counts.Nodes, "rewrapped_versions": counts.Versions,
 	})
+}
+
+// errFreshStartNotEmpty aborts a fresh-start key switch the moment the
+// tenant turns out to hold anything the old key protects.
+var errFreshStartNotEmpty = errors.New("tenant holds content under its current key")
+
+// freshStartEmptyTenant gives an EMPTY tenant whose key can no longer be
+// read a new key, so its owner is not locked out for good. It covers a key
+// whose shares lived only on a constellation that has since been retired
+// (its owner never signed in to ride it off). An empty tenant loses
+// nothing: no node, name HMAC or file version depends on the old key. A
+// tenant holding anything keeps failing; recovering it is the owner's
+// revault (exported MEK) or nothing. Needs the caller's fresh grant
+// bundle; the new key is the next handle generation, so it never collides
+// with the lost one.
+func (s *Server) freshStartEmptyTenant(ctx context.Context, tenantID, existingRef string, req *tenantKeyRequest, sub string, loadErr error) (vaultmek.Ref, bool) {
+	if req.Grant == "" || len(req.Constellation.Endpoints) == 0 {
+		return vaultmek.Ref{}, false
+	}
+	empty, err := s.Store.TenantIsEmpty(ctx, tenantID)
+	if err != nil || !empty {
+		return vaultmek.Ref{}, false
+	}
+	old, err := vaultmek.ParseRef(existingRef)
+	if err != nil {
+		return vaultmek.Ref{}, false
+	}
+	handle, err := vaultmek.NextGeneration(old.Handle)
+	if err != nil {
+		return vaultmek.Ref{}, false
+	}
+	ref, err := s.MEKs.Provision(ctx, vaultmek.Bundle{
+		Grant:        req.Grant,
+		Handle:       handle,
+		Endpoints:    req.Constellation.Endpoints,
+		MrenclaveHex: req.Constellation.Mrenclave,
+		AttServer:    req.Constellation.AttestationServer,
+		AttToken:     req.AttestationToken,
+		Threshold:    req.Constellation.Threshold,
+	})
+	if err != nil {
+		log.Printf("tenantkey: fresh start for tenant %s refused: provision: %v", tenantID, err)
+		return vaultmek.Ref{}, false
+	}
+	newMek, err := s.MEKs.Load(ctx, ref)
+	if err != nil {
+		log.Printf("tenantkey: fresh start for tenant %s refused: load: %v", tenantID, err)
+		return vaultmek.Ref{}, false
+	}
+	// The switch re-checks emptiness inside its transaction: any row
+	// that appeared since aborts it with nothing committed.
+	refuse := func() error { return errFreshStartNotEmpty }
+	if _, err := s.Store.SwitchTenantKeys(ctx, tenantID, vaultmek.RefJSON(ref), store.TenantKeySwitch{
+		Node: func(*store.Node) error { return refuse() },
+		CEK:  func([]byte) ([]byte, error) { return nil, refuse() },
+	}); err != nil {
+		log.Printf("tenantkey: fresh start for tenant %s refused: switch: %v", tenantID, err)
+		return vaultmek.Ref{}, false
+	}
+	if cfg := s.CurrentConfig(); cfg != nil && cfg.Mode == config.ModeEscrowed {
+		if err := s.escrowWrapTenant(ctx, tenantID, newMek, sub); err != nil {
+			log.Printf("tenantkey: fresh start for tenant %s: escrow wrap: %v", tenantID, err)
+		}
+	}
+	log.Printf("tenantkey: fresh start for empty tenant %s: %s -> %s (old key unreadable: %v)", tenantID, old.Handle, ref.Handle, loadErr)
+	return ref, true
 }

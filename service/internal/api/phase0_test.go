@@ -229,12 +229,19 @@ type fakeMEKs struct {
 	// makes Regenerate fail (rotation must then be skipped silently).
 	regenerated []string
 	regenErr    error
+
+	// lost names a handle whose shares are gone (a retired constellation):
+	// Load fails for it alone.
+	lost string
 }
 
 func (f *fakeMEKs) Provision(_ context.Context, b vaultmek.Bundle) (vaultmek.Ref, error) {
 	return vaultmek.Ref{Handle: b.Handle, Endpoints: b.Endpoints, Threshold: b.Threshold}, nil
 }
-func (f *fakeMEKs) Load(context.Context, vaultmek.Ref) ([]byte, error) {
+func (f *fakeMEKs) Load(_ context.Context, ref vaultmek.Ref) ([]byte, error) {
+	if f.lost != "" && ref.Handle == f.lost {
+		return nil, errors.New("vaultmek: only 0/2 shares recovered: dial tcp: connection refused")
+	}
 	if f.loadErr != nil {
 		return nil, f.loadErr
 	}
@@ -1310,5 +1317,54 @@ func TestUpgradeApprovedInTheWallet(t *testing.T) {
 	resp, _ = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"g4"}`)
 	if resp.StatusCode != http.StatusBadGateway || len(begun) != 1 {
 		t.Fatalf("unreachable vault: %d, approvals %v", resp.StatusCode, begun)
+	}
+}
+
+// TestTenantKeyFreshStartEmptyTenant proves an empty tenant whose key's
+// shares are gone gets a new key at its owner's next sign-in, while a
+// tenant holding anything keeps failing (nothing is ever re-keyed blind).
+func TestTenantKeyFreshStartEmptyTenant(t *testing.T) {
+	mek := sha256.Sum256([]byte("vault-held-tenant-mek"))
+	fake := &fakeMEKs{mek: mek[:]}
+	ts := newFullServer(t, func(s *Server) { s.MEKs = fake })
+
+	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	bundle := `{"grant":"g","handle":"apps.privasys.org/x/data/y/mek/v1","constellation":{"endpoints":["v1:1","v2:2"],"mrenclave":"00","attestation_server":"as","threshold":2}}`
+	resp, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, bundle)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("provision: %d %s", resp.StatusCode, body)
+	}
+
+	// The constellation holding v1 is retired: v1 can never load again.
+	fake.lost = "apps.privasys.org/x/data/y/mek/v1"
+	fake.regenErr = errors.New("cannot read the current key")
+
+	// Without a grant bundle there is nothing to start afresh with.
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{}`)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("grantless rearm of a lost key: %d %s", resp.StatusCode, body)
+	}
+
+	// With one, the empty tenant gets the next generation.
+	moved := strings.Replace(bundle, `"mrenclave":"00"`, `"mrenclave":"11"`, 1)
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, moved)
+	if resp.StatusCode != http.StatusCreated || !strings.Contains(string(body), `"fresh_start":true`) ||
+		!strings.Contains(string(body), "mek/v2") {
+		t.Fatalf("empty tenant must start afresh on v2: %d %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, "POST", ts.URL+"/tools/write_file", devAuth,
+		fmt.Sprintf(`{"tenant_id":"%s","name":"after.txt","content_base64":"%s"}`,
+			tenant.ID, base64.StdEncoding.EncodeToString([]byte("new start"))))
+	if resp.StatusCode != 200 {
+		t.Fatalf("write after fresh start: %d %s", resp.StatusCode, body)
+	}
+
+	// Now the tenant holds a file: losing v2 must NOT re-key it.
+	fake.lost = "apps.privasys.org/x/data/y/mek/v2"
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, moved)
+	if resp.StatusCode != http.StatusBadGateway || strings.Contains(string(body), "fresh_start") {
+		t.Fatalf("a tenant with content must not start afresh: %d %s", resp.StatusCode, body)
 	}
 }

@@ -1050,3 +1050,16 @@ func (s *Store) ListTenantMekRefs(ctx context.Context) ([]TenantMekRefRow, error
 	}
 	return out, rows.Err()
 }
+
+// TenantIsEmpty reports whether a tenant holds nothing its MEK protects:
+// no nodes (files, folders, trashed or not) and no retained file versions.
+func (s *Store) TenantIsEmpty(ctx context.Context, tenantID string) (bool, error) {
+	var n int64
+	if err := s.DB.QueryRowContext(ctx, s.q(
+		`SELECT (SELECT COUNT(*) FROM nodes WHERE tenant_id = ?) +
+		        (SELECT COUNT(*) FROM file_versions WHERE tenant_id = ?)`),
+		tenantID, tenantID).Scan(&n); err != nil {
+		return false, err
+	}
+	return n == 0, nil
+}
