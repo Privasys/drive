@@ -287,7 +287,7 @@ func (s *Server) streamFull(w http.ResponseWriter, r *http.Request, p *Principal
 // (parent, name) uniqueness. rootID "" is the tenant root. Returns the
 // final node, or ErrNotFound if any segment is missing. Segments are
 // validated against traversal and NUL.
-func (s *Server) resolvePath(ctx context.Context, tenantID, rootID string, segs []string) (*store.Node, error) {
+func (s *Server) resolvePath(ctx context.Context, p *Principal, tenantID, rootID string, segs []string) (*store.Node, error) {
 	parent := rootID
 	var node *store.Node
 	for i, seg := range segs {
@@ -302,7 +302,7 @@ func (s *Server) resolvePath(ctx context.Context, tenantID, rootID string, segs 
 				break
 			}
 		}
-		if found == nil {
+		if found == nil || !s.mayPass(ctx, p, tenantID, found) {
 			return nil, store.ErrNotFound
 		}
 		if i < len(segs)-1 && found.Kind != store.NodeFolder {
@@ -312,6 +312,13 @@ func (s *Server) resolvePath(ctx context.Context, tenantID, rootID string, segs 
 		parent = found.ID
 	}
 	return node, nil
+}
+
+// mayPass reports whether a path walk that reached n from a node the
+// caller may read may go on: only a folder ACL override changes that on
+// the way down, so only an overridden node is checked.
+func (s *Server) mayPass(ctx context.Context, p *Principal, tenantID string, n *store.Node) bool {
+	return len(n.ACLOverride) == 0 || s.allowNode(ctx, p, tenantID, n.ID, grants.ScopeRead)
 }
 
 // splitPath validates and splits a slash path. Empty, "..", "." and NUL are
@@ -345,7 +352,7 @@ func (s *Server) handleStatPath(w http.ResponseWriter, r *http.Request, p *Princ
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
-	node, err := s.resolvePath(r.Context(), tenantID, root, segs)
+	node, err := s.resolvePath(r.Context(), p, tenantID, root, segs)
 	if err != nil {
 		httpError(w, storeErrorStatus(err), err)
 		return
@@ -394,7 +401,7 @@ func (s *Server) handleWritePath(w http.ResponseWriter, r *http.Request, p *Prin
 
 	// Existing leaf → conditional overwrite; absent → create (honouring
 	// If-None-Match: * as create-if-absent).
-	existing, rerr := s.resolvePath(r.Context(), tenantID, parent, []string{leaf})
+	existing, rerr := s.resolvePath(r.Context(), p, tenantID, parent, []string{leaf})
 	_, inmPresent, inmStar := parseIfMatch(r.Header.Get("If-None-Match"))
 	switch {
 	case rerr == nil:
@@ -439,6 +446,9 @@ func (s *Server) childFolder(ctx context.Context, p *Principal, tenantID, parent
 	}
 	for _, n := range kids {
 		if n.Name == name {
+			if !s.mayPass(ctx, p, tenantID, n) {
+				return "", store.ErrNotFound
+			}
 			if n.Kind != store.NodeFolder {
 				return "", store.ErrConflict
 			}

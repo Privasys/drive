@@ -354,7 +354,7 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request,
 	}
 	out := make([]conversationDoc, 0, len(convs))
 	for _, c := range convs {
-		if c.Kind != store.NodeFolder {
+		if c.Kind != store.NodeFolder || !s.aclAllows(r.Context(), tenantID, c.ID, p.Sub) {
 			continue
 		}
 		doc := s.conversationDocOf(r.Context(), tenantID, c)

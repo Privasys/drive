@@ -136,7 +136,7 @@ type changeJSON struct {
 // listChangesFiltered returns changes after since, optionally confined to
 // the subtree under root: a live node by ancestry; a deleted node by the
 // parent recorded on its change row (the node itself is gone).
-func (s *Server) listChangesFiltered(ctx context.Context, p *Principal, tenantID string, since int64, limit int, root string) ([]changeJSON, int, error) {
+func (s *Server) listChangesFiltered(ctx context.Context, p *Principal, tenantID string, since int64, limit int, root string, rd *nodeReader) ([]changeJSON, int, error) {
 	if !p.IsUser() && root == "" {
 		return nil, http.StatusForbidden, errors.New("forbidden")
 	}
@@ -150,6 +150,11 @@ func (s *Server) listChangesFiltered(ctx context.Context, p *Principal, tenantID
 	rows, err := s.Store.ListChanges(ctx, tenantID, since, limit)
 	if err != nil {
 		return nil, storeErrorStatus(err), err
+	}
+	if rd == nil {
+		if rd, err = s.newNodeReader(ctx, p, tenantID); err != nil {
+			return nil, http.StatusInternalServerError, err
+		}
 	}
 	out := make([]changeJSON, 0, len(rows))
 	for _, c := range rows {
@@ -165,6 +170,9 @@ func (s *Server) listChangesFiltered(ctx context.Context, p *Principal, tenantID
 			if !in {
 				continue
 			}
+		}
+		if !rd.changeVisible(c) {
+			continue
 		}
 		out = append(out, changeJSON{
 			Seq: c.Seq, NodeID: c.NodeID, Op: c.Op, Actor: c.Actor,
@@ -189,8 +197,18 @@ func (s *Server) handleChangesV2(w http.ResponseWriter, r *http.Request, p *Prin
 		wait = 60
 	}
 	deadline := time.Now().Add(time.Duration(wait) * time.Second)
-	for {
-		rows, status, err := s.listChangesFiltered(r.Context(), p, tenantID, since, limit, root)
+	// The reader is rebuilt every few seconds, so an override set while a
+	// request waits applies to it.
+	var rd *nodeReader
+	for i := 0; ; i++ {
+		if i%5 == 0 {
+			var err error
+			if rd, err = s.newNodeReader(r.Context(), p, tenantID); err != nil {
+				httpError(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+		rows, status, err := s.listChangesFiltered(r.Context(), p, tenantID, since, limit, root, rd)
 		if err != nil {
 			httpError(w, status, err)
 			return

@@ -67,6 +67,22 @@ type WorkspaceManifest struct {
 	Files   []WorkspaceFile `json:"files"`
 }
 
+// readableUsage keeps the usage entries the caller may see in full: each
+// size is a subtree total, so a subtree with a restricted folder the
+// caller may not open shows none.
+func (s *Server) readableUsage(ctx context.Context, p *Principal, tenantID string, in []usageEntry) []usageEntry {
+	if in == nil {
+		return nil
+	}
+	out := []usageEntry{}
+	for _, e := range in {
+		if s.aclAllows(ctx, tenantID, e.NodeID, p.Sub) && !s.subtreeHidesFrom(ctx, p, tenantID, e.NodeID) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // usageEntry is one line of the storage breakdown.
 type usageEntry struct {
 	NodeID string `json:"node_id"`
@@ -144,6 +160,9 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request, p *Princ
 	names := map[string]string{}
 	out := make([]appAccessEntry, 0, len(gs))
 	for _, g := range gs {
+		if !s.aclAllows(r.Context(), tenantID, g.NodeID, p.Sub) {
+			continue
+		}
 		var meta struct {
 			AppID  string `json:"app_id"`
 			Folder string `json:"folder"`

@@ -80,6 +80,9 @@ func (s *Server) handleSharedWithMe(w http.ResponseWriter, r *http.Request, p *P
 	}
 	out := make([]sharedItem, 0, len(gs))
 	for _, g := range gs {
+		if !s.grantHonoured(r.Context(), g, g.NodeID) {
+			continue
+		}
 		it := sharedItem{
 			GrantID: g.ID, TenantID: g.TenantID, NodeID: g.NodeID,
 			SharedBy: g.CreatedBy, WrappedCEK: g.Meta,

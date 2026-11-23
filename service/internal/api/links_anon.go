@@ -84,7 +84,8 @@ func (s *Server) linkPrincipal(r *http.Request, cred string) (*Principal, int, e
 // shared node and who it comes from. The link-credential counterpart of
 // resolve, which needs a sign-in.
 func (s *Server) handleViewLink(w http.ResponseWriter, r *http.Request, p *Principal) {
-	if !p.Link || p.Grant == nil || p.Grant.ID != r.PathValue("linkID") || !p.Grant.IsActive(time.Now().UTC()) {
+	if !p.Link || p.Grant == nil || p.Grant.ID != r.PathValue("linkID") || !p.Grant.IsActive(time.Now().UTC()) ||
+		!s.grantHonoured(r.Context(), p.Grant, p.Grant.NodeID) {
 		httpError(w, http.StatusNotFound, errLinkSecret)
 		return
 	}

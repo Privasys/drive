@@ -571,6 +571,9 @@ func (s *Server) verifyLink(ctx context.Context, linkID, secret string) (*grants
 	if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(meta.SecretHash)) != 1 {
 		return nil, nil, errLinkSecret
 	}
+	if !s.grantHonoured(ctx, g, g.NodeID) {
+		return nil, nil, errLinkSecret
+	}
 	return g, &meta, nil
 }
 
@@ -661,7 +664,8 @@ func (s *Server) handlePublicLinkPreview(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	g, err := s.Grants.Get(r.Context(), strings.TrimSpace(req.ID))
-	if err != nil || g.Subject != grants.SubjectLink || !g.IsActive(time.Now().UTC()) {
+	if err != nil || g.Subject != grants.SubjectLink || !g.IsActive(time.Now().UTC()) ||
+		!s.grantHonoured(r.Context(), g, g.NodeID) {
 		httpError(w, http.StatusNotFound, errLinkSecret)
 		return
 	}

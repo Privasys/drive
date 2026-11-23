@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/search"
 	"github.com/Privasys/drive/service/internal/store"
 )
@@ -74,6 +75,10 @@ func (s *Server) handleFinalizeConversation(w http.ResponseWriter, r *http.Reque
 		writeStoreError(w, err)
 		return
 	}
+	if !s.allowNode(r.Context(), p, tenantID, conv.ID, grants.ScopeWrite) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
+		return
+	}
 	doc := s.conversationDocOf(r.Context(), tenantID, conv)
 	if doc.TranscriptID == "" {
 		httpError(w, http.StatusBadRequest, errors.New("conversation has no transcript"))
@@ -90,7 +95,7 @@ func (s *Server) handleFinalizeConversation(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Resolve every provenance chip to live content; drop dead ones.
-	resolved := s.resolveChips(r.Context(), tenantID, req.Provenance)
+	resolved := s.resolveChips(r.Context(), p, tenantID, req.Provenance)
 
 	prompt := buildDigestPrompt(conv.Name, string(transcript), resolved)
 	body, gerr := chat.Complete(r.Context(), prompt, 2048)
@@ -130,7 +135,7 @@ func (s *Server) handleFinalizeConversation(w http.ResponseWriter, r *http.Reque
 
 // resolveChips resolves each chip to live content (node + optional
 // section anchor), deduped, dropping any that no longer exist.
-func (s *Server) resolveChips(ctx context.Context, tenantID string, chips []provChip) []resolvedChip {
+func (s *Server) resolveChips(ctx context.Context, p *Principal, tenantID string, chips []provChip) []resolvedChip {
 	seen := map[string]bool{}
 	var out []resolvedChip
 	for _, c := range chips {
@@ -139,6 +144,9 @@ func (s *Server) resolveChips(ctx context.Context, tenantID string, chips []prov
 		}
 		key := c.NodeID + "#" + c.SectionID
 		if seen[key] {
+			continue
+		}
+		if !s.allowNodeRead(ctx, p, tenantID, c.NodeID) {
 			continue
 		}
 		n, err := s.Store.GetNode(ctx, tenantID, c.NodeID)

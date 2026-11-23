@@ -218,6 +218,8 @@ GET /v1/tenants/{t}/changes?since=<seq>&root={root}&wait=60
 holds the request until something changes under the root or the wait
 elapses, and returns the rows (`seq`, node, parent, name, kind, rev).
 Deletions are attributed to the parent they were in.
+A folder delete removes its whole subtree: treat it as recursive, since
+the feed may carry only the folder's own row.
 
 ### Search inside the folder
 

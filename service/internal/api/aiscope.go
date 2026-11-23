@@ -35,7 +35,8 @@ func (s *Server) handleEnableAI(w http.ResponseWriter, r *http.Request, p *Princ
 	// A folder ACL override governs sharing too: a member the override
 	// excludes may not put the node in the AI scope.
 	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) ||
-		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) {
+		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) ||
+		s.subtreeHidesFrom(r.Context(), p, tenantID, nodeID) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
@@ -62,7 +63,8 @@ func (s *Server) handleDisableAI(w http.ResponseWriter, r *http.Request, p *Prin
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
 	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) ||
-		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) {
+		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) ||
+		s.subtreeHidesFrom(r.Context(), p, tenantID, nodeID) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
@@ -102,6 +104,9 @@ func (s *Server) handleListAIScope(w http.ResponseWriter, r *http.Request, p *Pr
 			allScoped = true
 			continue
 		}
+		if !s.aclAllows(r.Context(), tenantID, g.NodeID, p.Sub) {
+			continue
+		}
 		name := ""
 		if n, gerr := s.Store.GetNode(r.Context(), tenantID, g.NodeID); gerr == nil {
 			name = n.Name
@@ -130,7 +135,10 @@ func (s *Server) handleListAIScope(w http.ResponseWriter, r *http.Request, p *Pr
 // including ones created later, since the scope is recomputed per search.
 func (s *Server) handleEnableAIAll(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
-	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+	// The whole Drive includes every restricted folder: only a member
+	// every folder ACL override admits may switch it.
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) ||
+		s.subtreeHidesFrom(r.Context(), p, tenantID, "") {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
@@ -153,7 +161,8 @@ func (s *Server) handleEnableAIAll(w http.ResponseWriter, r *http.Request, p *Pr
 // per-directory grants (and the always-scoped Memory/) are unaffected.
 func (s *Server) handleDisableAIAll(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
-	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) ||
+		s.subtreeHidesFrom(r.Context(), p, tenantID, "") {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}

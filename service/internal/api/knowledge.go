@@ -128,7 +128,7 @@ func (s *Server) handleMCPAIScope(w http.ResponseWriter, r *http.Request, p *Pri
 	seen := map[string]bool{}
 	var folders []folder
 	add := func(id, name string, always bool) {
-		if id == "" || seen[id] {
+		if id == "" || seen[id] || !s.aclAllows(r.Context(), tenantID, id, p.Sub) {
 			return
 		}
 		seen[id] = true

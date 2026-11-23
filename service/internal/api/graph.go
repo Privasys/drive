@@ -59,6 +59,26 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request, p *Principa
 	if edges == nil {
 		edges = []store.GraphEdge{}
 	}
+	// Only what the caller may read: a folder ACL override hides its
+	// subtree here as it does everywhere else.
+	rd, err := s.newNodeReader(r.Context(), p, tenantID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	keptNodes := nodes[:0]
+	for _, n := range nodes {
+		if rd.readable(n.NodeID) {
+			keptNodes = append(keptNodes, n)
+		}
+	}
+	keptEdges := edges[:0]
+	for _, e := range edges {
+		if rd.readable(e.FromNode) && (e.ToNode == "" || rd.readable(e.ToNode)) {
+			keptEdges = append(keptEdges, e)
+		}
+	}
+	nodes, edges = keptNodes, keptEdges
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes, "edges": edges})
 }
 
@@ -75,8 +95,16 @@ func (s *Server) handleBacklinks(w http.ResponseWriter, r *http.Request, p *Prin
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
+	rd, err := s.newNodeReader(r.Context(), p, tenantID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
 	out := make([]map[string]any, 0, len(links))
 	for _, l := range links {
+		if !rd.readable(l.FromNode) {
+			continue
+		}
 		name := ""
 		if n, gerr := s.Store.GetNode(r.Context(), tenantID, l.FromNode); gerr == nil {
 			name = n.Name
@@ -106,15 +134,27 @@ func (s *Server) handleLint(w http.ResponseWriter, r *http.Request, p *Principal
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
+	rd, err := s.newNodeReader(r.Context(), p, tenantID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
 	deadOut := make([]map[string]any, 0, len(dead))
 	for _, l := range dead {
+		if !rd.readable(l.FromNode) {
+			continue
+		}
 		deadOut = append(deadOut, map[string]any{
 			"from_node": l.FromNode, "to_name": l.ToName, "kind": l.Kind,
 		})
 	}
-	if orphans == nil {
-		orphans = []string{}
+	keptOrphans := []string{}
+	for _, id := range orphans {
+		if rd.readable(id) {
+			keptOrphans = append(keptOrphans, id)
+		}
 	}
+	orphans = keptOrphans
 	writeJSON(w, http.StatusOK, map[string]any{
 		"dangling_links": deadOut, "orphan_nodes": orphans,
 	})

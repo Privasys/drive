@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Privasys/drive/service/internal/grants"
 	"github.com/Privasys/drive/service/internal/store"
 )
 
@@ -87,7 +88,7 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request, p *Prin
 	var total int64
 	files := make([]*store.Node, 0, len(kids))
 	for _, n := range kids {
-		if n.Kind == store.NodeFile {
+		if n.Kind == store.NodeFile && s.aclAllows(r.Context(), tenantID, n.ID, p.Sub) {
 			files = append(files, n)
 			total += n.PlainSize
 		}
@@ -147,6 +148,10 @@ func (s *Server) handleWriteMemory(w http.ResponseWriter, r *http.Request, p *Pr
 	root, err := s.ensureMemoryFolder(r.Context(), p, tenantID)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !s.allowNode(r.Context(), p, tenantID, root.ID, grants.ScopeWrite) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
 	// Merge-hygiene: surface overlapping memories (by shared summary

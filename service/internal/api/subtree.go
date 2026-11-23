@@ -13,7 +13,8 @@ import (
 func (s *Server) handleSubtreeStats(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !s.allowNodeRead(r.Context(), p, tenantID, nodeID) {
+	if !s.allowNodeRead(r.Context(), p, tenantID, nodeID) ||
+		s.subtreeHidesFrom(r.Context(), p, tenantID, nodeID) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}

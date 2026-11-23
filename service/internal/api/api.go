@@ -1307,9 +1307,18 @@ func (s *Server) handleTenantMetrics(w http.ResponseWriter, r *http.Request, p *
 	if series == nil {
 		series = []store.MetricsDay{}
 	}
-	if topNodes == nil {
-		topNodes = []store.MetricsNode{}
+	rd, err := s.newNodeReader(r.Context(), p, tenantID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
 	}
+	keptTop := []store.MetricsNode{}
+	for _, n := range topNodes {
+		if rd.readableLive(n.NodeID) {
+			keptTop = append(keptTop, n)
+		}
+	}
+	topNodes = keptTop
 	if subs == nil {
 		subs = []store.MetricsSub{}
 	}
@@ -1349,7 +1358,9 @@ func (s *Server) deleteNode(ctx context.Context, p *Principal, tenantID, nodeID 
 	if !p.IsUser() {
 		need = grants.ScopeDelete
 	}
-	if !s.allowNode(ctx, p, tenantID, nodeID, need) {
+	// A folder goes with its whole subtree: a restricted folder inside it
+	// must admit the caller too.
+	if !s.allowNode(ctx, p, tenantID, nodeID, need) || s.subtreeHidesFrom(ctx, p, tenantID, nodeID) {
 		return http.StatusForbidden, errors.New("forbidden")
 	}
 	n, err := s.Store.GetNode(ctx, tenantID, nodeID)
@@ -1539,7 +1550,17 @@ func (s *Server) listChanges(ctx context.Context, p *Principal, tenantID string,
 	if err != nil {
 		return nil, storeErrorStatus(err), err
 	}
-	return rows, http.StatusOK, nil
+	rd, err := s.newNodeReader(ctx, p, tenantID)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	kept := rows[:0]
+	for _, c := range rows {
+		if rd.changeVisible(c) {
+			kept = append(kept, c)
+		}
+	}
+	return kept, http.StatusOK, nil
 }
 
 func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request, p *Principal) {
@@ -1556,6 +1577,9 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request, p *Principa
 	limit := s.quotaLimit()
 	out := map[string]any{"used_bytes": used, "limit_bytes": limit, "unlimited": limit == 0}
 	if top, apps := s.quotaBreakdown(r.Context(), tenantID); top != nil {
+		// A folder the caller may not open shows no size.
+		top = s.readableUsage(r.Context(), p, tenantID, top)
+		apps = s.readableUsage(r.Context(), p, tenantID, apps)
 		out["breakdown"] = top
 		if apps != nil {
 			out["apps"] = apps

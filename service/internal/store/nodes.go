@@ -1064,6 +1064,47 @@ func (s *Store) TenantIsEmpty(ctx context.Context, tenantID string) (bool, error
 	return n == 0, nil
 }
 
+// NodeACL is one node's parent and its own ACL override. Has is set when
+// the node carries an override; Roles is what EffectiveACL would return
+// for it.
+type NodeACL struct {
+	Parent string
+	Roles  []string
+	Has    bool
+}
+
+// NodeACLTree returns every node of the tenant with its parent and ACL
+// override, so the overrides can be applied to many nodes at once.
+func (s *Store) NodeACLTree(ctx context.Context, tenantID string) (map[string]NodeACL, error) {
+	rows, err := s.DB.QueryContext(ctx, s.q(
+		`SELECT id, parent_id, acl_override FROM nodes WHERE tenant_id = ?`), tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]NodeACL{}
+	for rows.Next() {
+		var id string
+		var parent sql.NullString
+		var acl []byte
+		if err := rows.Scan(&id, &parent, &acl); err != nil {
+			return nil, err
+		}
+		e := NodeACL{Parent: parent.String}
+		if len(acl) > 0 {
+			var doc struct {
+				Roles []string `json:"roles"`
+			}
+			if err := json.Unmarshal(acl, &doc); err != nil {
+				return nil, fmt.Errorf("parse acl_override on %s: %w", id, err)
+			}
+			e.Roles, e.Has = doc.Roles, true
+		}
+		out[id] = e
+	}
+	return out, rows.Err()
+}
+
 // OverriddenFolders returns the ids of the tenant's folders that carry an
 // ACL override, so a whole-subtree read can check each one it would cover.
 func (s *Store) OverriddenFolders(ctx context.Context, tenantID string) ([]string, error) {

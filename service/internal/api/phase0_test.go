@@ -1460,3 +1460,125 @@ func TestFolderACLOverrideGovernsSharing(t *testing.T) {
 		t.Fatalf("owner share of the restricted folder: %d %s", resp.StatusCode, body)
 	}
 }
+
+func TestFolderACLOverrideHidesListings(t *testing.T) {
+	ts := newFullServer(t, nil)
+	owner := devAuth
+	contributor := "Bearer dev:contrib:c@x"
+	resp, body := doJSON(t, "POST", ts.URL+"/v1/tenants", owner, `{"kind":"enterprise","name":"Acme"}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create tenant: %d %s", resp.StatusCode, body)
+	}
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	base := ts.URL + "/v1/tenants/" + tenant.ID
+	if resp, _ = doJSON(t, "POST", base+"/members", owner,
+		`{"user_sub":"contrib","role":"contributor"}`); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("add member: %d", resp.StatusCode)
+	}
+	mkdir := func(name, parent string) string {
+		_, b := doJSON(t, "POST", base+"/folders", owner, fmt.Sprintf(`{"name":"%s","parent_id":"%s"}`, name, parent))
+		var n struct{ ID string }
+		_ = json.Unmarshal(b, &n)
+		return n.ID
+	}
+	dept := mkdir("dept", "")
+	finance := mkdir("finance", dept)
+	upload := func(parent, name string) string {
+		resp, b := doJSON(t, "POST", base+"/files?parent_id="+parent+"&name="+name, owner, "the plan")
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("upload %s: %d %s", name, resp.StatusCode, b)
+		}
+		var n struct{ ID string }
+		_ = json.Unmarshal(b, &n)
+		return n.ID
+	}
+	secret := upload(finance, "secret-plan.md")
+	upload(dept, "open-notes.md")
+	if resp, body = doJSON(t, "PUT", base+"/nodes/"+finance+"/acl", owner, `{"roles":["owner","admin"]}`); resp.StatusCode != 200 {
+		t.Fatalf("set acl: %d %s", resp.StatusCode, body)
+	}
+	if resp, body = doJSON(t, "POST", base+"/nodes/"+finance+"/ai-scope", owner, ""); resp.StatusCode >= 300 {
+		t.Fatalf("owner ai-scope: %d %s", resp.StatusCode, body)
+	}
+	if resp, body = doJSON(t, "DELETE", base+"/nodes/"+secret, owner, ""); resp.StatusCode >= 300 {
+		t.Fatalf("owner delete: %d %s", resp.StatusCode, body)
+	}
+	upload(finance, "secret-two.md")
+	// A folder deleted inside the restricted one leaves rows whose parents
+	// are gone; none of them may name what it held.
+	year := mkdir("2025", finance)
+	upload(year, "q-secret.md")
+	if resp, body = doJSON(t, "DELETE", base+"/nodes/"+year, owner, ""); resp.StatusCode >= 300 {
+		t.Fatalf("owner delete 2025: %d %s", resp.StatusCode, body)
+	}
+	// Memory/ restricted: a member it excludes may not write there.
+	if resp, body = doJSON(t, "POST", base+"/memory", owner, `{"name":"board-plan","body":"merger talks","summary":"merger talks"}`); resp.StatusCode >= 300 {
+		t.Fatalf("owner memory: %d %s", resp.StatusCode, body)
+	}
+	_, rb := doJSON(t, "GET", base+"/root", owner, "")
+	var rootKids []struct{ ID, Name string }
+	_ = json.Unmarshal(rb, &rootKids)
+	for _, k := range rootKids {
+		if k.Name == "Memory" {
+			if resp, body = doJSON(t, "PUT", base+"/nodes/"+k.ID+"/acl", owner, `{"roles":["owner"]}`); resp.StatusCode != 200 {
+				t.Fatalf("memory acl: %d %s", resp.StatusCode, body)
+			}
+		}
+	}
+	if resp, body = doJSON(t, "POST", base+"/memory", contributor, `{"name":"x","body":"merger","summary":"merger talks"}`); resp.StatusCode != http.StatusForbidden || strings.Contains(string(body), "board-plan") {
+		t.Errorf("memory write by the excluded member: %d %s", resp.StatusCode, body)
+	}
+
+	// Listings across the tenant name nothing inside the restricted folder,
+	// for the member it excludes, and still do for the owner.
+	for _, path := range []string{"/graph", "/lint", "/changes", "/ai-scope", "/quota"} {
+		_, ob := doJSON(t, "GET", base+path, owner, "")
+		resp, cb := doJSON(t, "GET", base+path, contributor, "")
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET %s by the member: %d %s", path, resp.StatusCode, cb)
+		}
+		leaks := []string{"secret-plan", "secret-two", "q-secret", "board-plan", finance}
+		if path == "/changes" {
+			// The restricted folder name shows where its parent does.
+			leaks = leaks[:4]
+		}
+		for _, leak := range leaks {
+			if strings.Contains(string(cb), leak) {
+				t.Errorf("GET %s shows %q to the excluded member: %s", path, leak, cb)
+			}
+		}
+		if path == "/graph" || path == "/changes" {
+			if !strings.Contains(string(ob), "secret-two") {
+				t.Errorf("GET %s hides the restricted file from the owner: %s", path, ob)
+			}
+			if !strings.Contains(string(cb), "open-notes") {
+				t.Errorf("GET %s hides an open file from the member: %s", path, cb)
+			}
+		}
+	}
+	// A path through the restricted folder reads as absent.
+	if resp, body = doJSON(t, "GET", base+"/path?path=dept/finance/secret-two.md", contributor, ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("stat through the restricted folder: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ = doJSON(t, "GET", base+"/path?path=dept/finance/secret-two.md", owner, ""); resp.StatusCode != 200 {
+		t.Errorf("owner stat: %d", resp.StatusCode)
+	}
+	if resp, body = doJSON(t, "PUT", base+"/path?path=dept/finance/new.md", contributor, "x"); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("write through the restricted folder: %d %s", resp.StatusCode, body)
+	}
+	// Whole-subtree figures and the whole-Drive AI switch are refused.
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/nodes/" + dept + "/subtree"},
+		{"DELETE", "/nodes/" + dept},
+		{"POST", "/ai-scope/all"},
+		{"DELETE", "/ai-scope/all"},
+	} {
+		if resp, body = doJSON(t, c.method, base+c.path, contributor, ""); resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s %s by the excluded member: %d %s", c.method, c.path, resp.StatusCode, body)
+		}
+	}
+	if resp, body = doJSON(t, "POST", base+"/ai-scope/all", owner, ""); resp.StatusCode >= 300 {
+		t.Errorf("owner whole-Drive AI: %d %s", resp.StatusCode, body)
+	}
+}
