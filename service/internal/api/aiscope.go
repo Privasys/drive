@@ -32,7 +32,10 @@ var alwaysScoped = []string{memoryRoot}
 func (s *Server) handleEnableAI(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+	// A folder ACL override governs sharing too: a member the override
+	// excludes may not put the node in the AI scope.
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) ||
+		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
@@ -58,7 +61,8 @@ func (s *Server) handleEnableAI(w http.ResponseWriter, r *http.Request, p *Princ
 func (s *Server) handleDisableAI(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) ||
+		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}

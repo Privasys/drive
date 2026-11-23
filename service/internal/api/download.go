@@ -54,7 +54,8 @@ func (s *Server) handleDownloadZip(w http.ResponseWriter, r *http.Request, p *Pr
 			writeStoreError(w, err)
 			return
 		}
-		if !s.allowNode(r.Context(), p, tenantID, id, grants.ScopeRead) {
+		if !s.allowNode(r.Context(), p, tenantID, id, grants.ScopeRead) ||
+			(n.Kind == store.NodeFolder && s.subtreeHidesFrom(r.Context(), p, tenantID, id)) {
 			httpError(w, http.StatusForbidden, errors.New("forbidden"))
 			return
 		}

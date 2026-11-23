@@ -300,7 +300,8 @@ func (s *Server) handleWorkspaceZip(w http.ResponseWriter, r *http.Request, p *P
 		return
 	}
 	// Pre-flight the auth once for the blobs folder; every blob inherits it.
-	if !s.allowNode(r.Context(), p, tenantID, blobs.ID, grants.ScopeRead) {
+	if !s.allowNode(r.Context(), p, tenantID, blobs.ID, grants.ScopeRead) ||
+		s.subtreeHidesFrom(r.Context(), p, tenantID, blobs.ID) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}

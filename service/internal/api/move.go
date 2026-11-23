@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"net/http"
+
+	"github.com/Privasys/drive/service/internal/grants"
 )
 
 type moveNodeRequest struct {
@@ -21,6 +23,11 @@ func (s *Server) handleMoveNode(w http.ResponseWriter, r *http.Request, p *Princ
 	var req moveNodeRequest
 	if err := readJSON(r, &req); err != nil {
 		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !s.allowNode(r.Context(), p, tenantID, nodeID, grants.ScopeWrite) ||
+		(req.ParentID != "" && !s.allowNode(r.Context(), p, tenantID, req.ParentID, grants.ScopeWrite)) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
 	if req.ParentID == nodeID {

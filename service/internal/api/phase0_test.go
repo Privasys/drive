@@ -1368,3 +1368,95 @@ func TestTenantKeyFreshStartEmptyTenant(t *testing.T) {
 		t.Fatalf("a tenant with content must not start afresh: %d %s", resp.StatusCode, body)
 	}
 }
+
+// A member an ACL override excludes may not open the folder by sharing it:
+// minting a grant to themselves, minting or listing links, or putting it in
+// the AI scope are all refused, and a self-grant never opens it.
+func TestFolderACLOverrideGovernsSharing(t *testing.T) {
+	ts := newFullServer(t, nil)
+	owner := devAuth
+	contributor := "Bearer dev:contrib:c@x"
+	resp, body := doJSON(t, "POST", ts.URL+"/v1/tenants", owner, `{"kind":"enterprise","name":"Acme"}`)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create tenant: %d %s", resp.StatusCode, body)
+	}
+	var tenant struct{ ID string }
+	_ = json.Unmarshal(body, &tenant)
+	base := ts.URL + "/v1/tenants/" + tenant.ID
+	if resp, _ = doJSON(t, "POST", base+"/members", owner,
+		`{"user_sub":"contrib","role":"contributor"}`); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("add member: %d", resp.StatusCode)
+	}
+	mkdir := func(name string) string {
+		_, b := doJSON(t, "POST", base+"/folders", owner, fmt.Sprintf(`{"name":"%s"}`, name))
+		var n struct{ ID string }
+		_ = json.Unmarshal(b, &n)
+		return n.ID
+	}
+	finance, shared := mkdir("finance"), mkdir("shared")
+	// dept holds a restricted folder of its own; q1 sits inside finance.
+	dept := mkdir("dept")
+	_, b := doJSON(t, "POST", base+"/folders", owner, fmt.Sprintf(`{"name":"payroll","parent_id":"%s"}`, dept))
+	var payroll struct{ ID string }
+	_ = json.Unmarshal(b, &payroll)
+	_, b = doJSON(t, "POST", base+"/folders", owner, fmt.Sprintf(`{"name":"q1","parent_id":"%s"}`, finance))
+	var q1 struct{ ID string }
+	_ = json.Unmarshal(b, &q1)
+	// A self-grant minted before the override must stop working once it is set.
+	if resp, body = doJSON(t, "POST", base+"/nodes/"+finance+"/grants", contributor,
+		`{"subject":"subject:contrib","scope":["read"]}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("pre-override self-grant: %d %s", resp.StatusCode, body)
+	}
+	for _, f := range []string{finance, payroll.ID} {
+		if resp, body = doJSON(t, "PUT", base+"/nodes/"+f+"/acl", owner, `{"roles":["owner","admin"]}`); resp.StatusCode != 200 {
+			t.Fatalf("set acl: %d %s", resp.StatusCode, body)
+		}
+	}
+	if resp, _ = doJSON(t, "GET", base+"/folders/"+finance, contributor, ""); resp.StatusCode != http.StatusForbidden {
+		t.Errorf("a self-grant minted before the override still opens finance: %d", resp.StatusCode)
+	}
+	// A self-grant on an unrestricted ancestor does not open the restricted child.
+	if resp, body = doJSON(t, "POST", base+"/nodes/"+dept+"/grants", contributor,
+		`{"subject":"subject:contrib","scope":["read"]}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("grant on dept: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ = doJSON(t, "GET", base+"/folders/"+payroll.ID, contributor, ""); resp.StatusCode != http.StatusForbidden {
+		t.Errorf("an ancestor self-grant opens payroll: %d", resp.StatusCode)
+	}
+	// Whole-subtree reads and moving content out are refused.
+	for _, c := range []struct{ method, path, body string }{
+		{"POST", "/exports", ""},
+		{"POST", "/download.zip", fmt.Sprintf(`{"node_ids":["%s"]}`, dept)},
+		{"POST", "/nodes/" + q1.ID + "/move", `{"parent_id":""}`},
+		{"POST", "/nodes/" + shared + "/move", fmt.Sprintf(`{"parent_id":"%s"}`, finance)},
+	} {
+		if resp, body = doJSON(t, c.method, base+c.path, contributor, c.body); resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s %s by an excluded member: %d %s", c.method, c.path, resp.StatusCode, body)
+		}
+	}
+
+	for _, c := range []struct{ method, path, body string }{
+		{"POST", "/nodes/" + finance + "/grants", `{"subject":"contrib","scope":["read"]}`},
+		{"POST", "/nodes/" + finance + "/links", `{"mode":"open","scope":["read"]}`},
+		{"GET", "/nodes/" + finance + "/links", ""},
+		{"POST", "/nodes/" + finance + "/ai-scope", ""},
+	} {
+		if resp, body = doJSON(t, c.method, base+c.path, contributor, c.body); resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s %s by an excluded member: %d %s", c.method, c.path, resp.StatusCode, body)
+		}
+	}
+	if resp, _ = doJSON(t, "GET", base+"/folders/"+finance, contributor, ""); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("restricted folder opened for the excluded member: %d", resp.StatusCode)
+	}
+
+	// Sharing an unrestricted folder still works for the contributor, and
+	// the owner can still share the restricted one.
+	if resp, body = doJSON(t, "POST", base+"/nodes/"+shared+"/grants", contributor,
+		`{"subject":"someone","scope":["read"]}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("contributor share of an open folder: %d %s", resp.StatusCode, body)
+	}
+	if resp, body = doJSON(t, "POST", base+"/nodes/"+finance+"/grants", owner,
+		`{"subject":"someone","scope":["read"]}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("owner share of the restricted folder: %d %s", resp.StatusCode, body)
+	}
+}

@@ -320,7 +320,8 @@ type setIndexingRequest struct {
 func (s *Server) handleSetIndexing(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !p.IsUser() || !s.canWrite(r.Context(), tenantID, p.Sub) {
+	if !p.IsUser() || !s.canWrite(r.Context(), tenantID, p.Sub) ||
+		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
@@ -358,7 +359,8 @@ func (s *Server) handleSetIndexing(w http.ResponseWriter, r *http.Request, p *Pr
 func (s *Server) handleSetSummaries(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !p.IsUser() || !s.canWrite(r.Context(), tenantID, p.Sub) {
+	if !p.IsUser() || !s.canWrite(r.Context(), tenantID, p.Sub) ||
+		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
@@ -398,6 +400,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request, p *Princip
 		httpError(w, status, err)
 		return
 	}
+	s.dropUnreadableHits(r.Context(), p, tenantID, &res)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -690,7 +693,8 @@ func (s *Server) allowNodeRead(ctx context.Context, p *Principal, tenantID, node
 		// The assistant enclave may read a node's content only when the user
 		// is a tenant member AND the node is inside the AI-scoped set, or
 		// the node is in a share the user opened through the assistant.
-		return (s.canRead(ctx, tenantID, p.Sub) && s.nodeInAIScope(ctx, tenantID, nodeID)) ||
+		return (s.canRead(ctx, tenantID, p.Sub) && s.aclAllows(ctx, tenantID, nodeID, p.Sub) &&
+			s.nodeInAIScope(ctx, tenantID, nodeID)) ||
 			s.assistantMayReadShared(ctx, p.Sub, tenantID, nodeID)
 	}
 	if !p.IsUser() {
@@ -756,7 +760,22 @@ func (s *Server) toolSearchSemantic(w http.ResponseWriter, r *http.Request, p *P
 		httpError(w, status, err)
 		return
 	}
+	if !p.IsAssistant() {
+		s.dropUnreadableHits(r.Context(), p, req.TenantID, &res)
+	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// dropUnreadableHits removes every hit on a node the caller may not read,
+// so a folder ACL override holds for search snippets as it does for reads.
+func (s *Server) dropUnreadableHits(ctx context.Context, p *Principal, tenantID string, res *searchResult) {
+	kept := res.Hits[:0]
+	for _, h := range res.Hits {
+		if s.allowNodeRead(ctx, p, tenantID, h.NodeID) {
+			kept = append(kept, h)
+		}
+	}
+	res.Hits = kept
 }
 
 // toolDocTree is get_doc_tree for agents.

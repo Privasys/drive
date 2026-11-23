@@ -26,7 +26,8 @@ type grantView struct {
 func (s *Server) handleNodePermissions(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) {
+	if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) ||
+		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}

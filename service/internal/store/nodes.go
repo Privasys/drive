@@ -1063,3 +1063,23 @@ func (s *Store) TenantIsEmpty(ctx context.Context, tenantID string) (bool, error
 	}
 	return n == 0, nil
 }
+
+// OverriddenFolders returns the ids of the tenant's folders that carry an
+// ACL override, so a whole-subtree read can check each one it would cover.
+func (s *Store) OverriddenFolders(ctx context.Context, tenantID string) ([]string, error) {
+	rows, err := s.DB.QueryContext(ctx, s.q(
+		`SELECT id FROM nodes WHERE tenant_id = ? AND acl_override IS NOT NULL`), tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}

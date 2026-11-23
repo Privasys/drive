@@ -16,8 +16,18 @@ import (
 // recipient independently of the tenant's membership ACL.
 func (s *Server) hasReadShare(ctx context.Context, tenantID, nodeID, sub string) bool {
 	readGrant := func(nid string) bool {
-		g, err := s.Grants.ActiveForSubjectOnNode(ctx, tenantID, nid, sub)
-		return err == nil && g != nil && (g.HasScope(grants.ScopeRead) || g.HasScope(grants.ScopeWrite))
+		// Every active grant counts: one the overrides do not honour must
+		// not hide another that they do.
+		gs, err := s.Grants.ActiveAllForSubjectOnNode(ctx, tenantID, nid, sub)
+		if err != nil {
+			return false
+		}
+		for _, g := range gs {
+			if (g.HasScope(grants.ScopeRead) || g.HasScope(grants.ScopeWrite)) && s.grantHonoured(ctx, g, nodeID) {
+				return true
+			}
+		}
+		return false
 	}
 	if nodeID == "" {
 		return readGrant("")

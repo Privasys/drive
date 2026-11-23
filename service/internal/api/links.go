@@ -163,7 +163,10 @@ type createLinkResponse struct {
 func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+	// A folder ACL override governs sharing too: a member the override
+	// excludes may not mint a link on the node.
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) ||
+		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
@@ -463,7 +466,10 @@ type linkView struct {
 func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+	// A folder ACL override governs sharing too: a member the override
+	// excludes may not list the node's links or their secrets.
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) ||
+		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
@@ -734,7 +740,8 @@ func (s *Server) handleRearmLinkBilling(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	g, err := s.Grants.Get(r.Context(), r.PathValue("linkID"))
-	if err != nil || g.TenantID != tenantID || g.Subject != grants.SubjectLink || !g.IsActive(time.Now().UTC()) {
+	if err != nil || g.TenantID != tenantID || g.Subject != grants.SubjectLink || !g.IsActive(time.Now().UTC()) ||
+		!s.aclAllows(r.Context(), tenantID, g.NodeID, p.Sub) {
 		httpError(w, http.StatusNotFound, errLinkSecret)
 		return
 	}
@@ -1032,6 +1039,9 @@ func (s *Server) handleListLinkRequests(w http.ResponseWriter, r *http.Request, 
 	}
 	out := make([]linkRequestView, 0, len(rs))
 	for _, lr := range rs {
+		if !s.aclAllows(r.Context(), tenantID, lr.NodeID, p.Sub) {
+			continue
+		}
 		var attrs map[string]string
 		// Past the retention the sweep clears them; never show them meanwhile.
 		if time.Since(lr.CreatedAt) < requestDetailsRetention {
@@ -1065,6 +1075,10 @@ func (s *Server) handleDecideLinkRequest(w http.ResponseWriter, r *http.Request,
 	lr, err := s.Store.GetLinkRequest(r.Context(), tenantID, reqID)
 	if err != nil {
 		writeStoreError(w, err)
+		return
+	}
+	if !s.aclAllows(r.Context(), tenantID, lr.NodeID, p.Sub) {
+		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
 	status, grantID, err := s.decideLinkRequest(r.Context(), lr, decision, p.Sub)

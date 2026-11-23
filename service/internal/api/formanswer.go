@@ -77,7 +77,7 @@ func (s *Server) handleFormAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Still allowed to share in that drive (they may have left it since).
-	if !s.canShare(r.Context(), lr.TenantID, id.Sub) {
+	if !s.canShare(r.Context(), lr.TenantID, id.Sub) || !s.aclAllows(r.Context(), lr.TenantID, lr.NodeID, id.Sub) {
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}

@@ -277,7 +277,19 @@ func (s *Server) assistantSearch(ctx context.Context, sub, personalTenant, q str
 		shares = kept
 	}
 	if len(shares) == 0 {
-		return s.semanticSearchScoped(ctx, personalTenant, q, topK)
+		res, status, err := s.semanticSearchScoped(ctx, personalTenant, q, topK)
+		if err != nil {
+			return res, status, err
+		}
+		// The same folder ACL filter as the merged path below.
+		kept := res.Hits[:0]
+		for _, h := range res.Hits {
+			if s.aclAllows(ctx, personalTenant, h.NodeID, sub) {
+				kept = append(kept, h)
+			}
+		}
+		res.Hits = kept
+		return res, status, nil
 	}
 
 	emb := s.activeEmbedder()
@@ -321,6 +333,18 @@ func (s *Server) assistantSearch(ctx context.Context, sub, personalTenant, q str
 		}
 		hits = append(hits, hs...)
 	}
+	// Folder ACL overrides hold for the acting user in every tenant: in
+	// their own drive through their role, in a shared one through the
+	// share they hold (hasReadShare honours the overrides too).
+	kept := hits[:0]
+	for _, h := range hits {
+		tid := tenantOf[h.NodeID]
+		if (tid == personalTenant && s.aclAllows(ctx, tid, h.NodeID, sub)) ||
+			(tid != personalTenant && s.hasReadShare(ctx, tid, h.NodeID, sub)) {
+			kept = append(kept, h)
+		}
+	}
+	hits = kept
 	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
 	if len(hits) > limit {
 		hits = hits[:limit]

@@ -53,7 +53,7 @@ type walkedFile struct {
 
 // walkFiles lists every file under root (depth-first, folders recursed)
 // with root-relative slash paths. root "" is the tenant root.
-func (s *Server) walkFiles(ctx context.Context, tenantID, root string) ([]walkedFile, error) {
+func (s *Server) walkFiles(ctx context.Context, p *Principal, tenantID, root string) ([]walkedFile, error) {
 	var out []walkedFile
 	var rec func(parent, prefix string) error
 	rec = func(parent, prefix string) error {
@@ -67,6 +67,11 @@ func (s *Server) walkFiles(ctx context.Context, tenantID, root string) ([]walked
 				rel = prefix + "/" + n.Name
 			}
 			if n.Kind == store.NodeFolder {
+				// A folder with an ACL override the caller may not pass is
+				// skipped with its subtree.
+				if len(n.ACLOverride) > 0 && !s.allowNode(ctx, p, tenantID, n.ID, grants.ScopeRead) {
+					continue
+				}
 				if err := rec(n.ID, rel); err != nil {
 					return err
 				}
@@ -202,7 +207,7 @@ func (s *Server) toolGrep(w http.ResponseWriter, r *http.Request, p *Principal) 
 	}
 	defer release()
 
-	files, err := s.walkFiles(ctx, req.TenantID, req.Root)
+	files, err := s.walkFiles(ctx, p, req.TenantID, req.Root)
 	if err != nil {
 		httpError(w, storeErrorStatus(err), err)
 		return
@@ -357,7 +362,7 @@ func (s *Server) toolGlob(w http.ResponseWriter, r *http.Request, p *Principal) 
 		httpError(w, http.StatusForbidden, errors.New("forbidden"))
 		return
 	}
-	files, err := s.walkFiles(ctx, req.TenantID, req.Root)
+	files, err := s.walkFiles(ctx, p, req.TenantID, req.Root)
 	if err != nil {
 		httpError(w, storeErrorStatus(err), err)
 		return

@@ -1421,7 +1421,10 @@ type createGrantRequest struct {
 func (s *Server) handleCreateGrant(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
 	nodeID := r.PathValue("nodeID")
-	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+	// A folder ACL override governs sharing too: a member the override
+	// excludes may not mint a grant on the node.
+	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) ||
+		!s.aclAllows(r.Context(), tenantID, nodeID, p.Sub) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -1474,6 +1477,11 @@ func (s *Server) handleRevokeGrant(w http.ResponseWriter, r *http.Request, p *Pr
 	tenantID := r.PathValue("tenantID")
 	grantID := r.PathValue("grantID")
 	if !p.IsUser() || !s.canShare(r.Context(), tenantID, p.Sub) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if g, err := s.Grants.Get(r.Context(), grantID); err == nil && g.TenantID == tenantID &&
+		!s.aclAllows(r.Context(), tenantID, g.NodeID, p.Sub) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -1575,7 +1583,8 @@ type exportRequest struct {
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, p *Principal) {
 	tenantID := r.PathValue("tenantID")
-	if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) {
+	if !p.IsUser() || !s.canRead(r.Context(), tenantID, p.Sub) ||
+		s.subtreeHidesFrom(r.Context(), p, tenantID, "") {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -1664,7 +1673,8 @@ func (s *Server) allowNode(ctx context.Context, p *Principal, tenantID, nodeID s
 		if need != grants.ScopeRead {
 			return false
 		}
-		return (s.canRead(ctx, tenantID, p.Sub) && s.nodeInAIScope(ctx, tenantID, nodeID)) ||
+		return (s.canRead(ctx, tenantID, p.Sub) && s.aclAllows(ctx, tenantID, nodeID, p.Sub) &&
+			s.nodeInAIScope(ctx, tenantID, nodeID)) ||
 			s.assistantMayReadShared(ctx, p.Sub, tenantID, nodeID)
 	}
 	if p.IsUser() {
@@ -1696,7 +1706,7 @@ func (s *Server) allowNode(ctx context.Context, p *Principal, tenantID, nodeID s
 		return false
 	}
 	ok, err := s.Store.IsDescendantOrSelf(ctx, tenantID, p.Grant.NodeID, nodeID)
-	return err == nil && ok
+	return err == nil && ok && s.grantHonoured(ctx, p.Grant, nodeID)
 }
 
 // aclAllows applies enterprise folder ACL overrides: if the nearest

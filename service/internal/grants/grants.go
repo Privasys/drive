@@ -197,6 +197,16 @@ func (r *Repo) Revoke(ctx context.Context, tenantID, id string) error {
 // empty nodeID means the tenant-wide grant (stored as NULL node_id,
 // e.g. an escrowed recovery), matched with IS NULL.
 func (r *Repo) ActiveForSubjectOnNode(ctx context.Context, tenantID, nodeID, subject string) (*Grant, error) {
+	gs, err := r.ActiveAllForSubjectOnNode(ctx, tenantID, nodeID, subject)
+	if err != nil || len(gs) == 0 {
+		return nil, err
+	}
+	return gs[0], nil
+}
+
+// ActiveAllForSubjectOnNode is ActiveForSubjectOnNode returning every
+// active grant, for a caller that must weigh each one.
+func (r *Repo) ActiveAllForSubjectOnNode(ctx context.Context, tenantID, nodeID, subject string) ([]*Grant, error) {
 	nodeClause := "node_id = ?"
 	args := []any{tenantID, nodeID, SubjectUser + subject}
 	if nodeID == "" {
@@ -213,16 +223,17 @@ func (r *Repo) ActiveForSubjectOnNode(ctx context.Context, tenantID, nodeID, sub
 	}
 	defer rows.Close()
 	now := r.NowFn()
+	var out []*Grant
 	for rows.Next() {
 		g, serr := scanGrant(rows)
 		if serr != nil {
 			return nil, serr
 		}
 		if g.IsActive(now) {
-			return g, nil
+			out = append(out, g)
 		}
 	}
-	return nil, rows.Err()
+	return out, rows.Err()
 }
 
 // ActiveRawSubjectOnNode is ActiveForSubjectOnNode with the subject used
