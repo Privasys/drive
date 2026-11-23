@@ -21,7 +21,7 @@ func TestAssistantFolderFilterNarrowsTheAIScope(t *testing.T) {
 	t.Cleanup(ts.Close)
 	const owner = "user-kf"
 	const secret = "assistant-shared-secret"
-	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign, AssistantEnclaveToken: secret})
+	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign, AssistantEnclaveMeasurement: secret})
 
 	code, b := doReq(t, bearerReq(t, "POST", base.URL+"/v1/tenants", owner, `{"kind":"user","name":"Owner"}`))
 	if code != 201 {

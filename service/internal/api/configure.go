@@ -124,11 +124,10 @@ type configureRequest struct {
 	// the MEK_org vault reference and the recovery policy.
 	OrgMEKRef *string                `json:"org_mek_ref"`
 	Recovery  *config.RecoveryPolicy `json:"recovery"`
-	// Assistant-enclave RAG gate (§8.7 RAG-in-enclave): the interim shared
-	// secret and the accepted assistant workload set — a comma-separated
+	// Assistant-enclave RAG gate (§8.7 RAG-in-enclave): the accepted
+	// assistant workload set, a comma-separated
 	// list of app ids (OID 3.6) or code hashes (OID 3.2), one entry per
 	// assistant enclave (confidential-ai, the Privasys Harness).
-	AssistantEnclaveToken       *string `json:"assistant_enclave_token"`
 	AssistantEnclaveMeasurement *string `json:"assistant_enclave_measurement"`
 }
 
@@ -193,9 +192,6 @@ func (req *configureRequest) overlay(cur *config.Config) *config.Config {
 	}
 	if req.Recovery != nil {
 		cfg.Recovery = req.Recovery
-	}
-	if req.AssistantEnclaveToken != nil {
-		cfg.AssistantEnclaveToken = *req.AssistantEnclaveToken
 	}
 	if req.AssistantEnclaveMeasurement != nil {
 		cfg.AssistantEnclaveMeasurement = *req.AssistantEnclaveMeasurement

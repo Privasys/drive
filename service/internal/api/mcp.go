@@ -18,7 +18,7 @@ import (
 // model does not know Drive tenant ids, so the shim resolves the acting
 // user's personal tenant from the authenticated principal and injects it
 // before delegating to the existing tool handlers. Auth + AI-scope
-// confinement are the same as the /tools/* surface (see verifyAssistantEnclave
+// confinement are the same as the /tools/* surface (see verifyAttestedAssistant
 // and the IsAssistant gates).
 
 // mcpTool is one catalogue entry advertised to the model.

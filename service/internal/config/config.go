@@ -162,22 +162,13 @@ type Config struct {
 	// a folder opts out with no_summaries. Needs chat_model.
 	SummariseOnIngest bool `json:"summarise_on_ingest,omitempty"`
 
-	// AssistantEnclaveToken gates the "assistant enclave acting for a user"
-	// inbound path (§8.7 RAG-in-enclave): the confidential-AI enclave calls
-	// Drive's read-only RAG tools (search_semantic assistant-scoped,
-	// read_section, read_file, get_memory, get_folder_tree) on behalf of the
-	// signed-in user. INTERIM app-layer gate — a shared secret the enclave
-	// presents as `Authorization: Assistant <token>` alongside
-	// `X-Privasys-On-Behalf-Of: <sub>`. FINAL: replaced by the
-	// enclave-os-injected, stripped X-Privasys-Peer-Measurement verified
-	// against AssistantEnclaveMeasurement (inbound mutual RA-TLS). Empty
-	// disables the path (fail closed). Part of the attested configuration
-	// users can read via /status.
-	AssistantEnclaveToken string `json:"assistant_enclave_token,omitempty"`
-	// AssistantEnclaveMeasurement is the confidential-AI workload identity
-	// (OID 3.6 app id / 3.2 code hash) the FINAL mutual-RA-TLS gate will
-	// require of the caller. Recorded now so /status can disclose the intended
-	// peer; not yet enforced (see AssistantEnclaveToken).
+	// AssistantEnclaveMeasurement is the set of assistant enclaves accepted
+	// on the "assistant enclave acting for a user" inbound path (§8.7
+	// RAG-in-enclave): a comma-separated list of app ids (OID 3.6) or code
+	// hashes (OID 3.2). The caller must arrive over inbound mutual RA-TLS and
+	// its enclave-os-verified identity must match an entry. Empty disables
+	// the path (fail closed). Part of the attested configuration users can
+	// read via /status.
 	AssistantEnclaveMeasurement string `json:"assistant_enclave_measurement,omitempty"`
 
 	// Instance object backend — the store for the encrypted chunk bodies

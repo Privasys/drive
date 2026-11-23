@@ -82,7 +82,7 @@ out keeps its value) but the mode must always be restated.
 | `rerank_model` | e.g. `qwen3-reranker-06b` | Rerank leg. When set, semantic search recalls up to 50 candidates by vector and returns the fleet cross-encoder's top hits (`reranked: true`, `score` in [0,1], `vector_score` kept). A rerank failure falls back to vector order; empty keeps vector order. |
 | `chat_model` | e.g. `qwen36-35b-a3b-fp8` | Fleet chat model for conversation digests and, with `summarise_on_ingest`, section summaries. Same host and pin as embeddings. |
 | `summarise_on_ingest` | boolean | One chat call per section when a file is indexed: section summaries and a document description for the tree tools. File plaintext then reaches the pinned fleet at ingestion time, not only at query time, which is why the flag is part of the attested configuration and disclosed via `/status`. A folder opts out with `PUT /v1/tenants/{t}/nodes/{id}/summaries {"enabled": false}` (inherited by its subtree). |
-| `assistant_enclave_measurement`, `assistant_enclave_token` | | The assistant identity the RAG-in-enclave gate requires. |
+| `assistant_enclave_measurement` | app ids or code hashes, comma-separated | The assistant enclaves accepted on the RAG-in-enclave path. The caller must arrive over mutual RA-TLS, be listed in the app's allowed callers, and match an entry. |
 
 Configure via the portal Configure tab, or over RA-TLS:
 `privasys apps configure privasys-drive --set mode=sovereign`.

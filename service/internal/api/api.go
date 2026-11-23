@@ -10,7 +10,6 @@ import (
 
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -196,7 +195,7 @@ const (
 
 // onBehalfOfHeader names the acting user on the assistant-enclave path
 // (§8.7 RAG-in-enclave). It is trusted ONLY once the assistant-enclave
-// credential has been verified (verifyAssistantEnclave); on every other
+// attested identity has been verified (verifyAttestedAssistant); on every other
 // path the acting subject comes from the caller's own identity, so a
 // forged value here is ignored.
 const onBehalfOfHeader = "X-Privasys-On-Behalf-Of"
@@ -568,7 +567,8 @@ func (s *Server) Routes() http.Handler {
 }
 
 // auth authenticates the caller: `Bearer <oidc token>` for users,
-// `AppGrant <envelope>.<sig>` for third-party apps holding a grant, or
+// `AppGrant <envelope>.<sig>` for third-party apps holding a grant, the
+// attested identity of an assistant enclave acting for a user, or
 // the relay-asserted `X-Privasys-Sub` for a session-relay sealed
 // session (browser / wallet). The sealed identity is trustworthy
 // because the enclave-os middleware in front of the app strips any
@@ -595,13 +595,6 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 			p, err := s.verifyAppGrant(r, strings.TrimSpace(strings.TrimPrefix(h, "AppGrant ")))
 			if err != nil {
 				http.Error(w, "invalid app grant: "+err.Error(), http.StatusUnauthorized)
-				return
-			}
-			next(w, r, p)
-		case strings.HasPrefix(h, "Assistant "):
-			p, err := s.verifyAssistantEnclave(r, strings.TrimSpace(strings.TrimPrefix(h, "Assistant ")))
-			if err != nil {
-				http.Error(w, "invalid assistant credential: "+err.Error(), http.StatusUnauthorized)
 				return
 			}
 			next(w, r, p)
@@ -634,17 +627,17 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 // persisted grant row — active, same tenant/node, and the signing key
 // matches the one the grant was bound to at creation.
 //
-// The key is the credential. A grant is a holder-of-key capability whose
-// binding the data owner fixed at approval time, after verifying the
-// recipient enclave: the wallet is the attestation-verification point and
-// Drive the enforcement point, which is why the subject string alone is
-// never what admits a caller. When the caller ALSO arrives over an attested
-// client cert, enclave-os republishes its verified identity as
+// A grant is a holder-of-key capability whose binding the data owner fixed
+// at approval time, after verifying the recipient enclave: the wallet is the
+// attestation-verification point and Drive the enforcement point. The key
+// alone never admits a caller. An app credential is honoured only from an
+// attested caller: one that presented a TEE-bound client certificate, which
+// enclave-os verified against this app's allowed callers and republished as
 // X-Privasys-Peer-* (stripped from every unverified request, so unforgeable
-// inside the enclave) and the grant's subject must name that workload — a
-// key that leaked to another app, or a grant approved for one app and
-// presented by another, is refused. An unattested caller keeps the
-// key-only check; the attested check is a belt on top of the braces.
+// inside the enclave). The grant's subject must name that workload, so a
+// key that leaked out of its enclave, or a grant approved for one app and
+// presented by another, is refused. Users need none of this: their own
+// credential (bearer or sealed session) is checked on its own terms.
 func (s *Server) verifyAppGrant(r *http.Request, tok string) (*Principal, error) {
 	ctx := r.Context()
 	env, err := grants.ParseToken(tok)
@@ -682,13 +675,14 @@ func (s *Server) verifyAppGrant(r *http.Request, tok string) (*Principal, error)
 	if err != nil || !bytes.Equal(bound, presented) {
 		return nil, errors.New("signing key does not match the grant binding")
 	}
-	if strings.EqualFold(strings.TrimSpace(r.Header.Get(peerVerifiedHeader)), "true") {
-		want := grants.NormaliseAppSubject(g.Subject)
-		appID := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(r.Header.Get(peerAppIDHeader))), "-", "")
-		digest := strings.ToLower(strings.TrimSpace(r.Header.Get(peerImageDigestHeader)))
-		if want == "" || (want != appID && want != digest) {
-			return nil, errors.New("attested caller is not the app this grant was approved for")
-		}
+	if !peerVerified(r) {
+		return nil, errAppNotAttested
+	}
+	want := grants.NormaliseAppSubject(g.Subject)
+	appID := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(r.Header.Get(peerAppIDHeader))), "-", "")
+	digest := strings.ToLower(strings.TrimSpace(r.Header.Get(peerImageDigestHeader)))
+	if want == "" || (want != appID && want != digest) {
+		return nil, errors.New("attested caller is not the app this grant was approved for")
 	}
 	// A files.ai grant makes the app the holder's assistant over their AI
 	// scope, acting for the holder who minted it: every assistant gate
@@ -700,18 +694,21 @@ func (s *Server) verifyAppGrant(r *http.Request, tok string) (*Principal, error)
 	return &Principal{Sub: g.Subject, Via: viaAppGrant, Grant: g, Env: env}, nil
 }
 
-// verifyAssistantEnclave authenticates the confidential-AI enclave acting
-// for a user (§8.7 RAG-in-enclave). INTERIM app-layer gate: a shared secret
-// (config AssistantEnclaveToken) proves the caller is the configured
-// assistant enclave, and the acting user is named by the
-// X-Privasys-On-Behalf-Of header. FINAL: the shared secret is replaced by
-// the enclave-os-injected, stripped X-Privasys-Peer-Measurement header,
-// verified against the pinned confidential-AI measurement over inbound
-// mutual RA-TLS. The principal it returns may run only the read-only,
-// AI-scoped RAG surface (see IsAssistant).
-// verifyAttestedAssistant authenticates the confidential-AI enclave from its
-// ATTESTED IDENTITY rather than a shared secret — the FINAL form of the §8.7
-// path described above, and the reason no per-tool credential has to exist.
+// errAppNotAttested refuses an app credential that did not arrive from an
+// attested caller.
+var errAppNotAttested = errors.New("an app credential is accepted only from an attested caller (mutual RA-TLS, listed in this app's allowed callers)")
+
+// peerVerified reports whether enclave-os verified the caller's TEE-bound
+// client certificate against this app's allowed callers.
+func peerVerified(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get(peerVerifiedHeader)), "true")
+}
+
+// verifyAttestedAssistant authenticates an assistant enclave acting for a
+// user (§8.7 RAG-in-enclave) from its ATTESTED IDENTITY, which is why no
+// per-tool credential or shared secret has to exist. The principal it
+// returns may run only the read-only, AI-scoped RAG surface (see
+// IsAssistant).
 //
 // The caller presented a TEE-bound client certificate on an inbound mutual
 // RA-TLS connection; enclave-os verified it (quote signature, measurements,
@@ -725,8 +722,7 @@ func (s *Server) verifyAppGrant(r *http.Request, tok string) (*Principal, error)
 // AssistantEnclaveMeasurement (its app id, OID 3.6, or its code hash, OID
 // 3.2 — the two forms that identify a workload rather than its host). The
 // acting user is still named by X-Privasys-On-Behalf-Of, and the principal
-// returned is the same read-only, AI-scoped one the shared-secret path
-// produces, so the tool surface is unchanged.
+// returned is the read-only, AI-scoped one.
 //
 // Empty configuration disables the path, and an unverified caller is refused:
 // both directions fail closed.
@@ -796,21 +792,6 @@ func assistantMeasurementAllowed(configured, appID, digest string) bool {
 // the explicit guards on those handlers).
 func isAssistantCatalogueRequest(r *http.Request) bool {
 	return r.Method == http.MethodGet && r.URL.Path == "/api/v1/mcp/tools"
-}
-
-func (s *Server) verifyAssistantEnclave(r *http.Request, tok string) (*Principal, error) {
-	cfg := s.CurrentConfig()
-	if cfg == nil || cfg.AssistantEnclaveToken == "" {
-		return nil, errors.New("assistant enclave path not enabled")
-	}
-	if subtle.ConstantTimeCompare([]byte(tok), []byte(cfg.AssistantEnclaveToken)) != 1 {
-		return nil, errors.New("credential mismatch")
-	}
-	sub := assistantActingSubject(r)
-	if sub == "" && !isAssistantCatalogueRequest(r) {
-		return nil, errors.New("missing on-behalf-of subject")
-	}
-	return &Principal{Sub: sub, Via: viaAssistant}, nil
 }
 
 // decodePubkey accepts raw-std or std base64 (wallets vary).

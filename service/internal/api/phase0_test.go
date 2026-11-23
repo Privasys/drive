@@ -51,6 +51,12 @@ func doJSON(t *testing.T, method, url, auth, body string) (*http.Response, []byt
 	}
 	if auth != "" {
 		req.Header.Set("Authorization", auth)
+		// An app credential only works from an attested caller: present
+		// the test app as enclave-os would after verifying its client cert.
+		if strings.HasPrefix(auth, "AppGrant ") {
+			req.Header.Set(peerVerifiedHeader, "true")
+			req.Header.Set(peerAppIDHeader, testAppID)
+		}
 	}
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -1073,6 +1079,8 @@ func TestAppGrantScopeAndSubtree(t *testing.T) {
 		fmt.Sprintf("%s/v1/tenants/%s/files?name=evil.txt&parent_id=%s", ts.URL, tenant.ID, folder.ID),
 		strings.NewReader("nope"))
 	req.Header.Set("Authorization", appAuth)
+	req.Header.Set(peerVerifiedHeader, "true")
+	req.Header.Set(peerAppIDHeader, testAppID)
 	wresp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -1114,10 +1122,10 @@ func TestAppGrantScopeAndSubtree(t *testing.T) {
 // testAppID is a syntactically valid app id (OID 3.6 hex) for grant fixtures.
 const testAppID = "0123456789abcdef0123456789abcdef"
 
-// TestAppGrantAttestedCallerMustMatchSubject proves the belt on top of the
-// key binding: a caller that arrives with an enclave-os-verified peer
-// identity must be the app the grant was approved for. Without peer
-// headers the key-only check stands (unattested callers keep working); an
+// TestAppGrantAttestedCallerMustMatchSubject proves an app credential is
+// honoured only from an attested caller, and that the caller must be the
+// app the grant was approved for. Without an enclave-os-verified peer
+// identity the right key alone is refused; an
 // app-id or code-hash subject matches its own header; any other attested
 // app is refused even though it holds the right key; and a malformed
 // subject is refused at creation rather than admitted-but-unmatchable.
@@ -1179,8 +1187,11 @@ func TestAppGrantAttestedCallerMustMatchSubject(t *testing.T) {
 	// An app-id subject, created in dashed uppercase, is stored canonical.
 	dashed := "app:01234567-89AB-CDEF-0123-456789ABCDEF"
 	_, byID := mint(dashed)
-	if got := list(byID, nil); got != 200 {
-		t.Fatalf("unattested caller with valid grant: %d", got)
+	if got := list(byID, nil); got != http.StatusUnauthorized {
+		t.Fatalf("unattested caller with valid grant: %d, want 401", got)
+	}
+	if got := list(byID, map[string]string{peerAppIDHeader: testAppID}); got != http.StatusUnauthorized {
+		t.Fatalf("caller naming the app without a verified peer: %d, want 401", got)
 	}
 	if got := list(byID, map[string]string{peerVerifiedHeader: "true", peerAppIDHeader: testAppID}); got != 200 {
 		t.Fatalf("attested caller matching app id: %d", got)

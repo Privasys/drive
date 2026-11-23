@@ -12,7 +12,7 @@ import (
 )
 
 // assistantReq builds a request on the assistant-enclave path (§8.7
-// RAG-in-enclave): the interim shared-secret credential plus the acting
+// RAG-in-enclave): the attested peer identity (token is its app id) plus the acting
 // user asserted via X-Privasys-On-Behalf-Of.
 func assistantReq(t *testing.T, method, url, token, onBehalf, body string) *http.Request {
 	t.Helper()
@@ -20,7 +20,8 @@ func assistantReq(t *testing.T, method, url, token, onBehalf, body string) *http
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Assistant "+token)
+	req.Header.Set(peerVerifiedHeader, "true")
+	req.Header.Set(peerAppIDHeader, token)
 	if onBehalf != "" {
 		req.Header.Set(onBehalfOfHeader, onBehalf)
 	}
@@ -41,7 +42,7 @@ func TestAssistantEnclaveRAG(t *testing.T) {
 	const secret = "assistant-shared-secret"
 
 	// Enable the interim assistant-enclave gate.
-	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign, AssistantEnclaveToken: secret})
+	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign, AssistantEnclaveMeasurement: secret})
 
 	// Tenant + a Memory note (Memory/ is always in assistant scope).
 	code, b := doReq(t, bearerReq(t, "POST", base.URL+"/v1/tenants", owner, `{"kind":"user","name":"Owner"}`))

@@ -104,10 +104,11 @@ Read the path from `service_result`; do not assume the label.
 ## 2. Using the grant
 
 The AppGrant is a compact signed token. Present it as
-`Authorization: Bearer <token>`. When the call arrives over an attested
-channel, the runtime republishes the caller's verified app id and Drive
-requires it to match the grant's subject; a leaked token cannot be used
-from anywhere else.
+`Authorization: Bearer <token>`. Drive accepts it only over an attested
+channel: the app calls over mutual RA-TLS and is listed in Drive's
+allowed callers, the runtime republishes its verified app id, and Drive
+requires that id to match the grant's subject. A token presented any
+other way is refused, so a leaked token cannot be used from anywhere else.
 
 Everything below is scoped to the granted folder and to the grant's
 permissions. `{t}` is `service_result.tenant_id`, `{root}` is

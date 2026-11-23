@@ -197,7 +197,12 @@ func TestD7GrantsMine(t *testing.T) {
 		Aud: "privasys-drive", Sub: appID, PK: pk,
 		Iat: time.Now().Unix(), Exp: time.Now().Add(time.Minute).Unix(), JTI: "self",
 	})
-	code, rb, _ := rawReq(t, "GET", ts.URL+"/v1/grants/mine", "AppGrant "+tok, "", nil)
+	// The key alone is refused: the app must be the attested caller.
+	if code, _, _ := rawReq(t, "GET", ts.URL+"/v1/grants/mine", "AppGrant "+tok, "", nil); code != http.StatusUnauthorized {
+		t.Fatalf("grants/mine from an unattested caller: %d, want 401", code)
+	}
+	attested := map[string]string{peerVerifiedHeader: "true", peerAppIDHeader: appID}
+	code, rb, _ := rawReq(t, "GET", ts.URL+"/v1/grants/mine", "AppGrant "+tok, "", attested)
 	if code != 200 {
 		t.Fatalf("grants/mine: %d %s", code, rb)
 	}
@@ -217,7 +222,7 @@ func TestD7GrantsMine(t *testing.T) {
 		Aud: "privasys-drive", Sub: appID, PK: base64.RawStdEncoding.EncodeToString(pub2),
 		Iat: time.Now().Unix(), Exp: time.Now().Add(time.Minute).Unix(), JTI: "self2",
 	})
-	_, rb, _ = rawReq(t, "GET", ts.URL+"/v1/grants/mine", "AppGrant "+otherTok, "", nil)
+	_, rb, _ = rawReq(t, "GET", ts.URL+"/v1/grants/mine", "AppGrant "+otherTok, "", attested)
 	out.Grants = nil
 	_ = json.Unmarshal(rb, &out)
 	if len(out.Grants) != 0 {

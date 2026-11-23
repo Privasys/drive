@@ -470,8 +470,8 @@ func (s *Server) childFolder(ctx context.Context, p *Principal, tenantID, parent
 // handleGrantsMine — D7. GET /v1/grants/mine lets an app that holds only its
 // sealed key rediscover every folder it was granted, so it need not persist
 // a pointer to each grant. Authenticated by a self-assertion signed with the
-// binding key, AND (on the attested data plane) by the enclave-os-verified
-// peer app id matching the asserted app id — the same identity the grant
+// binding key, AND by the enclave-os-verified peer app id matching the
+// asserted app id, the same identity the grant
 // enforcement already checks. This handler does its own auth, since the
 // normal AppGrant path requires a persisted grant row.
 func (s *Server) handleGrantsMine(w http.ResponseWriter, r *http.Request) {
@@ -494,16 +494,16 @@ func (s *Server) handleGrantsMine(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, errors.New("self-assertion must carry an app-id sub and a pk"))
 		return
 	}
-	// On an attested dial the verified peer must be the app it claims to be.
-	// Off the attested path (no peer headers) the signed self-assertion
-	// stands alone: it proves possession of the binding key, which is the
-	// credential, and the returned grants are only those bound to that key.
-	if strings.EqualFold(strings.TrimSpace(r.Header.Get(peerVerifiedHeader)), "true") {
-		peer := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(r.Header.Get(peerAppIDHeader))), "-", "")
-		if peer != appID {
-			httpError(w, http.StatusForbidden, errors.New("attested caller is not the app it asserts"))
-			return
-		}
+	// The caller must be attested, and the verified peer must be the app it
+	// claims to be: the signed self-assertion alone is not enough.
+	if !peerVerified(r) {
+		httpError(w, http.StatusUnauthorized, errAppNotAttested)
+		return
+	}
+	peer := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(r.Header.Get(peerAppIDHeader))), "-", "")
+	if peer != appID {
+		httpError(w, http.StatusForbidden, errors.New("attested caller is not the app it asserts"))
+		return
 	}
 	gs, err := s.Grants.ListForBindingKey(r.Context(), env.PK)
 	if err != nil {

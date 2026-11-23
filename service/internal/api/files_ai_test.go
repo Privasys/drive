@@ -93,6 +93,8 @@ func TestFilesAICapability(t *testing.T) {
 	call := func(tool, body string, onBehalf string) (int, []byte) {
 		req, _ := http.NewRequest("POST", ts.URL+"/tools/"+tool, bytes.NewReader([]byte(body)))
 		req.Header.Set("Authorization", "AppGrant "+tok)
+		req.Header.Set(peerVerifiedHeader, "true")
+		req.Header.Set(peerAppIDHeader, app)
 		req.Header.Set("Content-Type", "application/json")
 		if onBehalf != "" {
 			req.Header.Set(onBehalfOfHeader, onBehalf)
@@ -117,6 +119,8 @@ func TestFilesAICapability(t *testing.T) {
 	mcp := func(method, path, body string) int {
 		req, _ := http.NewRequest(method, ts.URL+path, bytes.NewReader([]byte(body)))
 		req.Header.Set("Authorization", "AppGrant "+tok)
+		req.Header.Set(peerVerifiedHeader, "true")
+		req.Header.Set(peerAppIDHeader, app)
 		req.Header.Set("Content-Type", "application/json")
 		code, _ := doReq(t, req)
 		return code

@@ -23,7 +23,7 @@ func TestAssistantOpensShareLinks(t *testing.T) {
 	t.Cleanup(ts.Close)
 	const owner, recipient, stranger = "user-1", "user-2", "user-3"
 	const secret = "assistant-shared-secret"
-	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign, AssistantEnclaveToken: secret})
+	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign, AssistantEnclaveMeasurement: secret})
 
 	// The owner's tenant: a folder holding one file.
 	code, b := doReq(t, bearerReq(t, "POST", ts.URL+"/v1/tenants", owner, `{"kind":"user","name":"Owner"}`))
@@ -191,7 +191,7 @@ func TestAssistantLinkAsksTheWallet(t *testing.T) {
 	t.Cleanup(ts.Close)
 	const owner, recipient = "user-1", "user-2"
 	const secret = "assistant-shared-secret"
-	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign, AssistantEnclaveToken: secret})
+	srv.InstallConfig(&config.Config{Mode: config.ModeSovereign, AssistantEnclaveMeasurement: secret})
 	tenantID, nodeID, _ := ownerTenantWithFile(t, ts.URL, owner)
 	if code, b := doReq(t, bearerReq(t, "POST", ts.URL+"/v1/me/tenant", recipient, "")); code != 200 && code != 201 {
 		t.Fatalf("personal tenant: %d %s", code, b)
