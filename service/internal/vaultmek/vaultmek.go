@@ -195,6 +195,12 @@ func (c *Client) dial(ctx context.Context, endpoint, mrenclaveHex, attServer, at
 // measurement approval), where the vault authorises by the caller's
 // OIDC principal on top of the app's attested transport identity.
 func (c *Client) dialAs(ctx context.Context, endpoint, mrenclaveHex, attServer, attToken, bearer string) (*vsdk.Client, error) {
+	return c.dialWith(ctx, endpoint, mrenclaveHex, attServer, attToken, bearer, nil)
+}
+
+// dialWith is dialAs with the member set of a binding-v2 approval, which
+// every approval-gated request then carries.
+func (c *Client) dialWith(ctx context.Context, endpoint, mrenclaveHex, attServer, attToken, bearer string, members []string) (*vsdk.Client, error) {
 	if c.minter == nil {
 		return nil, fmt.Errorf("vaultmek: no manager identity available (not running on the platform)")
 	}
@@ -206,6 +212,7 @@ func (c *Client) dialAs(ctx context.Context, endpoint, mrenclaveHex, attServer, 
 		GetClientCertificate: c.minter.GetClientCertificate(),
 		ClientEvidence:       c.minter.ClientEvidence(),
 		VaultPolicy:          pol,
+		BindingMembers:       members,
 	}
 	if bearer != "" {
 		opts.AuthToken = vsdk.StaticToken(bearer)

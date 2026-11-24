@@ -1283,7 +1283,7 @@ func TestUpgradeApprovedInTheWallet(t *testing.T) {
 	prevBegin, prevCollect, prevWait := approvalBegin, approvalCollect, ownerApprovalWait
 	t.Cleanup(func() { approvalBegin, approvalCollect, ownerApprovalWait = prevBegin, prevCollect, prevWait })
 	ownerApprovalWait = 0
-	approvalBegin = func(_ context.Context, bearer, h, _ string) (string, bool, error) {
+	approvalBegin = func(_ context.Context, bearer, h, _ string, _ *vaultmek.TeesApprovalV2) (string, bool, error) {
 		begun = append(begun, bearer+"|"+h)
 		return "op-1", true, nil
 	}

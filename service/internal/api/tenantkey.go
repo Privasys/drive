@@ -310,26 +310,58 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 			if req.AttestationToken != "" {
 				ref.AttToken = req.AttestationToken
 			}
-			aerr := s.MEKs.RefreshTees(r.Context(), ref, req.Grant, bearer)
-			if aerr != nil && !vaultUnreachable(aerr) {
-				// The vault refused the token: it does not name the key's
-				// owner, which is the case once Drive has its own per-app
-				// subjects. Ask the holder's wallet for an approval whose
-				// token does (ownerapproval.go).
-				audience := ref.Audience
-				if audience == "" {
-					audience = req.Constellation.OIDCAudience
+			audience := ref.Audience
+			if audience == "" {
+				audience = req.Constellation.OIDCAudience
+			}
+			var aerr error
+			v2done := false
+			// A key whose policy asks for binding v2 takes only a wallet
+			// approval bound to the exact policy update: no plain-bearer
+			// attempt first (vaultmek/teesv2.go).
+			if v2p, ok := s.MEKs.(teesV2Provider); ok {
+				plan, verr := v2p.PrepareTeesApprovalV2(r.Context(), ref, req.Grant)
+				if verr != nil {
+					// Not knowing is not a reason to fail: the v1 path below still
+					// works on every key that does not take binding v2.
+					log.Printf("tenant-key: binding-v2 check for tenant %.8s… skipped: %v", t.ID, verr)
+					plan = nil
 				}
-				tok, terr := s.ownerApprovalToken(r.Context(), t.ID, bearer, ref.Handle, audience)
-				if errors.Is(terr, errApprovalPending) {
-					httpError(w, http.StatusConflict, terr)
-					return
+				if plan != nil {
+					tok, terr := s.ownerApprovalToken(r.Context(), t.ID, bearer, ref.Handle, audience, plan)
+					if errors.Is(terr, errApprovalPending) {
+						httpError(w, http.StatusConflict, terr)
+						return
+					}
+					if terr != nil {
+						httpError(w, http.StatusBadGateway, fmt.Errorf("wallet approval: %v", terr))
+						return
+					}
+					if aerr := v2p.RefreshTeesV2(r.Context(), ref, plan, tok); aerr != nil {
+						httpError(w, http.StatusBadGateway, aerr)
+						return
+					}
+					v2done = true
 				}
-				if terr != nil {
-					httpError(w, http.StatusBadGateway, fmt.Errorf("%v; wallet approval: %v", aerr, terr))
-					return
+			}
+			if !v2done {
+				aerr = s.MEKs.RefreshTees(r.Context(), ref, req.Grant, bearer)
+				if aerr != nil && !vaultUnreachable(aerr) {
+					// The vault refused the token: it does not name the key's
+					// owner, which is the case once Drive has its own per-app
+					// subjects. Ask the holder's wallet for an approval whose
+					// token does (ownerapproval.go).
+					tok, terr := s.ownerApprovalToken(r.Context(), t.ID, bearer, ref.Handle, audience, nil)
+					if errors.Is(terr, errApprovalPending) {
+						httpError(w, http.StatusConflict, terr)
+						return
+					}
+					if terr != nil {
+						httpError(w, http.StatusBadGateway, fmt.Errorf("%v; wallet approval: %v", aerr, terr))
+						return
+					}
+					aerr = s.MEKs.RefreshTees(r.Context(), ref, req.Grant, tok)
 				}
-				aerr = s.MEKs.RefreshTees(r.Context(), ref, req.Grant, tok)
 			}
 			if aerr != nil {
 				httpError(w, http.StatusBadGateway, aerr)

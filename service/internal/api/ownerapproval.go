@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
 // The holder approves a Drive upgrade for their key, in their wallet.
@@ -55,7 +57,7 @@ var (
 // vault_op to collect with, and whether a wallet can receive the request.
 // audience is the key's constellation audience: the approval token must
 // carry it for those vaults to accept it. Empty leaves the IdP's default.
-func idpApprovalBegin(ctx context.Context, bearer, handle, audience string) (string, bool, error) {
+func idpApprovalBegin(ctx context.Context, bearer, handle, audience string, v2 *vaultmek.TeesApprovalV2) (string, bool, error) {
 	in := map[string]any{
 		"operation":   "policy-update",
 		"handle":      handle,
@@ -65,6 +67,19 @@ func idpApprovalBegin(ctx context.Context, bearer, handle, audience string) (str
 			"key_type": "Your Drive key",
 			"source":   "Privasys Drive was updated; approve the new version to keep opening your files.",
 		},
+	}
+	if v2 != nil {
+		// Binding v2: the approval is bound to the exact new policy, the
+		// version it replaces and the constellation's members; the wallet
+		// verifies each member's identity quote and shows the policy.
+		in["binding_version"] = 2
+		in["operation"] = "update_policy"
+		in["target"] = v2.Target
+		in["policy_version"] = v2.PolicyVersion
+		in["members"] = v2.Members
+		in["member_identities"] = v2.Identities
+		in["issuer_index"] = 0
+		in["new_policy"] = v2.NewPolicyJSON
 	}
 	if audience != "" {
 		in["audience"] = audience
@@ -122,12 +137,12 @@ func idpApprovalCollect(ctx context.Context, bearer, vaultOp string) (string, er
 // ownerApprovalToken gets a token naming the key's owner by asking the
 // holder's wallet, starting or resuming the request for this tenant. It
 // returns errApprovalPending while the holder has not tapped yet.
-func (s *Server) ownerApprovalToken(ctx context.Context, tenantID, bearer, handle, audience string) (string, error) {
+func (s *Server) ownerApprovalToken(ctx context.Context, tenantID, bearer, handle, audience string, v2 *vaultmek.TeesApprovalV2) (string, error) {
 	var vaultOp string
 	if v, ok := pendingOwnerApprovals.Load(tenantID); ok && time.Now().Before(v.(*pendingOwnerApproval).expires) {
 		vaultOp = v.(*pendingOwnerApproval).vaultOp
 	} else {
-		op, push, err := approvalBegin(ctx, bearer, handle, audience)
+		op, push, err := approvalBegin(ctx, bearer, handle, audience, v2)
 		if err != nil {
 			return "", err
 		}
@@ -174,4 +189,11 @@ func vaultUnreachable(err error) bool {
 		}
 	}
 	return false
+}
+
+// teesV2Provider is the binding-v2 measurement approval (vaultmek/teesv2.go):
+// vaultmek.Client implements it; a provider without it takes the v1 path.
+type teesV2Provider interface {
+	PrepareTeesApprovalV2(ctx context.Context, ref vaultmek.Ref, grant string) (*vaultmek.TeesApprovalV2, error)
+	RefreshTeesV2(ctx context.Context, ref vaultmek.Ref, a *vaultmek.TeesApprovalV2, approval string) error
 }
