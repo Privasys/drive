@@ -133,6 +133,7 @@ type tenantKeyResweepItem struct {
 		Mrenclave         string   `json:"mrenclave"`
 		AttestationServer string   `json:"attestation_server"`
 		Threshold         int      `json:"threshold"`
+		OIDCAudience      string   `json:"oidc_audience"`
 	} `json:"constellation"`
 }
 
@@ -249,6 +250,7 @@ func (s *Server) resweepOneTenant(r *http.Request, item tenantKeyResweepItem, dr
 		AttServer:    item.Constellation.AttestationServer,
 		AttToken:     item.AttestationToken,
 		Threshold:    item.Constellation.Threshold,
+		Audience:     item.Constellation.OIDCAudience,
 	}
 	// Provision generates fresh material — the point of this sweep. A key
 	// already at that handle from an interrupted run is adopted by reading
@@ -262,7 +264,7 @@ func (s *Server) resweepOneTenant(r *http.Request, item tenantKeyResweepItem, dr
 		newRef = vaultmek.Ref{
 			Handle: bundle.Handle, Endpoints: bundle.Endpoints,
 			MrenclaveHex: bundle.MrenclaveHex, AttServer: bundle.AttServer,
-			AttToken: bundle.AttToken, Threshold: bundle.Threshold,
+			AttToken: bundle.AttToken, Threshold: bundle.Threshold, Audience: bundle.Audience,
 		}
 	}
 	newMEK, err := s.MEKs.Load(ctx, newRef)

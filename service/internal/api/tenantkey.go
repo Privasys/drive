@@ -179,6 +179,7 @@ func (s *Server) maybeRotateTenantKey(ctx context.Context, tenantID, existingRef
 		AttServer:    req.Constellation.AttestationServer,
 		AttToken:     req.AttestationToken,
 		Threshold:    req.Constellation.Threshold,
+		Audience:     req.Constellation.OIDCAudience,
 	}
 	newRef, rerr := s.MEKs.Regenerate(ctx, ref, b)
 	if rerr != nil {
@@ -225,6 +226,7 @@ type tenantKeyRequest struct {
 		Mrenclave         string   `json:"mrenclave"`
 		AttestationServer string   `json:"attestation_server"`
 		Threshold         int      `json:"threshold"`
+		OIDCAudience      string   `json:"oidc_audience"`
 	} `json:"constellation"`
 	// OwnerToken is the data owner's PLATFORM token, the credential the
 	// vault checks a measurement approval against. The key is owned by the
@@ -312,7 +314,11 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 				// owner, which is the case once Drive has its own per-app
 				// subjects. Ask the holder's wallet for an approval whose
 				// token does (ownerapproval.go).
-				tok, terr := s.ownerApprovalToken(r.Context(), t.ID, bearer, ref.Handle)
+				audience := ref.Audience
+				if audience == "" {
+					audience = req.Constellation.OIDCAudience
+				}
+				tok, terr := s.ownerApprovalToken(r.Context(), t.ID, bearer, ref.Handle, audience)
 				if errors.Is(terr, errApprovalPending) {
 					httpError(w, http.StatusConflict, terr)
 					return
@@ -364,6 +370,7 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 		AttServer:    req.Constellation.AttestationServer,
 		AttToken:     req.AttestationToken,
 		Threshold:    req.Constellation.Threshold,
+		Audience:     req.Constellation.OIDCAudience,
 	}
 	ref, err := s.MEKs.Provision(r.Context(), bundle)
 	if err != nil {
@@ -377,7 +384,7 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 		ref = vaultmek.Ref{
 			Handle: bundle.Handle, Endpoints: bundle.Endpoints,
 			MrenclaveHex: bundle.MrenclaveHex, AttServer: bundle.AttServer,
-			AttToken: bundle.AttToken, Threshold: bundle.Threshold,
+			AttToken: bundle.AttToken, Threshold: bundle.Threshold, Audience: bundle.Audience,
 		}
 	}
 	newMek, err := s.MEKs.Load(r.Context(), ref)
@@ -470,6 +477,7 @@ func (s *Server) handleTenantKeyRevault(w http.ResponseWriter, r *http.Request, 
 		AttServer:    req.Constellation.AttestationServer,
 		AttToken:     req.AttestationToken,
 		Threshold:    req.Constellation.Threshold,
+		Audience:     req.Constellation.OIDCAudience,
 	}
 	ref, err := s.MEKs.Provision(r.Context(), bundle)
 	if err != nil {
@@ -480,7 +488,7 @@ func (s *Server) handleTenantKeyRevault(w http.ResponseWriter, r *http.Request, 
 		ref = vaultmek.Ref{
 			Handle: bundle.Handle, Endpoints: bundle.Endpoints,
 			MrenclaveHex: bundle.MrenclaveHex, AttServer: bundle.AttServer,
-			AttToken: bundle.AttToken, Threshold: bundle.Threshold,
+			AttToken: bundle.AttToken, Threshold: bundle.Threshold, Audience: bundle.Audience,
 		}
 	}
 	newMek, err := s.MEKs.Load(r.Context(), ref)
@@ -547,6 +555,7 @@ func (s *Server) freshStartEmptyTenant(ctx context.Context, tenantID, existingRe
 		AttServer:    req.Constellation.AttestationServer,
 		AttToken:     req.AttestationToken,
 		Threshold:    req.Constellation.Threshold,
+		Audience:     req.Constellation.OIDCAudience,
 	})
 	if err != nil {
 		log.Printf("tenantkey: fresh start for tenant %s refused: provision: %v", tenantID, err)

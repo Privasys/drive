@@ -53,8 +53,10 @@ var (
 // idpApprovalBegin starts a policy-update approval for handle, authenticated
 // by bearer (any token of the holder's the IdP issued). It returns the
 // vault_op to collect with, and whether a wallet can receive the request.
-func idpApprovalBegin(ctx context.Context, bearer, handle string) (string, bool, error) {
-	body, _ := json.Marshal(map[string]any{
+// audience is the key's constellation audience: the approval token must
+// carry it for those vaults to accept it. Empty leaves the IdP's default.
+func idpApprovalBegin(ctx context.Context, bearer, handle, audience string) (string, bool, error) {
+	in := map[string]any{
 		"operation":   "policy-update",
 		"handle":      handle,
 		"ttl_seconds": 300,
@@ -63,7 +65,11 @@ func idpApprovalBegin(ctx context.Context, bearer, handle string) (string, bool,
 			"key_type": "Your Drive key",
 			"source":   "Privasys Drive was updated; approve the new version to keep opening your files.",
 		},
-	})
+	}
+	if audience != "" {
+		in["audience"] = audience
+	}
+	body, _ := json.Marshal(in)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, idpBase()+"/fido2/vault-approval/begin", bytes.NewReader(body))
 	if err != nil {
 		return "", false, err
@@ -116,12 +122,12 @@ func idpApprovalCollect(ctx context.Context, bearer, vaultOp string) (string, er
 // ownerApprovalToken gets a token naming the key's owner by asking the
 // holder's wallet, starting or resuming the request for this tenant. It
 // returns errApprovalPending while the holder has not tapped yet.
-func (s *Server) ownerApprovalToken(ctx context.Context, tenantID, bearer, handle string) (string, error) {
+func (s *Server) ownerApprovalToken(ctx context.Context, tenantID, bearer, handle, audience string) (string, error) {
 	var vaultOp string
 	if v, ok := pendingOwnerApprovals.Load(tenantID); ok && time.Now().Before(v.(*pendingOwnerApproval).expires) {
 		vaultOp = v.(*pendingOwnerApproval).vaultOp
 	} else {
-		op, push, err := approvalBegin(ctx, bearer, handle)
+		op, push, err := approvalBegin(ctx, bearer, handle, audience)
 		if err != nil {
 			return "", err
 		}

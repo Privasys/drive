@@ -35,6 +35,10 @@ type Bundle struct {
 	AttServer    string   `json:"attestation_server"`
 	AttToken     string   `json:"attestation_token"`
 	Threshold    int      `json:"threshold"`
+	// Audience is the constellation's OIDC audience: the "aud" an owner
+	// token must carry for these vaults (each environment has its own).
+	// Empty on a bundle from a control plane that does not send it.
+	Audience string `json:"oidc_audience,omitempty"`
 }
 
 // Ref is what the index persists per tenant (on the sealed volume):
@@ -49,6 +53,8 @@ type Ref struct {
 	AttServer    string   `json:"attestation_server"`
 	AttToken     string   `json:"attestation_token,omitempty"`
 	Threshold    int      `json:"threshold"`
+	// Audience is the constellation's OIDC audience (see Bundle.Audience).
+	Audience string `json:"oidc_audience,omitempty"`
 	// RotatedAt is when this handle generation was created (unix seconds).
 	// Vault key records expire at a FIXED expires_at (90-day cap, 30-day
 	// default; nothing extends it), so the only renewal is re-creating the
@@ -223,7 +229,7 @@ func (c *Client) Provision(ctx context.Context, b Bundle) (Ref, error) {
 	ref := Ref{
 		Handle: b.Handle, Endpoints: b.Endpoints,
 		MrenclaveHex: b.MrenclaveHex, AttServer: b.AttServer,
-		AttToken: b.AttToken, Threshold: threshold,
+		AttToken: b.AttToken, Threshold: threshold, Audience: b.Audience,
 		RotatedAt: time.Now().Unix(),
 	}
 	c.mu.Lock()
@@ -295,7 +301,7 @@ func (c *Client) Regenerate(ctx context.Context, ref Ref, b Bundle) (Ref, error)
 	newRef := Ref{
 		Handle: newHandle, Endpoints: b.Endpoints,
 		MrenclaveHex: b.MrenclaveHex, AttServer: b.AttServer,
-		AttToken: b.AttToken, Threshold: threshold,
+		AttToken: b.AttToken, Threshold: threshold, Audience: b.Audience,
 		RotatedAt: time.Now().Unix(),
 	}
 	if cerr := c.createShares(ctx, b, newHandle, mek, threshold); cerr != nil {
