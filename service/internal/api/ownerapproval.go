@@ -80,6 +80,12 @@ func idpApprovalBegin(ctx context.Context, bearer, handle, audience string, v2 *
 		in["member_identities"] = v2.Identities
 		in["issuer_index"] = 0
 		in["new_policy"] = v2.NewPolicyJSON
+		if v2.From {
+			// update_policy_from (formats §5.3): the policy replaced, as the
+			// vaults serialise it, so the wallet can show the difference.
+			in["operation"] = "update_policy_from"
+			in["current_policy"] = v2.CurrentPolicyJSON
+		}
 	}
 	if audience != "" {
 		in["audience"] = audience

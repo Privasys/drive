@@ -59,3 +59,37 @@ func TestApprovalBeginBindingV2Body(t *testing.T) {
 		t.Errorf("v1 body changed: %v", got)
 	}
 }
+
+// On update_policy_from the IdP also gets the policy replaced.
+func TestApprovalBeginUpdatePolicyFromBody(t *testing.T) {
+	var got map[string]json.RawMessage
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(map[string]any{"vault_op": "op", "push_registered": true})
+	}))
+	defer srv.Close()
+	t.Setenv("PRIVASYS_ISSUER", srv.URL)
+	old := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	defer func() { http.DefaultTransport = old }()
+
+	plan := &vaultmek.TeesApprovalV2{
+		NewPolicyJSON: json.RawMessage(`{"version":2}`), Target: "cd", PolicyVersion: 3,
+		Members: []string{"m1"}, Identities: []vsdk.VaultIdentity{{MemberID: "m1"}},
+		From: true, CurrentPolicyJSON: json.RawMessage(`{"version":1}`), ReplacedPD: "ee",
+	}
+	if _, _, err := idpApprovalBegin(context.Background(), "bearer", "h", "", plan); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{
+		"operation": `"update_policy_from"`, "current_policy": `{"version":1}`,
+		"new_policy": `{"version":2}`, "target": `"cd"`, "policy_version": `3`,
+	} {
+		if string(got[k]) != v {
+			t.Errorf("%s = %s, want %s", k, got[k], v)
+		}
+	}
+	if got["replaced_pd"] != nil {
+		t.Error("replaced_pd goes to the vault, not the IdP")
+	}
+}

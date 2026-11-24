@@ -31,8 +31,16 @@ type TeesApprovalV2 struct {
 	NewPolicy vsdk.KeyPolicy
 	// NewPolicyJSON is NewPolicy exactly as the update request carries it.
 	NewPolicyJSON json.RawMessage
-	// Target is PD(NewPolicyJSON).
+	// Target is PD(NewPolicyJSON), or on an update_policy_from the target
+	// that binds both the replaced policy and the new one.
 	Target string
+	// From is set when every member lists update-policy-from-v1: the
+	// approval is an update_policy_from (formats §5.3), binding the policy
+	// replaced (CurrentPolicyJSON, the vaults' own serialisation, whose
+	// digest is ReplacedPD) as well as the new one.
+	From              bool
+	CurrentPolicyJSON json.RawMessage
+	ReplacedPD        string
 	// PolicyVersion is the version the update replaces.
 	PolicyVersion uint32
 	// Members are the constellation's member ids, sorted.
@@ -81,6 +89,8 @@ func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant strin
 		version uint32
 		digest  string
 		ids     []vsdk.VaultIdentity
+		curRaw  json.RawMessage
+		curPD   string
 	)
 	for _, ep := range ref.Endpoints {
 		vc, derr := c.dial(ctx, ep, ref.MrenclaveHex, ref.AttServer, tok)
@@ -133,6 +143,13 @@ func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant strin
 			if stored != canon {
 				return nil, fmt.Errorf("%w on %s", ErrPolicyNotLossless, ep)
 			}
+			// The policy being replaced, as the vaults serialise it: the
+			// "before" an update_policy_from binds (formats §5.3).
+			if curRaw == nil {
+				curRaw, curPD = raw, stored
+			} else if stored != curPD {
+				return nil, fmt.Errorf("vaultmek: approval v2: the vaults disagree on the stored policy of %s", ref.Handle)
+			}
 		}
 		if cur == nil {
 			cur, version, digest = &p, v, d
@@ -161,14 +178,28 @@ func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant strin
 		return nil, fmt.Errorf("vaultmek: approval v2: new policy digest: %w", err)
 	}
 	members := make([]string, 0, len(ids))
+	from := len(ids) > 0
 	for _, id := range ids {
 		members = append(members, strings.ToLower(id.MemberID))
+		if !id.Has(vsdk.CapabilityUpdatePolicyFrom) {
+			from = false
+		}
 	}
 	sort.Strings(members)
-	return &TeesApprovalV2{
+	a := &TeesApprovalV2{
 		NewPolicy: np, NewPolicyJSON: raw, Target: target,
 		PolicyVersion: version, Members: members, Identities: ids,
-	}, nil
+	}
+	if from {
+		// Every member takes update_policy_from: bind the policy replaced
+		// too, so the wallet can show a difference it can trust.
+		ft, ferr := vsdk.UpdatePolicyFromTarget(curPD, target)
+		if ferr != nil {
+			return nil, fmt.Errorf("vaultmek: approval v2: %w", ferr)
+		}
+		a.From, a.Target, a.CurrentPolicyJSON, a.ReplacedPD = true, ft, curRaw, curPD
+	}
+	return a, nil
 }
 
 // RefreshTeesV2 sends the approved policy update to every member, with the
@@ -189,7 +220,13 @@ func (c *Client) RefreshTeesV2(ctx context.Context, ref Ref, a *TeesApprovalV2, 
 			failed = append(failed, fmt.Sprintf("%s: %v", ep, err))
 			continue
 		}
-		_, uerr := vc.UpdatePolicy(ctx, ref.Handle, a.NewPolicy, vsdk.ApprovalToken{JWT: approval})
+		// The exact bytes the holder approved (PD binds them).
+		var uerr error
+		if a.From {
+			_, uerr = vc.UpdatePolicyRawFrom(ctx, ref.Handle, a.NewPolicyJSON, a.ReplacedPD, vsdk.ApprovalToken{JWT: approval})
+		} else {
+			_, uerr = vc.UpdatePolicyRaw(ctx, ref.Handle, a.NewPolicyJSON, vsdk.ApprovalToken{JWT: approval})
+		}
 		vc.Close()
 		if uerr != nil {
 			failed = append(failed, fmt.Sprintf("%s: update policy: %v", ep, uerr))
