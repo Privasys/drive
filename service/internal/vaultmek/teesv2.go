@@ -3,6 +3,7 @@ package vaultmek
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,6 +19,10 @@ import (
 // of the constellation (wallet-signed-authority-wire-formats.md §5). The
 // owner's plain bearer is not enough there, so Drive asks the holder's wallet
 // straight away.
+
+// ErrPolicyNotLossless means the key's policy has something the vault
+// client's typed policy cannot carry, so Drive cannot rebuild it faithfully.
+var ErrPolicyNotLossless = errors.New("vaultmek: approval v2: the key's policy does not survive the typed round trip; refusing to build an update that could drop a restriction")
 
 // TeesApprovalV2 is what a binding-v2 measurement approval is made of.
 type TeesApprovalV2 struct {
@@ -83,10 +88,14 @@ func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant strin
 			return nil, fmt.Errorf("vaultmek: approval v2: dial %s: %w", ep, derr)
 		}
 		p, v, perr := vc.GetPolicy(ctx, ref.Handle)
-		var id vsdk.VaultIdentity
-		var ierr error
+		var (
+			id         vsdk.VaultIdentity
+			ierr, rerr error
+			raw        json.RawMessage
+		)
 		if perr == nil && NeedsBindingV2(p) {
 			id, ierr = vc.GetVaultIdentity(ctx)
+			raw, _, rerr = vc.GetPolicyRaw(ctx, ref.Handle)
 		}
 		vc.Close()
 		if perr != nil {
@@ -95,6 +104,21 @@ func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant strin
 		d, derr := vsdk.PolicyDigest(p)
 		if derr != nil {
 			return nil, fmt.Errorf("vaultmek: approval v2: policy digest on %s: %w", ep, derr)
+		}
+		if NeedsBindingV2(p) {
+			// The new policy is built from the typed policy. Refuse unless
+			// the typed round trip is lossless: a field the client does not
+			// know would otherwise vanish from the policy the owner approves.
+			if rerr != nil {
+				return nil, fmt.Errorf("vaultmek: approval v2: read raw policy on %s: %w", ep, rerr)
+			}
+			rd, rderr := vsdk.PolicyDigestJSON(raw)
+			if rderr != nil {
+				return nil, fmt.Errorf("vaultmek: approval v2: raw policy digest on %s: %w", ep, rderr)
+			}
+			if rd != d {
+				return nil, fmt.Errorf("%w on %s", ErrPolicyNotLossless, ep)
+			}
 		}
 		if cur == nil {
 			cur, version, digest = &p, v, d

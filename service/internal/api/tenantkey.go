@@ -321,6 +321,10 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 			// attempt first (vaultmek/teesv2.go).
 			if v2p, ok := s.MEKs.(teesV2Provider); ok {
 				plan, verr := v2p.PrepareTeesApprovalV2(r.Context(), ref, req.Grant)
+				if errors.Is(verr, vaultmek.ErrPolicyNotLossless) {
+					httpError(w, http.StatusBadGateway, verr)
+					return
+				}
 				if verr != nil {
 					// Not knowing is not a reason to fail: the v1 path below still
 					// works on every key that does not take binding v2.
