@@ -39,6 +39,11 @@ type Bundle struct {
 	// token must carry for these vaults (each environment has its own).
 	// Empty on a bundle from a control plane that does not send it.
 	Audience string `json:"oidc_audience,omitempty"`
+	// CarryFrom, when set, makes the new key carry the policy of the key
+	// at that ref (read from its vaults) instead of the grant's: a
+	// renewal with a carried policy. The grant then only admits the
+	// create. Needs vaults that take a carried policy (vault-v0.40.0+).
+	CarryFrom *Ref `json:"-"`
 }
 
 // Ref is what the index persists per tenant (on the sealed volume):
@@ -246,12 +251,25 @@ func (c *Client) createShares(ctx context.Context, b Bundle, handle string, secr
 	if err != nil {
 		return fmt.Errorf("vaultmek: split: %w", err)
 	}
+	var renewal *vsdk.Renewal
+	if b.CarryFrom != nil {
+		r, rerr := c.carriedRenewal(ctx, *b.CarryFrom, b.Grant, secret)
+		if rerr != nil {
+			return rerr
+		}
+		renewal = &r
+	}
 	for i, ep := range b.Endpoints {
 		vc, derr := c.dial(ctx, ep, b.MrenclaveHex, b.AttServer, b.AttToken)
 		if derr != nil {
 			return fmt.Errorf("vaultmek: dial %s: %w", ep, derr)
 		}
-		_, cerr := vc.CreateKey(ctx, handle, vsdk.ShareToBytes(shares[i]), b.Grant)
+		var cerr error
+		if renewal != nil {
+			_, cerr = vc.CreateKeyRenewal(ctx, handle, vsdk.ShareToBytes(shares[i]), b.Grant, *renewal)
+		} else {
+			_, cerr = vc.CreateKey(ctx, handle, vsdk.ShareToBytes(shares[i]), b.Grant)
+		}
 		vc.Close()
 		if cerr != nil {
 			return fmt.Errorf("vaultmek: create share on %s: %w", ep, cerr)

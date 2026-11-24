@@ -135,6 +135,10 @@ type tenantKeyResweepItem struct {
 		Threshold         int      `json:"threshold"`
 		OIDCAudience      string   `json:"oidc_audience"`
 	} `json:"constellation"`
+	// Carry makes the new key carry the current key's policy, read from its
+	// vaults, instead of the grant's (a renewal with a carried policy; needs
+	// vault-v0.40.0+ on the new constellation). The grant only admits it.
+	Carry bool `json:"carry,omitempty"`
 }
 
 type tenantKeyResweepResult struct {
@@ -251,6 +255,14 @@ func (s *Server) resweepOneTenant(r *http.Request, item tenantKeyResweepItem, dr
 		AttToken:     item.AttestationToken,
 		Threshold:    item.Constellation.Threshold,
 		Audience:     item.Constellation.OIDCAudience,
+	}
+	if item.Carry {
+		src := oldRef
+		if src.Audience == "" {
+			// A ref from before audiences were kept: same environment.
+			src.Audience = item.Constellation.OIDCAudience
+		}
+		bundle.CarryFrom = &src
 	}
 	// Provision generates fresh material — the point of this sweep. A key
 	// already at that handle from an interrupted run is adopted by reading
