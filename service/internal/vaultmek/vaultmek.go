@@ -39,6 +39,9 @@ type Bundle struct {
 	// token must carry for these vaults (each environment has its own).
 	// Empty on a bundle from a control plane that does not send it.
 	Audience string `json:"oidc_audience,omitempty"`
+	// Issuer is the constellation's OIDC issuer, kept with the ref so a later
+	// carried renewal can name the source's implicit billing id.
+	Issuer string `json:"oidc_issuer,omitempty"`
 	// CarryFrom, when set, makes the new key carry the policy of the key
 	// at that ref (read from its vaults) instead of the grant's: a
 	// renewal with a carried policy. The grant then only admits the
@@ -60,6 +63,8 @@ type Ref struct {
 	Threshold    int      `json:"threshold"`
 	// Audience is the constellation's OIDC audience (see Bundle.Audience).
 	Audience string `json:"oidc_audience,omitempty"`
+	// Issuer is the constellation's OIDC issuer (see Bundle.Issuer).
+	Issuer string `json:"oidc_issuer,omitempty"`
 	// RotatedAt is when this handle generation was created (unix seconds).
 	// Vault key records expire at a FIXED expires_at (90-day cap, 30-day
 	// default; nothing extends it), so the only renewal is re-creating the
@@ -234,7 +239,7 @@ func (c *Client) Provision(ctx context.Context, b Bundle) (Ref, error) {
 	ref := Ref{
 		Handle: b.Handle, Endpoints: b.Endpoints,
 		MrenclaveHex: b.MrenclaveHex, AttServer: b.AttServer,
-		AttToken: b.AttToken, Threshold: threshold, Audience: b.Audience,
+		AttToken: b.AttToken, Threshold: threshold, Audience: b.Audience, Issuer: b.Issuer,
 		RotatedAt: time.Now().Unix(),
 	}
 	c.mu.Lock()
@@ -253,7 +258,7 @@ func (c *Client) createShares(ctx context.Context, b Bundle, handle string, secr
 	}
 	var renewal *vsdk.Renewal
 	if b.CarryFrom != nil {
-		r, rerr := c.carriedRenewal(ctx, *b.CarryFrom, b.Grant, secret)
+		r, rerr := c.carriedRenewal(ctx, *b.CarryFrom, secret)
 		if rerr != nil {
 			return rerr
 		}
@@ -319,7 +324,7 @@ func (c *Client) Regenerate(ctx context.Context, ref Ref, b Bundle) (Ref, error)
 	newRef := Ref{
 		Handle: newHandle, Endpoints: b.Endpoints,
 		MrenclaveHex: b.MrenclaveHex, AttServer: b.AttServer,
-		AttToken: b.AttToken, Threshold: threshold, Audience: b.Audience,
+		AttToken: b.AttToken, Threshold: threshold, Audience: b.Audience, Issuer: b.Issuer,
 		RotatedAt: time.Now().Unix(),
 	}
 	if cerr := c.createShares(ctx, b, newHandle, mek, threshold); cerr != nil {

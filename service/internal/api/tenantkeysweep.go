@@ -134,11 +134,18 @@ type tenantKeyResweepItem struct {
 		AttestationServer string   `json:"attestation_server"`
 		Threshold         int      `json:"threshold"`
 		OIDCAudience      string   `json:"oidc_audience"`
+		OIDCIssuer        string   `json:"oidc_issuer"`
 	} `json:"constellation"`
 	// Carry makes the new key carry the current key's policy, read from its
 	// vaults, instead of the grant's (a renewal with a carried policy; needs
 	// vault-v0.40.0+ on the new constellation). The grant only admits it.
 	Carry bool `json:"carry,omitempty"`
+	// SourceOIDCIssuer and SourceOIDCAudience name the CURRENT key's
+	// constellation (from the control plane's constellation entry) for a
+	// carry from a ref recorded before Drive kept them. A value the ref
+	// already records wins; they never default to the target's.
+	SourceOIDCIssuer   string `json:"source_oidc_issuer,omitempty"`
+	SourceOIDCAudience string `json:"source_oidc_audience,omitempty"`
 }
 
 type tenantKeyResweepResult struct {
@@ -255,12 +262,15 @@ func (s *Server) resweepOneTenant(r *http.Request, item tenantKeyResweepItem, dr
 		AttToken:     item.AttestationToken,
 		Threshold:    item.Constellation.Threshold,
 		Audience:     item.Constellation.OIDCAudience,
+		Issuer:       item.Constellation.OIDCIssuer,
 	}
 	if item.Carry {
 		src := oldRef
+		if src.Issuer == "" {
+			src.Issuer = item.SourceOIDCIssuer
+		}
 		if src.Audience == "" {
-			// A ref from before audiences were kept: same environment.
-			src.Audience = item.Constellation.OIDCAudience
+			src.Audience = item.SourceOIDCAudience
 		}
 		bundle.CarryFrom = &src
 	}
@@ -276,7 +286,7 @@ func (s *Server) resweepOneTenant(r *http.Request, item tenantKeyResweepItem, dr
 		newRef = vaultmek.Ref{
 			Handle: bundle.Handle, Endpoints: bundle.Endpoints,
 			MrenclaveHex: bundle.MrenclaveHex, AttServer: bundle.AttServer,
-			AttToken: bundle.AttToken, Threshold: bundle.Threshold, Audience: bundle.Audience,
+			AttToken: bundle.AttToken, Threshold: bundle.Threshold, Audience: bundle.Audience, Issuer: bundle.Issuer,
 		}
 	}
 	newMEK, err := s.MEKs.Load(ctx, newRef)

@@ -2,10 +2,8 @@ package vaultmek
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	vsdk "github.com/Privasys/enclave-vaults-client/go/vault"
@@ -18,7 +16,7 @@ import (
 // and a key check over the new key's whole value. A carried policy is the
 // key's own, so the owner's approvals and TEE profile ride along instead of
 // being re-authored from a fresh grant.
-func (c *Client) carriedRenewal(ctx context.Context, src Ref, grant string, secret []byte) (vsdk.Renewal, error) {
+func (c *Client) carriedRenewal(ctx context.Context, src Ref, secret []byte) (vsdk.Renewal, error) {
 	tok := src.AttToken
 	if ft := c.cachedFreshToken(time.Now().Unix()); ft != "" {
 		tok = ft
@@ -73,12 +71,13 @@ func (c *Client) carriedRenewal(ctx context.Context, src Ref, grant string, secr
 	}
 	if billingID == "" {
 		// A vault from before the identity call: its billing id is the
-		// implicit one of its issuer and audience.
-		iss := grantIssuer(grant)
-		if iss == "" || src.Audience == "" {
-			return vsdk.Renewal{}, fmt.Errorf("vaultmek: carry: the source vaults have no identity and the source audience is unknown")
+		// implicit one of the SOURCE constellation's issuer and audience,
+		// as recorded with the ref (never the target's: these values exist
+		// to catch a mistake, and a default would hide it).
+		if src.Issuer == "" || src.Audience == "" {
+			return vsdk.Renewal{}, fmt.Errorf("vaultmek: carry: the source vaults have no identity and the source issuer or audience is unknown")
 		}
-		billingID = vsdk.ImplicitBillingID(iss, src.Audience)
+		billingID = vsdk.ImplicitBillingID(src.Issuer, src.Audience)
 	}
 	kc, err := vsdk.NewKeyCheck(secret)
 	if err != nil {
@@ -89,24 +88,4 @@ func (c *Client) carriedRenewal(ctx context.Context, src Ref, grant string, secr
 		SourceBillingID: billingID, KeyCheck: &kc,
 		CarriedExportable: &info.Exportable, CarriedKeyType: info.KeyType,
 	}, nil
-}
-
-// grantIssuer returns the "iss" of a grant JWT (unverified: the vault
-// verifies the grant; this only names the issuer for a billing id).
-func grantIssuer(grant string) string {
-	parts := strings.Split(grant, ".")
-	if len(parts) != 3 {
-		return ""
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return ""
-	}
-	var claims struct {
-		Iss string `json:"iss"`
-	}
-	if json.Unmarshal(payload, &claims) != nil {
-		return ""
-	}
-	return claims.Iss
 }
