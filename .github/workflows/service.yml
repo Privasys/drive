@@ -26,7 +26,7 @@ env:
   # The go.mod replace-directive targets; keep in lockstep with the
   # ARGs in service/Dockerfile.
   RA_TLS_CLIENTS_REF: a5c458d7601eb88ff4eec357037a9421294d8619
-  ENCLAVE_VAULTS_CLIENT_REF: 06c6cfa123fcd0bab28b51da9e4f44ebe8b37010
+  ENCLAVE_VAULTS_CLIENT_REF: 7f3846ac4dfd293dbbb41387649bd63389b85c71
 
 jobs:
   test:

@@ -89,13 +89,20 @@ func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant strin
 		}
 		p, v, perr := vc.GetPolicy(ctx, ref.Handle)
 		var (
-			id         vsdk.VaultIdentity
-			ierr, rerr error
-			raw        json.RawMessage
+			id                    vsdk.VaultIdentity
+			ierr, rerr, cerr      error
+			raw, typed, canonical json.RawMessage
 		)
 		if perr == nil && NeedsBindingV2(p) {
 			id, ierr = vc.GetVaultIdentity(ctx)
 			raw, _, rerr = vc.GetPolicyRaw(ctx, ref.Handle)
+			// The vault's own canonical form of the typed round trip: it
+			// writes back every field at its default, as GetPolicy does, so
+			// it equals the stored policy unless the typed form dropped
+			// something (formats §5.1).
+			if typed, cerr = json.Marshal(p); cerr == nil {
+				canonical, _, cerr = vc.CanonicalPolicy(ctx, typed)
+			}
 		}
 		vc.Close()
 		if perr != nil {
@@ -112,11 +119,18 @@ func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant strin
 			if rerr != nil {
 				return nil, fmt.Errorf("vaultmek: approval v2: read raw policy on %s: %w", ep, rerr)
 			}
-			rd, rderr := vsdk.PolicyDigestJSON(raw)
-			if rderr != nil {
-				return nil, fmt.Errorf("vaultmek: approval v2: raw policy digest on %s: %w", ep, rderr)
+			if cerr != nil {
+				return nil, fmt.Errorf("vaultmek: approval v2: canonicalise policy on %s: %w", ep, cerr)
 			}
-			if rd != d {
+			stored, serr := vsdk.PolicyDigestJSON(raw)
+			if serr != nil {
+				return nil, fmt.Errorf("vaultmek: approval v2: stored policy digest on %s: %w", ep, serr)
+			}
+			canon, cderr := vsdk.PolicyDigestJSON(canonical)
+			if cderr != nil {
+				return nil, fmt.Errorf("vaultmek: approval v2: canonical policy digest on %s: %w", ep, cderr)
+			}
+			if stored != canon {
 				return nil, fmt.Errorf("%w on %s", ErrPolicyNotLossless, ep)
 			}
 		}
