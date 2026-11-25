@@ -256,6 +256,7 @@ func (s *Server) SetConfig(c *config.Config) error {
 	s.cfg = c
 	s.cfgMu.Unlock()
 	s.applyConfigSideEffects(c)
+	s.recordAllSoon()
 	// An embedding-space change (model cutover or upgrade) schedules the
 	// background reindex: indexed files flip to pending and the sweep
 	// re-embeds them into the new space. Boot-time re-apply goes through
@@ -291,6 +292,7 @@ func (s *Server) InstallConfig(c *config.Config) {
 	s.cfg = c
 	s.cfgMu.Unlock()
 	s.applyConfigSideEffects(c)
+	s.recordAllSoon()
 }
 
 // applyConfigSideEffects wires config-driven runtime behaviour. With a
@@ -439,6 +441,8 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/admin/tenant-keys/pending", s.auth(s.handleTenantKeysPending))
 	mux.Handle("POST /v1/admin/tenant-keys/pending", s.auth(s.handleTenantKeysPending))
 	mux.Handle("POST /v1/admin/tenant-keys/resweep", s.auth(s.handleTenantKeysResweep))
+	mux.Handle("GET /v1/admin/tenant-keys/records", s.auth(s.handleTenantKeyRecords))
+	mux.Handle("POST /v1/admin/tenant-keys/records", s.auth(s.handleTenantKeyRecords))
 	mux.Handle("GET /v1/shared", s.auth(s.handleSharedWithMe))
 	// Attribute marketplace, for the sharer choosing what to require.
 	mux.Handle("GET /v1/attributes", s.auth(s.handleAttributeCatalogue))

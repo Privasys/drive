@@ -49,8 +49,8 @@ func TeesFromGrant(grant string) ([]vsdk.Principal, error) {
 	return claims.Policy.Principals.Tees, nil
 }
 
-// RefreshTees replaces principals.tees on the key's policy with the
-// grant's tees profile, on EVERY constellation member, authenticated
+// RefreshTees ADDS the grant's tees profile to principals.tees on the key's policy (keeping the
+// running one), on EVERY constellation member, authenticated
 // as the key owner. This is the owner's measurement approval: after an
 // app upgrade the key's pinned profile no longer matches the running
 // enclave, and only the data owner may bless the new one (the policy's
