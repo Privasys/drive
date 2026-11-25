@@ -412,7 +412,7 @@ func (s *Server) Handler(manifestPath string) http.Handler {
 	mux.HandleFunc("GET /.well-known/privasys/app-form", s.handleFormOpen)
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.Handle("POST /status", s.auth(s.handleStatusTool))
-	mux.Handle("POST /configure", s.auth(s.handleConfigure))
+	mux.Handle("POST /configure", s.configureAuth(s.handleConfigure))
 	if manifestPath != "" {
 		mux.HandleFunc("GET /privasys.json", func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, manifestPath)
