@@ -320,7 +320,7 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 			// approval bound to the exact policy update: no plain-bearer
 			// attempt first (vaultmek/teesv2.go).
 			if v2p, ok := s.MEKs.(teesV2Provider); ok {
-				plan, verr := v2p.PrepareTeesApprovalV2(r.Context(), ref, req.Grant)
+				plan, verr := v2p.PrepareTeesApprovalV2(r.Context(), ref, req.Grant, bearer)
 				if errors.Is(verr, vaultmek.ErrPolicyNotLossless) {
 					httpError(w, http.StatusBadGateway, verr)
 					return

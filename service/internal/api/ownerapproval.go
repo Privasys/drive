@@ -200,6 +200,6 @@ func vaultUnreachable(err error) bool {
 // teesV2Provider is the binding-v2 measurement approval (vaultmek/teesv2.go):
 // vaultmek.Client implements it; a provider without it takes the v1 path.
 type teesV2Provider interface {
-	PrepareTeesApprovalV2(ctx context.Context, ref vaultmek.Ref, grant string) (*vaultmek.TeesApprovalV2, error)
+	PrepareTeesApprovalV2(ctx context.Context, ref vaultmek.Ref, grant, ownerBearer string) (*vaultmek.TeesApprovalV2, error)
 	RefreshTeesV2(ctx context.Context, ref vaultmek.Ref, a *vaultmek.TeesApprovalV2, approval string) error
 }

@@ -72,10 +72,13 @@ func NeedsBindingV2(p vsdk.KeyPolicy) bool {
 }
 
 // PrepareTeesApprovalV2 reads the key's policy from every member (they must
-// agree), and returns nil when the key does not take binding v2. Otherwise
-// it builds the new policy from the grant's tees and gathers the member
-// identities the approval binds to.
-func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant string) (*TeesApprovalV2, error) {
+// agree) as the owner: ownerBearer is the token of the person re-arming,
+// which names the account (empty dials as the enclave, which the vault
+// answers only while its measurement is still a principal). It returns nil
+// when the key does not take binding v2. Otherwise it builds the new policy
+// from the grant's tees and gathers the member identities the approval
+// binds to.
+func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant, ownerBearer string) (*TeesApprovalV2, error) {
 	tees, err := TeesFromGrant(grant)
 	if err != nil {
 		return nil, err
@@ -93,7 +96,9 @@ func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant strin
 		curPD   string
 	)
 	for _, ep := range ref.Endpoints {
-		vc, derr := c.dial(ctx, ep, ref.MrenclaveHex, ref.AttServer, tok)
+		// As the owner: after a measurement change the enclave is no longer
+		// a principal of the key, and the vault reads a policy only to one.
+		vc, derr := c.dialAs(ctx, ep, ref.MrenclaveHex, ref.AttServer, tok, ownerBearer)
 		if derr != nil {
 			return nil, fmt.Errorf("vaultmek: approval v2: dial %s: %w", ep, derr)
 		}
