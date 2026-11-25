@@ -200,6 +200,8 @@ func (c *Client) RefreshTeesV2(ctx context.Context, ref Ref, a *TeesApprovalV2, 
 	c.mu.Lock()
 	delete(c.meks, ref.Handle)
 	c.mu.Unlock()
+	// The measurement is approved: the next load is worth trying at once.
+	c.fails.reset(ref.Handle)
 	return nil
 }
 

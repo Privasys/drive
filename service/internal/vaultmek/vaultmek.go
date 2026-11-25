@@ -106,6 +106,12 @@ type Client struct {
 	mu   sync.RWMutex
 	meks map[string][]byte // handle -> MEK, in-memory only
 
+	// fails paces retries of a failing key (by handle) and of a failing
+	// token refresh (key ""), see backoff.go; refreshMu lets one refresh
+	// run at a time.
+	fails     backoffs
+	refreshMu sync.Mutex
+
 	tokMu    sync.Mutex
 	refresh  TokenRefresher
 	freshTok string
@@ -164,14 +170,26 @@ func (c *Client) refreshToken(ctx context.Context) (string, error) {
 	if r == nil {
 		return "", nil
 	}
-	tok, exp, err := r(ctx)
-	if err != nil {
-		log.Printf("vaultmek: attestation-token refresh failed: %v", err)
+	// One refresh at a time: callers that queued behind it take its token.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	if ft := c.cachedFreshToken(time.Now().Unix()); ft != "" {
+		return ft, nil
+	}
+	if err := c.fails.wait("", time.Now()); err != nil {
 		return "", err
 	}
-	if tok == "" {
-		return "", fmt.Errorf("vaultmek: refresher returned an empty token")
+	tok, exp, err := r(ctx)
+	if err == nil && tok == "" {
+		err = fmt.Errorf("vaultmek: refresher returned an empty token")
 	}
+	if err != nil {
+		// The control plane's answer (its reason for a refusal) is in err.
+		log.Printf("vaultmek: attestation-token refresh failed: %v", err)
+		c.fails.fail("", err, time.Now())
+		return "", err
+	}
+	c.fails.reset("")
 	c.tokMu.Lock()
 	c.freshTok, c.freshExp = tok, exp
 	c.tokMu.Unlock()
@@ -423,26 +441,35 @@ func (c *Client) Load(ctx context.Context, ref Ref) ([]byte, error) {
 	}
 	c.mu.RUnlock()
 
+	// A key that failed recently is not retried until its backoff is due:
+	// every read of the tenant (and the indexer) would otherwise hit the
+	// vaults and the control plane in a tight loop. The last failure is
+	// returned, so a measurement change is still recognised.
+	if err := c.fails.wait(ref.Handle, time.Now()); err != nil {
+		return nil, err
+	}
 	tok := ref.AttToken
 	if ft := c.cachedFreshToken(time.Now().Unix()); ft != "" {
 		tok = ft
 	}
 	mek, err := c.loadOnce(ctx, ref, tok)
-	if err != nil {
+	if err != nil && !PrincipalMismatch(err) {
 		// The stored token expires ~15 min after the last re-arm; with a
 		// refresher configured the client self-heals instead of failing
-		// until the owner comes back.
+		// until the owner comes back. A measurement change is not a token
+		// problem, so it does not ask the control plane for one.
 		ft, rerr := c.refreshToken(ctx)
 		if rerr != nil {
-			return nil, fmt.Errorf("%v (token self-heal failed: %v)", err, rerr)
-		}
-		if ft != "" && ft != tok {
+			err = fmt.Errorf("%v (token self-heal failed: %v)", err, rerr)
+		} else if ft != "" && ft != tok {
 			mek, err = c.loadOnce(ctx, ref, ft)
 		}
 	}
 	if err != nil {
+		c.fails.fail(ref.Handle, err, time.Now())
 		return nil, err
 	}
+	c.fails.reset(ref.Handle)
 	c.mu.Lock()
 	c.meks[ref.Handle] = mek
 	c.mu.Unlock()
