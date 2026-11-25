@@ -378,16 +378,32 @@ func TestMeasurementApprovalOnRearm(t *testing.T) {
 		t.Fatal("approval must not run without a grant")
 	}
 
-	// A re-arm WITH a fresh grant approves and loads in one round trip.
+	// A re-arm WITH a fresh grant but no approval token answers with what
+	// the holder must approve; nothing is sent to the vaults.
 	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh-grant"}`)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "owner_approval_required") ||
+		!strings.Contains(string(body), `"operation":"policy-update"`) {
+		t.Fatalf("re-arm without approval: %d %s", resp.StatusCode, body)
+	}
+	if len(fake.refreshed) != 0 {
+		t.Fatal("an update ran before the holder approved")
+	}
+
+	// A token that is not an approval (no vault_op) is refused.
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh-grant","approval_token":"`+testJWT(`{"sub":"s"}`)+`"}`)
+	if resp.StatusCode != http.StatusBadRequest || len(fake.refreshed) != 0 {
+		t.Fatalf("non-approval token: %d %s", resp.StatusCode, body)
+	}
+
+	// With the approval token the caller obtained, the update goes out with
+	// that token alone, and the key loads.
+	approval := testJWT(`{"sub":"s","vault_op":"op-1"}`)
+	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh-grant","approval_token":"`+approval+`"}`)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"measurement_approved":true`) {
 		t.Fatalf("approving re-arm: %d %s", resp.StatusCode, body)
 	}
-	if len(fake.refreshed) != 1 || fake.refreshed[0][0] != "fresh-grant" {
+	if len(fake.refreshed) != 1 || fake.refreshed[0][0] != "fresh-grant" || fake.refreshed[0][1] != approval {
 		t.Fatalf("RefreshTees called with %v", fake.refreshed)
-	}
-	if fake.refreshed[0][1] == "" {
-		t.Fatal("owner bearer missing from the approval")
 	}
 
 	// owner_token (a platform token in the body) is refused outright: an
@@ -1256,78 +1272,6 @@ func TestToolsWriteReadRoundtrip(t *testing.T) {
 		fmt.Sprintf(`{"tenant_id":"%s"}`, tenant.ID))
 	if resp.StatusCode != 200 || !strings.Contains(string(body), "user-1") {
 		t.Fatalf("tool changes (actor attribution): %d %s", resp.StatusCode, body)
-	}
-}
-
-// TestUpgradeApprovedInTheWallet: once the token Drive is handed no longer
-// names the key's owner (Drive's own per-app subject), the vault refuses it
-// and Drive asks the holder's wallet for the approval instead; the tap
-// yields a token that does, and the upgrade is approved with it.
-func TestUpgradeApprovedInTheWallet(t *testing.T) {
-	mek := sha256.Sum256([]byte("vault-held-tenant-mek"))
-	fake := &fakeMEKs{mek: mek[:], clearOnRefresh: true}
-	ts := newFullServer(t, func(s *Server) { s.MEKs = fake })
-
-	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
-	var tenant struct{ ID string }
-	_ = json.Unmarshal(body, &tenant)
-	const handle = "apps.privasys.org/x/data/y/mek/v1"
-	resp, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth,
-		`{"grant":"g","handle":"`+handle+`","constellation":{"endpoints":["v1:1","v2:2"],"mrenclave":"00","attestation_server":"as","threshold":2}}`)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("adopt: %d %s", resp.StatusCode, body)
-	}
-
-	var begun []string
-	approved := false
-	prevBegin, prevCollect, prevWait := approvalBegin, approvalCollect, ownerApprovalWait
-	t.Cleanup(func() { approvalBegin, approvalCollect, ownerApprovalWait = prevBegin, prevCollect, prevWait })
-	ownerApprovalWait = 0
-	approvalBegin = func(_ context.Context, bearer, h, _ string, _ *vaultmek.TeesApprovalV2) (string, bool, error) {
-		begun = append(begun, bearer+"|"+h)
-		return "op-1", true, nil
-	}
-	approvalCollect = func(_ context.Context, _ string, op string) (string, error) {
-		if op != "op-1" {
-			t.Errorf("collected %q", op)
-		}
-		if !approved {
-			return "", nil
-		}
-		return "account-approval-token", nil
-	}
-
-	// Drive upgrades; the vault accepts only a token naming the account.
-	fake.loadErr = errors.New("vaultmek: only 0/2 shares recovered: vault error: caller is not in policy.principals")
-	fake.owner = "account-approval-token"
-
-	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh"}`)
-	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "owner_approval_pending") {
-		t.Fatalf("before the tap: %d %s", resp.StatusCode, body)
-	}
-	if len(begun) != 1 || !strings.HasSuffix(begun[0], "|"+handle) {
-		t.Fatalf("approval requests: %v", begun)
-	}
-
-	// The holder taps; the next re-arm collects, approves and loads.
-	approved = true
-	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh"}`)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"measurement_approved":true`) {
-		t.Fatalf("after the tap: %d %s", resp.StatusCode, body)
-	}
-	if len(begun) != 1 {
-		t.Fatalf("a second approval was requested: %v", begun)
-	}
-	if last := fake.refreshed[len(fake.refreshed)-1]; last[1] != "account-approval-token" {
-		t.Fatalf("approved with %q", last[1])
-	}
-
-	// A vault that cannot be reached is not a reason to push the holder.
-	fake.loadErr = errors.New("vaultmek: only 0/2 shares recovered: vault error: caller is not in policy.principals")
-	fake.refreshErr = errors.New("vaultmek: dial v1:1: connection refused")
-	resp, _ = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"g4"}`)
-	if resp.StatusCode != http.StatusBadGateway || len(begun) != 1 {
-		t.Fatalf("unreachable vault: %d, approvals %v", resp.StatusCode, begun)
 	}
 }
 

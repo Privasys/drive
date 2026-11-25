@@ -97,7 +97,7 @@ func (c *Client) refreshTeesOn(ctx context.Context, endpoint string, ref Ref, te
 	if err != nil {
 		return fmt.Errorf("read policy: %w", err)
 	}
-	policy.Principals.Tees = tees
+	policy.Principals.Tees = unionTees(policy.Principals.Tees, tees)
 	if _, err := vc.UpdatePolicy(ctx, ref.Handle, policy); err != nil {
 		return fmt.Errorf("update policy: %w", err)
 	}

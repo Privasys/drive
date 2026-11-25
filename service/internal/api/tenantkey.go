@@ -145,6 +145,9 @@ func (s *Server) rearmTenantKey(ctx context.Context, tenantID, existingRef, attT
 	if _, err := s.MEKs.Load(ctx, ref); err != nil {
 		return "", http.StatusBadGateway, err
 	}
+	// The enclave just opened the key, so it is a principal: record the
+	// policy if it is not on record yet (keys from before the record).
+	s.recordKeyPolicy(ctx, tenantID, false)
 	return ref.Handle, http.StatusOK, nil
 }
 
@@ -234,6 +237,11 @@ type tenantKeyRequest struct {
 	// token into the app. Present only so a request that still sends it is
 	// refused (400), never silently ignored.
 	OwnerToken string `json:"owner_token,omitempty"`
+	// ApprovalToken is the vault-approval token the caller obtained from
+	// privasys.id for the approval this endpoint described (409
+	// owner_approval_required). It is the only authority Drive presents to
+	// the vaults for a measurement change.
+	ApprovalToken string `json:"approval_token,omitempty"`
 }
 
 // handleTenantKey provisions (or re-arms) the caller's personal-tenant
@@ -284,20 +292,16 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 			return
 		}
 		// The vault refusing the enclave's identity against the key's
-		// principals means the app's measurement changed (an upgrade)
-		// and this data owner has not yet approved it. The owner is
-		// right here: with a fresh grant (which pins the CURRENT
-		// measurement) and their bearer, approve it in place — the
-		// vault authorises the tees update against the owner
-		// credential, so this works only for the key's own owner.
+		// principals means the app's measurement changed (an upgrade) and
+		// the key's holder has not approved it yet. Drive never holds the
+		// holder's credential: it answers with what to approve, the CALLER
+		// (web front, wallet, CLI) asks privasys.id for the approval with
+		// its own session, and re-posts the approval token, which is the
+		// only authority Drive presents to the vaults.
 		if vaultmek.PrincipalMismatch(rerr) {
-			// The request's own bearer: a token Drive is the audience of.
-			// Drive never holds a platform token (owner_token is refused
-			// at the top of the handler).
-			bearer := p.Bearer
-			if req.Grant == "" || bearer == "" {
+			if req.Grant == "" {
 				httpError(w, http.StatusConflict, errors.New(
-					"measurement_approval_required: the Drive app was upgraded; re-arm with a fresh grant bundle (and owner_token on a sealed session) to approve the new measurement for your key"))
+					"measurement_approval_required: the Drive app was upgraded; re-arm with a fresh grant bundle to approve the new measurement for your key"))
 				return
 			}
 			ref, perr := vaultmek.ParseRef(existing)
@@ -312,60 +316,46 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 			if audience == "" {
 				audience = req.Constellation.OIDCAudience
 			}
-			var aerr error
-			v2done := false
-			// A key whose policy asks for binding v2 takes only a wallet
-			// approval bound to the exact policy update: no plain-bearer
-			// attempt first (vaultmek/teesv2.go).
-			if v2p, ok := s.MEKs.(teesV2Provider); ok {
-				plan, verr := v2p.PrepareTeesApprovalV2(r.Context(), ref, req.Grant, bearer)
+			// The binding version is the KEY's own rule, as its vaults last
+			// confirmed it. If it is not on record, or a binding-2 plan
+			// cannot be built, Drive fails closed: no approval is asked for,
+			// and never a v1 one for a binding-2 key.
+			v2p, hasV2 := s.MEKs.(teesV2Provider)
+			var plan *vaultmek.TeesApprovalV2
+			if hasV2 {
+				var verr error
+				plan, verr = v2p.PrepareTeesApprovalV2(r.Context(), ref, req.Grant)
+				if errors.Is(verr, vaultmek.ErrRestageNeeded) {
+					log.Printf("tenant-key: measurement approval for tenant %.8s… needs a re-stage: the key's policy is not on record", t.ID)
+					httpError(w, http.StatusConflict, errors.New(
+						"restage_needed: this key's policy is not on record, so its measurement cannot be approved; it must be re-staged by the operator"))
+					return
+				}
 				if verr != nil {
-					// The binding version is the KEY's own rule, read from its
-					// vaults. If it could not be read, or a binding-2 plan could
-					// not be built, Drive does not know which approval the key
-					// takes: it fails closed, with no card and no v1 attempt (a
-					// binding-0 card for a binding-2 key could never work and
-					// only misleads the holder). The error names the member and
-					// the step, never the policy.
 					log.Printf("tenant-key: measurement approval for tenant %.8s… refused: %v", t.ID, verr)
 					httpError(w, http.StatusBadGateway, verr)
 					return
 				}
-				if plan != nil {
-					tok, terr := s.ownerApprovalToken(r.Context(), t.ID, bearer, ref.Handle, audience, plan)
-					if errors.Is(terr, errApprovalPending) {
-						httpError(w, http.StatusConflict, terr)
-						return
-					}
-					if terr != nil {
-						httpError(w, http.StatusBadGateway, fmt.Errorf("wallet approval: %v", terr))
-						return
-					}
-					if aerr := v2p.RefreshTeesV2(r.Context(), ref, plan, tok); aerr != nil {
-						httpError(w, http.StatusBadGateway, aerr)
-						return
-					}
-					v2done = true
-				}
 			}
-			if !v2done {
-				aerr = s.MEKs.RefreshTees(r.Context(), ref, req.Grant, bearer)
-				if aerr != nil && !vaultUnreachable(aerr) {
-					// The vault refused the token: it does not name the key's
-					// owner, which is the case once Drive has its own per-app
-					// subjects. Ask the holder's wallet for an approval whose
-					// token does (ownerapproval.go).
-					tok, terr := s.ownerApprovalToken(r.Context(), t.ID, bearer, ref.Handle, audience, nil)
-					if errors.Is(terr, errApprovalPending) {
-						httpError(w, http.StatusConflict, terr)
-						return
-					}
-					if terr != nil {
-						httpError(w, http.StatusBadGateway, fmt.Errorf("%v; wallet approval: %v", aerr, terr))
-						return
-					}
-					aerr = s.MEKs.RefreshTees(r.Context(), ref, req.Grant, tok)
-				}
+			if req.ApprovalToken == "" {
+				// What the holder approves: the caller sends this body to
+				// privasys.id's vault-approval begin with its own session.
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error":    "owner_approval_required: approve the Privasys Drive key update in your Privasys Wallet, then re-arm with the approval token",
+					"approval": approvalRequest(ref.Handle, audience, plan),
+				})
+				return
+			}
+			if !isApprovalToken(req.ApprovalToken) {
+				httpError(w, http.StatusBadRequest, errors.New(
+					"approval_token must be a vault-approval token (bound to the operation)"))
+				return
+			}
+			var aerr error
+			if plan != nil {
+				aerr = v2p.RefreshTeesV2(r.Context(), ref, plan, req.ApprovalToken)
+			} else {
+				aerr = s.MEKs.RefreshTees(r.Context(), ref, req.Grant, req.ApprovalToken)
 			}
 			if aerr != nil {
 				httpError(w, http.StatusBadGateway, aerr)
@@ -376,6 +366,8 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 				httpError(w, status, rerr)
 				return
 			}
+			// The policy changed: record what the vaults now hold.
+			s.recordKeyPolicy(r.Context(), t.ID, true)
 			resp := map[string]any{
 				"status": "loaded", "handle": handle, "measurement_approved": true,
 			}

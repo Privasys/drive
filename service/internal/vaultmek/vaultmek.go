@@ -71,6 +71,14 @@ type Ref struct {
 	// same material at the next handle generation (Regenerate). Zero marks
 	// a legacy ref from before rotation existed: due immediately.
 	RotatedAt int64 `json:"rotated_at,omitempty"`
+	// Policy and PolicyVersion are the key's stored policy as its vaults
+	// last confirmed it (read back from every member after a create, an
+	// update or a load, never what Drive meant to send). They carry no
+	// trust: a measurement approval binds PD(Policy) and PolicyVersion, and
+	// the vault refuses one that does not match what it holds. They let
+	// Drive build that approval without reading the policy as the owner.
+	Policy        json.RawMessage `json:"policy,omitempty"`
+	PolicyVersion uint32          `json:"policy_version,omitempty"`
 }
 
 // RefJSON round-trips a Ref for the index column.
@@ -252,7 +260,7 @@ func (c *Client) Provision(ctx context.Context, b Bundle) (Ref, error) {
 	c.mu.Lock()
 	c.meks[b.Handle] = mek
 	c.mu.Unlock()
-	return ref, nil
+	return c.withPolicy(ctx, ref), nil
 }
 
 // createShares Shamir-splits secret and creates one share per endpoint at
@@ -344,7 +352,7 @@ func (c *Client) Regenerate(ctx context.Context, ref Ref, b Bundle) (Ref, error)
 				c.mu.Lock()
 				c.meks[newHandle] = mek
 				c.mu.Unlock()
-				return newRef, nil
+				return c.withPolicy(ctx, newRef), nil
 			}
 		}
 		return Ref{}, cerr
@@ -352,7 +360,7 @@ func (c *Client) Regenerate(ctx context.Context, ref Ref, b Bundle) (Ref, error)
 	c.mu.Lock()
 	c.meks[newHandle] = mek
 	c.mu.Unlock()
-	return newRef, nil
+	return c.withPolicy(ctx, newRef), nil
 }
 
 // Unwrap decrypts a payload sealed under a vault Aes256GcmKey (a

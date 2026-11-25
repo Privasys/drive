@@ -1,63 +1,32 @@
 package api
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"log"
-	"net/http"
-	"net/url"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
 // The holder approves a Drive upgrade for their key, in their wallet.
 //
-// A holder's vault key is owned by their account, and after a Drive upgrade
-// the vault accepts the new measurement only against a token whose subject
-// is that account. While Drive's subjects were account ids, the token the
-// wallet called Drive with was such a token and the approval went through
-// silently. Once Drive has its own per-app subjects it is not, and the vault
-// refuses it.
-//
-// Drive then asks the IdP for a vault approval of the key's policy update
-// (operation "policy-update", the card the wallet already shows), started
-// with the token it was handed: the IdP resolves that token's subject to
-// the account and pushes the holder's wallet. The holder taps; the IdP
-// issues an approval token whose subject is the account; Drive uses it for
-// the measurement approval. No wallet change, no vault change.
+// After a measurement change the vault accepts the new measurement only
+// with the holder's approval. Drive never holds the holder's credential:
+// the re-arm answers 409 owner_approval_required with the approval request
+// (approvalRequest). The CALLER, which holds the holder's session (web
+// front, wallet, CLI), sends it to privasys.id's vault-approval begin with
+// that session, the holder taps, the caller collects the approval token and
+// re-posts the re-arm with it as approval_token. That token, bound to the
+// operation, is the only authority Drive presents to the vaults.
 
-// ownerApprovalWait is how long a re-arm holds the call open for the tap.
-var ownerApprovalWait = 25 * time.Second
-
-// pendingOwnerApproval is a wallet approval Drive is waiting on, per tenant.
-type pendingOwnerApproval struct {
-	vaultOp string
-	expires time.Time
-}
-
-var pendingOwnerApprovals sync.Map // tenantID → *pendingOwnerApproval
-
-// errApprovalPending means the holder has a request on their phone.
-var errApprovalPending = errors.New("owner_approval_pending: approve the Privasys Drive key update in your Privasys Wallet, then open Drive again")
-
-// The IdP round trips, swappable in tests.
-var (
-	approvalBegin   = idpApprovalBegin
-	approvalCollect = idpApprovalCollect
-)
-
-// idpApprovalBegin starts a policy-update approval for handle, authenticated
-// by bearer (any token of the holder's the IdP issued). It returns the
-// vault_op to collect with, and whether a wallet can receive the request.
+// approvalRequest is the body the caller sends to privasys.id's
+// POST /fido2/vault-approval/begin for this key. v2 nil is the v1
+// "policy-update" approval (a key whose rule does not take binding 2).
 // audience is the key's constellation audience: the approval token must
-// carry it for those vaults to accept it. Empty leaves the IdP's default.
-func idpApprovalBegin(ctx context.Context, bearer, handle, audience string, v2 *vaultmek.TeesApprovalV2) (string, bool, error) {
+// carry it for those vaults to accept it.
+func approvalRequest(handle, audience string, v2 *vaultmek.TeesApprovalV2) map[string]any {
 	in := map[string]any{
 		"operation":   "policy-update",
 		"handle":      handle,
@@ -92,116 +61,68 @@ func idpApprovalBegin(ctx context.Context, bearer, handle, audience string, v2 *
 	if audience != "" {
 		in["audience"] = audience
 	}
-	body, _ := json.Marshal(in)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, idpBase()+"/fido2/vault-approval/begin", bytes.NewReader(body))
-	if err != nil {
-		return "", false, err
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
-	if err != nil {
-		return "", false, err
-	}
-	defer resp.Body.Close()
-	var out struct {
-		VaultOp        string `json:"vault_op"`
-		PushRegistered bool   `json:"push_registered"`
-		Error          string `json:"error"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	if resp.StatusCode != http.StatusOK || out.VaultOp == "" {
-		return "", false, fmt.Errorf("vault approval: identity provider answered %d: %s", resp.StatusCode, out.Error)
-	}
-	return out.VaultOp, out.PushRegistered, nil
+	return in
 }
 
-// idpApprovalCollect returns the approval token once the holder approved,
-// "" while still pending.
-func idpApprovalCollect(ctx context.Context, bearer, vaultOp string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		idpBase()+"/fido2/vault-approval/token?challenge="+url.QueryEscape(vaultOp), nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusAccepted {
-		return "", nil
-	}
-	var out struct {
-		AccessToken string `json:"access_token"`
-	}
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&out) != nil || out.AccessToken == "" {
-		return "", fmt.Errorf("vault approval: identity provider answered %d", resp.StatusCode)
-	}
-	return out.AccessToken, nil
-}
-
-// ownerApprovalToken gets a token naming the key's owner by asking the
-// holder's wallet, starting or resuming the request for this tenant. It
-// returns errApprovalPending while the holder has not tapped yet.
-func (s *Server) ownerApprovalToken(ctx context.Context, tenantID, bearer, handle, audience string, v2 *vaultmek.TeesApprovalV2) (string, error) {
-	var vaultOp string
-	if v, ok := pendingOwnerApprovals.Load(tenantID); ok && time.Now().Before(v.(*pendingOwnerApproval).expires) {
-		vaultOp = v.(*pendingOwnerApproval).vaultOp
-	} else {
-		op, push, err := approvalBegin(ctx, bearer, handle, audience, v2)
-		if err != nil {
-			return "", err
-		}
-		if !push {
-			return "", errors.New("measurement_approval_required: your wallet cannot receive the approval request; open the Privasys Wallet to approve the Drive update")
-		}
-		vaultOp = op
-		pendingOwnerApprovals.Store(tenantID, &pendingOwnerApproval{vaultOp: op, expires: time.Now().Add(5 * time.Minute)})
-		log.Printf("tenant-key: the vault refused the token for tenant %.8s…; asked the holder's wallet to approve the upgrade", tenantID)
-	}
-	deadline := time.Now().Add(ownerApprovalWait)
-	for {
-		tok, err := approvalCollect(ctx, bearer, vaultOp)
-		if err != nil {
-			pendingOwnerApprovals.Delete(tenantID)
-			return "", err
-		}
-		if tok != "" {
-			pendingOwnerApprovals.Delete(tenantID)
-			log.Printf("tenant-key: the holder approved the upgrade for tenant %.8s… in their wallet", tenantID)
-			return tok, nil
-		}
-		if time.Now().Add(2 * time.Second).After(deadline) {
-			return "", errApprovalPending
-		}
-		select {
-		case <-ctx.Done():
-			return "", errApprovalPending
-		case <-time.After(2 * time.Second):
-		}
-	}
-}
-
-// vaultUnreachable tells a transport failure (worth a retry, not a push to
-// the holder's phone) from the vault refusing the request.
-func vaultUnreachable(err error) bool {
-	if err == nil {
+// isApprovalToken reports whether tok is a vault-approval token: a JWT
+// bound to an operation (a vault_op claim). Only such a token is taken as
+// approval_token; the vaults verify it in full. Read without verification:
+// the answer only refuses.
+func isApprovalToken(tok string) bool {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	for _, s := range []string{"dial", "connection refused", "connection reset", "timeout", "deadline exceeded", "no route", "eof"} {
-		if strings.Contains(msg, s) {
-			return true
-		}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return false
 	}
-	return false
+	var claims map[string]any
+	if json.Unmarshal(raw, &claims) != nil {
+		return false
+	}
+	op, _ := claims["vault_op"].(string)
+	return op != ""
 }
 
 // teesV2Provider is the binding-v2 measurement approval (vaultmek/teesv2.go):
 // vaultmek.Client implements it; a provider without it takes the v1 path.
 type teesV2Provider interface {
-	PrepareTeesApprovalV2(ctx context.Context, ref vaultmek.Ref, grant, ownerBearer string) (*vaultmek.TeesApprovalV2, error)
+	PrepareTeesApprovalV2(ctx context.Context, ref vaultmek.Ref, grant string) (*vaultmek.TeesApprovalV2, error)
 	RefreshTeesV2(ctx context.Context, ref vaultmek.Ref, a *vaultmek.TeesApprovalV2, approval string) error
+}
+
+// policyRecorder reads a key's stored policy back from its vaults, as the
+// enclave (vaultmek.Client implements it).
+type policyRecorder interface {
+	ReadStoredPolicy(ctx context.Context, ref vaultmek.Ref) (json.RawMessage, uint32, error)
+}
+
+// recordKeyPolicy stores on the tenant's key ref the policy its vaults hold,
+// read back as the enclave (never what Drive meant to send). force re-reads
+// it even when one is on record, after an update. Best effort: a failure is
+// logged and the record is left as it was; a measurement change on a key
+// with no record answers "re-stage needed", never a guess.
+func (s *Server) recordKeyPolicy(ctx context.Context, tenantID string, force bool) {
+	pr, ok := s.MEKs.(policyRecorder)
+	if !ok {
+		return
+	}
+	raw, err := s.Store.TenantMekRef(ctx, tenantID)
+	if err != nil || raw == "" {
+		return
+	}
+	ref, err := vaultmek.ParseRef(raw)
+	if err != nil || (!force && len(ref.Policy) > 0) {
+		return
+	}
+	p, v, err := pr.ReadStoredPolicy(ctx, ref)
+	if err != nil {
+		log.Printf("tenantkey: the policy of %s could not be recorded: %v", ref.Handle, err)
+		return
+	}
+	ref.Policy, ref.PolicyVersion = p, v
+	if err := s.Store.SetTenantMekRef(ctx, tenantID, vaultmek.RefJSON(ref)); err != nil {
+		log.Printf("tenantkey: recording the policy of %s failed: %v", ref.Handle, err)
+	}
 }

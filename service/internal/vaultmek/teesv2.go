@@ -72,121 +72,74 @@ func NeedsBindingV2(p vsdk.KeyPolicy) bool {
 	return false
 }
 
-// PrepareTeesApprovalV2 reads the key's policy from every member (they must
-// agree) as the owner: ownerBearer is the token of the person re-arming,
-// which names the account (empty dials as the enclave, which the vault
-// answers only while its measurement is still a principal). It returns nil
-// when the key does not take binding v2. Otherwise it builds the new policy
-// from the grant's tees and gathers the member identities the approval
-// binds to.
-func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant, ownerBearer string) (*TeesApprovalV2, error) {
+// PrepareTeesApprovalV2 builds the approval a measurement change takes, from
+// the key's policy as Drive last saw its vaults confirm it (ref.Policy), and
+// never with a person's credential: every vault call here is the enclave's
+// own (CanonicalisePolicy and GetVaultIdentity need no principal). It
+// returns nil for a key whose rule does not take binding v2 (the v1
+// approval), ErrRestageNeeded when the policy is not on record, and an
+// error, never a fallback, when a binding-2 plan cannot be built. The new
+// policy is the current one with the grant's measurement ADDED to its tees.
+func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant string) (*TeesApprovalV2, error) {
+	if len(ref.Policy) == 0 {
+		return nil, ErrRestageNeeded
+	}
+	var cur vsdk.KeyPolicy
+	if err := json.Unmarshal(ref.Policy, &cur); err != nil {
+		return nil, fmt.Errorf("vaultmek: approval v2: the recorded policy does not parse: %w", err)
+	}
+	if !NeedsBindingV2(cur) {
+		return nil, nil
+	}
 	tees, err := TeesFromGrant(grant)
 	if err != nil {
 		return nil, err
+	}
+	curPD, err := vsdk.PolicyDigestJSON(ref.Policy)
+	if err != nil {
+		return nil, fmt.Errorf("vaultmek: approval v2: recorded policy digest: %w", err)
 	}
 	tok := ref.AttToken
 	if ft := c.cachedFreshToken(time.Now().Unix()); ft != "" {
 		tok = ft
 	}
-	var (
-		cur     *vsdk.KeyPolicy
-		version uint32
-		digest  string
-		ids     []vsdk.VaultIdentity
-		curRaw  json.RawMessage
-		curPD   string
-	)
-	for _, ep := range ref.Endpoints {
-		// As the owner: after a measurement change the enclave is no longer
-		// a principal of the key, and the vault reads a policy only to one.
-		vc, derr := c.dialAs(ctx, ep, ref.MrenclaveHex, ref.AttServer, tok, ownerBearer)
-		if derr != nil {
-			return nil, fmt.Errorf("vaultmek: approval v2: dial %s: %w", ep, derr)
-		}
-		p, v, perr := vc.GetPolicy(ctx, ref.Handle)
-		var (
-			id                    vsdk.VaultIdentity
-			ierr, rerr, cerr      error
-			raw, typed, canonical json.RawMessage
-		)
-		if perr == nil && NeedsBindingV2(p) {
-			id, ierr = vc.GetVaultIdentity(ctx)
-			raw, _, rerr = vc.GetPolicyRaw(ctx, ref.Handle)
-			// The vault's own canonical form of the typed round trip: it
-			// writes back every field at its default, as GetPolicy does, so
-			// it equals the stored policy unless the typed form dropped
-			// something (formats §5.1).
-			if typed, cerr = json.Marshal(p); cerr == nil {
-				canonical, _, cerr = vc.CanonicalPolicy(ctx, typed)
-			}
-		}
-		vc.Close()
-		if perr != nil {
-			return nil, fmt.Errorf("vaultmek: approval v2: read policy on %s: %w", ep, perr)
-		}
-		d, derr := vsdk.PolicyDigest(p)
-		if derr != nil {
-			return nil, fmt.Errorf("vaultmek: approval v2: policy digest on %s: %w", ep, derr)
-		}
-		if NeedsBindingV2(p) {
-			// The new policy is built from the typed policy. Refuse unless
-			// the typed round trip is lossless: a field the client does not
-			// know would otherwise vanish from the policy the owner approves.
-			if rerr != nil {
-				return nil, fmt.Errorf("vaultmek: approval v2: read raw policy on %s: %w", ep, rerr)
-			}
-			if cerr != nil {
-				return nil, fmt.Errorf("vaultmek: approval v2: canonicalise policy on %s: %w", ep, cerr)
-			}
-			stored, serr := vsdk.PolicyDigestJSON(raw)
-			if serr != nil {
-				return nil, fmt.Errorf("vaultmek: approval v2: stored policy digest on %s: %w", ep, serr)
-			}
-			canon, cderr := vsdk.PolicyDigestJSON(canonical)
-			if cderr != nil {
-				return nil, fmt.Errorf("vaultmek: approval v2: canonical policy digest on %s: %w", ep, cderr)
-			}
-			if stored != canon {
-				return nil, fmt.Errorf("%w on %s", ErrPolicyNotLossless, ep)
-			}
-			// The policy being replaced, as the vaults serialise it: the
-			// "before" an update_policy_from binds (formats §5.3).
-			if curRaw == nil {
-				curRaw, curPD = raw, stored
-			} else if stored != curPD {
-				return nil, fmt.Errorf("vaultmek: approval v2: the vaults disagree on the stored policy of %s", ref.Handle)
-			}
-		}
-		if cur == nil {
-			cur, version, digest = &p, v, d
-		} else if d != digest || v != version {
-			return nil, fmt.Errorf("vaultmek: approval v2: the vaults disagree on the policy of %s", ref.Handle)
-		}
-		if !NeedsBindingV2(p) {
-			continue
-		}
-		if ierr != nil {
-			return nil, fmt.Errorf("vaultmek: approval v2: identity of %s: %w", ep, ierr)
-		}
-		ids = append(ids, id)
+	// The typed round trip must be lossless: the vaults' stored form of the
+	// typed current policy must have the recorded policy's digest, or a
+	// field the client does not know would vanish from what the holder
+	// approves.
+	typedCur, err := json.Marshal(cur)
+	if err != nil {
+		return nil, err
 	}
-	if cur == nil || !NeedsBindingV2(*cur) {
-		return nil, nil
+	_, samePD, err := c.canonicalNewPolicy(ctx, ref, tok, "", typedCur)
+	if err != nil {
+		return nil, err
 	}
-	np := *cur
-	np.Principals.Tees = tees
+	if samePD != curPD {
+		return nil, ErrPolicyNotLossless
+	}
+	np := cur
+	np.Principals.Tees = unionTees(cur.Principals.Tees, tees)
 	typed, err := json.Marshal(np)
 	if err != nil {
 		return nil, err
 	}
-	// The new policy goes out in the vault's own stored form, every field
-	// written, as CanonicalisePolicy returns it: the form the current policy
-	// is read in, so the wallet compares like with like and shows only what
-	// changes, and the form a vault from v0.44.0 requires. Every member must
-	// return the same.
-	raw, target, err := c.canonicalNewPolicy(ctx, ref, tok, ownerBearer, typed)
+	raw, target, err := c.canonicalNewPolicy(ctx, ref, tok, "", typed)
 	if err != nil {
 		return nil, err
+	}
+	var ids []vsdk.VaultIdentity
+	for _, ep := range ref.Endpoints {
+		vc, derr := c.dial(ctx, ep, ref.MrenclaveHex, ref.AttServer, tok)
+		if derr != nil {
+			return nil, fmt.Errorf("vaultmek: approval v2: dial %s: %w", ep, derr)
+		}
+		id, ierr := vc.GetVaultIdentity(ctx)
+		vc.Close()
+		if ierr != nil {
+			return nil, fmt.Errorf("vaultmek: approval v2: %s: identity: %w", ep, ierr)
+		}
+		ids = append(ids, id)
 	}
 	members := make([]string, 0, len(ids))
 	from := len(ids) > 0
@@ -199,16 +152,14 @@ func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant, owne
 	sort.Strings(members)
 	a := &TeesApprovalV2{
 		NewPolicy: np, NewPolicyJSON: raw, Target: target,
-		PolicyVersion: version, Members: members, Identities: ids,
+		PolicyVersion: ref.PolicyVersion, Members: members, Identities: ids,
 	}
 	if from {
-		// Every member takes update_policy_from: bind the policy replaced
-		// too, so the wallet can show a difference it can trust.
 		ft, ferr := vsdk.UpdatePolicyFromTarget(curPD, target)
 		if ferr != nil {
 			return nil, fmt.Errorf("vaultmek: approval v2: %w", ferr)
 		}
-		a.From, a.Target, a.CurrentPolicyJSON, a.ReplacedPD = true, ft, curRaw, curPD
+		a.From, a.Target, a.CurrentPolicyJSON, a.ReplacedPD = true, ft, ref.Policy, curPD
 	}
 	return a, nil
 }
