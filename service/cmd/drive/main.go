@@ -343,14 +343,21 @@ func loadMEK(mekHex, stateDir string, dev bool) ([]byte, error) {
 }
 
 // defaultAudience is the audience list enforced until configure sets one:
-// OIDC_AUDIENCE when given, otherwise the platform audiences (the web front
-// and the wallet's Drive section) and this app's own audience (a sign-in
-// over Drive's direct name).
+// OIDC_AUDIENCE when given; otherwise this app's own audience (a sign-in
+// over Drive's direct name) and ONE platform audience, this environment's
+// as the runtime names it (PRIVASYS_AUDIENCE). Never both platform
+// audiences: a token from the other environment, which carries the same
+// account subject, must not act on this one. Anything else, or nothing
+// (an older runtime), means production.
 func defaultAudience(appID string) string {
 	if v := strings.TrimSpace(os.Getenv("OIDC_AUDIENCE")); v != "" {
 		return v
 	}
-	auds := []string{"privasys-platform", "privasys-platform-test"}
+	platformAud := "privasys-platform"
+	if v := strings.TrimSpace(os.Getenv("PRIVASYS_AUDIENCE")); v == "privasys-platform-test" {
+		platformAud = v
+	}
+	auds := []string{platformAud}
 	if id := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(appID)), "-", ""); id != "" {
 		auds = append(auds, "app:"+id)
 	}

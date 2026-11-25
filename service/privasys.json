@@ -54,7 +54,7 @@
                 },
                 "oidc_audience": {
                     "type": "string",
-                    "description": "Audiences a user bearer must carry, comma-separated (this environment's platform audience, and app:<this app id> for direct-name sign-ins). Only access tokens are accepted. Empty: privasys-platform, privasys-platform-test and app:<this app id>, enforced. Mutable.",
+                    "description": "Audiences a user bearer must carry, comma-separated (this environment's platform audience, and app:<this app id> for direct-name sign-ins). Only access tokens are accepted. Empty: this environment's platform audience (from the runtime's PRIVASYS_AUDIENCE; privasys-platform when absent) and app:<this app id>, enforced. Mutable.",
                     "x-privasys": {
                         "label": "Accepted audiences"
                     }
@@ -219,7 +219,7 @@
                     },
                     "oidc_audience": {
                         "type": "string",
-                        "description": "Audiences a user bearer must carry, comma-separated (this environment's platform audience, and app:<this app id> for direct-name sign-ins). Only access tokens are accepted. Empty: privasys-platform, privasys-platform-test and app:<this app id>, enforced. Mutable.",
+                        "description": "Audiences a user bearer must carry, comma-separated (this environment's platform audience, and app:<this app id> for direct-name sign-ins). Only access tokens are accepted. Empty: this environment's platform audience (from the runtime's PRIVASYS_AUDIENCE; privasys-platform when absent) and app:<this app id>, enforced. Mutable.",
                         "x-privasys": {
                             "label": "Accepted audiences"
                         }
