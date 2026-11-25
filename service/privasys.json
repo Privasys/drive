@@ -1019,6 +1019,7 @@
                 "properties": {}
             },
             "x-privasys": {
+                "auth": "owner",
                 "progress": {
                     "tool": "drain_local_objects_status",
                     "stateField": "state",
@@ -1031,6 +1032,7 @@
             "name": "drain_local_objects_status",
             "title": "Object drain progress",
             "endpoint": "/actions/drain_local_objects/status",
+            "x-privasys": { "auth": "owner" },
             "role": "status",
             "description": "Progress of the volume-to-bucket object copy: state (idle | running | done | failed), objects copied and skipped, bytes moved, last error.",
             "inputSchema": {
@@ -1142,6 +1144,7 @@
         {
             "name": "purge_tenant",
             "role": "config",
+            "x-privasys": { "auth": "owner" },
             "title": "Purge an unreachable tenant",
             "endpoint": "/tools/purge_tenant",
             "description": "Permanently remove a tenant: sealed chunks (best effort), then the index (folders, files, members, grants and pending link requests). For tenants nobody can unlock any more, typically after an identity rotation on a sovereign instance, or for offboarding. Instance operator (app owner/admin) only; the purge is recorded in the append-only audit log, which survives the tenant. Irreversible.",
@@ -1166,6 +1169,7 @@
         {
             "name": "list_subjects",
             "role": "config",
+            "x-privasys": { "auth": "owner" },
             "title": "List the identifiers Drive holds",
             "endpoint": "/tools/list_subjects",
             "description": "Every distinct identifier Drive stores for a person (members, user grants, authors, link requests, access events), for re-keying Drive to its own per-app subjects. Instance operator (app owner/admin) only.",
@@ -1177,6 +1181,7 @@
         {
             "name": "rekey_subjects",
             "role": "config",
+            "x-privasys": { "auth": "owner" },
             "title": "Re-key Drive's identifiers",
             "endpoint": "/tools/rekey_subjects",
             "description": "Rewrite every stored identifier for a person from one value to another, in one transaction, from a mapping the IdP produced (subjects for Drive's client, per account). Refuses a mapping that would merge two people. The append-only audit log keeps its history. Instance operator (app owner/admin) only; audited.",

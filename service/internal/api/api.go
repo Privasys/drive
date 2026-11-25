@@ -394,10 +394,10 @@ func (s *Server) Handler(manifestPath string) http.Handler {
 	// cut registered them inside the /v1 sub-mux and the runtime answered
 	// 404 for the drain. Point 1 (bucket move): drain the sealed-volume
 	// object store into the configured bucket — owner action + status.
-	mux.Handle("POST /actions/drain_local_objects", s.auth(s.handleDrainLocalObjects))
+	mux.Handle("POST /actions/drain_local_objects", s.configureAuth(s.handleDrainLocalObjects))
 	// Status tools are invoked like any tool (POST) by the action runner and
 	// read with GET by hand: accept both.
-	mux.Handle("/actions/drain_local_objects/status", s.auth(s.handleDrainStatus))
+	mux.Handle("/actions/drain_local_objects/status", s.configureAuth(s.handleDrainStatus))
 	// MCP shim for the confidential-AI agent (§8.7 RAG-in-enclave).
 	mux.Handle("GET /api/v1/mcp/tools", s.auth(s.handleMCPList))
 	mux.Handle("POST /api/v1/mcp/tools/{tool}", s.auth(s.handleMCPCall))

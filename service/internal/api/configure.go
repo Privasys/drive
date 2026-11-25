@@ -271,3 +271,17 @@ func (s *Server) configureAllowed(p *Principal) error {
 	}
 	return nil
 }
+
+// operatorAllowed is the instance operator's gate for every operator route
+// (purge, subjects, drain, tenant-key admin): the caller must be the app's
+// owner or admin as the runtime itself verified it, i.e. the runtime's
+// X-Privasys-Configure-Authorized on a route the manifest declares "owner"
+// (configureAuth turns it into viaConfigureGrant only when the runtime
+// states PRIVASYS_CONFIGURE_GRANT=1). A user's bearer, a tool token, the
+// wallet's Drive key, a sealed session or an app grant is refused.
+func (s *Server) operatorAllowed(p *Principal) error {
+	if p == nil || p.Via != viaConfigureGrant {
+		return errors.New("only the instance operator (the app's owner or admin) may do this")
+	}
+	return nil
+}

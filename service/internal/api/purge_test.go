@@ -24,13 +24,13 @@ func TestPurgeTenant(t *testing.T) {
 	tenantID, fileID, _ := ownerTenantWithFile(t, ts.URL, owner)
 
 	// Purge without a reason is rejected.
-	code, _ := doReq(t, bearerReq(t, "POST", ts.URL+"/tools/purge_tenant", owner,
+	code, _ := doReq(t, operatorReq(t, "POST", ts.URL+"/tools/purge_tenant",
 		`{"tenant_id":"`+tenantID+`"}`))
 	if code != http.StatusBadRequest {
 		t.Fatalf("purge without reason: want 400, got %d", code)
 	}
 
-	code, b := doReq(t, bearerReq(t, "POST", ts.URL+"/tools/purge_tenant", owner,
+	code, b := doReq(t, operatorReq(t, "POST", ts.URL+"/tools/purge_tenant",
 		`{"tenant_id":"`+tenantID+`","reason":"identity rotated; tenant unreachable"}`))
 	if code != 200 {
 		t.Fatalf("purge: %d %s", code, b)
@@ -56,7 +56,7 @@ func TestPurgeTenant(t *testing.T) {
 	}
 
 	// Purging again reports not found.
-	if code, _ := doReq(t, bearerReq(t, "POST", ts.URL+"/tools/purge_tenant", owner,
+	if code, _ := doReq(t, operatorReq(t, "POST", ts.URL+"/tools/purge_tenant",
 		`{"tenant_id":"`+tenantID+`","reason":"again"}`)); code != http.StatusNotFound {
 		t.Fatalf("double purge: want 404, got %d", code)
 	}

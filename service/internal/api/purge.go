@@ -22,7 +22,7 @@ type purgeTenantRequest struct {
 // owner/admin) on every reachable path, mirroring /configure. The purge
 // is recorded in the append-only audit log, which survives the tenant.
 func (s *Server) toolPurgeTenant(w http.ResponseWriter, r *http.Request, p *Principal) {
-	if err := s.configureAllowed(p); err != nil {
+	if err := s.operatorAllowed(p); err != nil {
 		httpError(w, http.StatusForbidden, err)
 		return
 	}

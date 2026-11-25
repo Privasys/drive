@@ -44,7 +44,7 @@ func (s *Server) drainState() *drainStatus {
 
 // handleDrainLocalObjects starts the copy (owner-gated like configure).
 func (s *Server) handleDrainLocalObjects(w http.ResponseWriter, r *http.Request, p *Principal) {
-	if err := s.configureAllowed(p); err != nil {
+	if err := s.operatorAllowed(p); err != nil {
 		httpError(w, http.StatusForbidden, err)
 		return
 	}
@@ -146,7 +146,7 @@ func (s *Server) drainSnapshot() map[string]any {
 // handleDrainStatus reports progress; the manifest's progress contract
 // polls it to a terminal state (done | failed).
 func (s *Server) handleDrainStatus(w http.ResponseWriter, r *http.Request, p *Principal) {
-	if err := s.configureAllowed(p); err != nil {
+	if err := s.operatorAllowed(p); err != nil {
 		httpError(w, http.StatusForbidden, err)
 		return
 	}

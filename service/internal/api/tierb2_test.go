@@ -192,11 +192,11 @@ func TestD5SubtreeChangesAndLongPoll(t *testing.T) {
 // the status tool answers idle.
 func TestDrainActionRoutesAreTopLevel(t *testing.T) {
 	ts := newFullServer(t, nil)
-	st, b, _ := rawReq(t, "GET", ts.URL+"/actions/drain_local_objects/status", devAuth, "", nil)
+	st, b, _ := rawReq(t, "GET", ts.URL+"/actions/drain_local_objects/status", "", "", opHdr(t))
 	if st != 200 || !strings.Contains(string(b), `"state":"idle"`) {
 		t.Fatalf("status route: %d %s", st, b)
 	}
-	st, b, _ = rawReq(t, "POST", ts.URL+"/actions/drain_local_objects", devAuth, "{}", nil)
+	st, b, _ = rawReq(t, "POST", ts.URL+"/actions/drain_local_objects", "", "{}", opHdr(t))
 	if st != http.StatusConflict {
 		t.Fatalf("drain on a local backend: want 409, got %d %s", st, b)
 	}
@@ -209,22 +209,22 @@ func TestDrainActionRoutesAreTopLevel(t *testing.T) {
 	srv2.objectMu.Lock()
 	srv2.Backend = notLocal{srv2.Backend}
 	srv2.objectMu.Unlock()
-	st, b, _ = rawReq(t, "POST", ts2.URL+"/actions/drain_local_objects", devAuth, "{}", nil)
+	st, b, _ = rawReq(t, "POST", ts2.URL+"/actions/drain_local_objects", "", "{}", opHdr(t))
 	if st != http.StatusAccepted || !strings.Contains(string(b), `"state":"running"`) {
 		t.Fatalf("drain on a bucket: want 202 running, got %d %s", st, b)
 	}
 	srv2.bg.Wait()
-	st, b, _ = rawReq(t, "GET", ts2.URL+"/actions/drain_local_objects/status", devAuth, "", nil)
+	st, b, _ = rawReq(t, "GET", ts2.URL+"/actions/drain_local_objects/status", "", "", opHdr(t))
 	if st != 200 || !strings.Contains(string(b), `"state":"done"`) {
 		t.Fatalf("drain status after run: %d %s", st, b)
 	}
 	// The action runner polls status tools with POST, like any tool.
-	st, b, _ = rawReq(t, "POST", ts2.URL+"/actions/drain_local_objects/status", devAuth, "{}", nil)
+	st, b, _ = rawReq(t, "POST", ts2.URL+"/actions/drain_local_objects/status", "", "{}", opHdr(t))
 	if st != 200 || !strings.Contains(string(b), `"state":"done"`) {
 		t.Fatalf("drain status via POST: %d %s", st, b)
 	}
 	// A second run is allowed once the first finished (the reset path again).
-	st, _, _ = rawReq(t, "POST", ts2.URL+"/actions/drain_local_objects", devAuth, "{}", nil)
+	st, _, _ = rawReq(t, "POST", ts2.URL+"/actions/drain_local_objects", "", "{}", opHdr(t))
 	if st != http.StatusAccepted {
 		t.Fatalf("second drain: want 202, got %d", st)
 	}

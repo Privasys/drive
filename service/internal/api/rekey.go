@@ -20,7 +20,7 @@ type rekeyRequest struct {
 }
 
 func (s *Server) toolListSubjects(w http.ResponseWriter, r *http.Request, p *Principal) {
-	if err := s.configureAllowed(p); err != nil {
+	if err := s.operatorAllowed(p); err != nil {
 		httpError(w, http.StatusForbidden, err)
 		return
 	}
@@ -33,7 +33,7 @@ func (s *Server) toolListSubjects(w http.ResponseWriter, r *http.Request, p *Pri
 }
 
 func (s *Server) toolRekeySubjects(w http.ResponseWriter, r *http.Request, p *Principal) {
-	if err := s.configureAllowed(p); err != nil {
+	if err := s.operatorAllowed(p); err != nil {
 		httpError(w, http.StatusForbidden, err)
 		return
 	}
