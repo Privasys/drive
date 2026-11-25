@@ -1207,6 +1207,14 @@
             }
         },
         {
+            "name": "audit_summary",
+            "title": "Operator actions in the audit log",
+            "endpoint": "/v1/admin/audit/summary",
+            "description": "Read-only: the purges and identifier rewrites recorded in the append-only audit log across tenants, with counts, the first characters of each affected tenant id, the number of distinct actors and how far back the log reaches. Instance operator (app owner/admin) only.",
+            "x-privasys": { "auth": "owner" },
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "tenant_key_records",
             "title": "Tenant key policy records",
             "endpoint": "/v1/admin/tenant-keys/records",

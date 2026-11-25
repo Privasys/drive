@@ -1124,3 +1124,72 @@ func (s *Store) OverriddenFolders(ctx context.Context, tenantID string) ([]strin
 	}
 	return out, rows.Err()
 }
+
+// AuditEventSummary is one security event as the operator's summary shows
+// it: when, and the first characters of the tenant it touched (no actor,
+// no detail).
+type AuditEventSummary struct {
+	Event        string    `json:"event"`
+	TenantPrefix string    `json:"tenant"`
+	At           time.Time `json:"at"`
+}
+
+// AuditSummary returns every audit row of the named events across all
+// tenants (oldest first), the number of distinct actors behind them, and
+// the time of the oldest audit row of any kind (how far back the log goes).
+func (s *Store) AuditSummary(ctx context.Context, events []string) ([]AuditEventSummary, int, time.Time, error) {
+	var oldest time.Time
+	var first any
+	if err := s.DB.QueryRowContext(ctx, s.q(`SELECT MIN(at) FROM audit`)).Scan(&first); err != nil {
+		return nil, 0, oldest, err
+	}
+	oldest = auditTime(first)
+	if len(events) == 0 {
+		return nil, 0, oldest, nil
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(events)), ",")
+	args := make([]any, len(events))
+	for i, e := range events {
+		args[i] = e
+	}
+	rows, err := s.DB.QueryContext(ctx, s.q(
+		`SELECT event, tenant_id, actor, at FROM audit WHERE event IN (`+ph+`) ORDER BY seq ASC`), args...)
+	if err != nil {
+		return nil, 0, oldest, err
+	}
+	defer rows.Close()
+	var out []AuditEventSummary
+	actors := map[string]bool{}
+	for rows.Next() {
+		var e AuditEventSummary
+		var tenant, actor string
+		if err := rows.Scan(&e.Event, &tenant, &actor, &e.At); err != nil {
+			return nil, 0, oldest, err
+		}
+		if len(tenant) > 8 {
+			tenant = tenant[:8]
+		}
+		e.TenantPrefix = tenant
+		actors[actor] = true
+		out = append(out, e)
+	}
+	return out, len(actors), oldest, rows.Err()
+}
+
+// auditTime reads a timestamp an aggregate returns: a time.Time on
+// PostgreSQL, text on SQLite.
+func auditTime(v any) time.Time {
+	switch t := v.(type) {
+	case time.Time:
+		return t
+	case []byte:
+		return auditTime(string(t))
+	case string:
+		for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05"} {
+			if p, err := time.Parse(layout, t); err == nil {
+				return p
+			}
+		}
+	}
+	return time.Time{}
+}

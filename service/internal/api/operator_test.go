@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -137,7 +139,7 @@ func TestEveryOperatorToolIsOwnerInManifest(t *testing.T) {
 		"/tools/purge_tenant": true, "/tools/list_subjects": true, "/tools/rekey_subjects": true,
 		"/actions/drain_local_objects": true, "/actions/drain_local_objects/status": true,
 		"/v1/admin/tenant-keys/records": true, "/v1/admin/tenant-keys/pending": true,
-		"/v1/admin/tenant-keys/resweep": true,
+		"/v1/admin/tenant-keys/resweep": true, "/v1/admin/audit/summary": true,
 	}
 	seen := map[string]bool{}
 	for _, tool := range m.Tools {
@@ -155,5 +157,40 @@ func TestEveryOperatorToolIsOwnerInManifest(t *testing.T) {
 		if !seen[ep] {
 			t.Errorf("operator route %s is not in the manifest", ep)
 		}
+	}
+}
+
+// TestAuditSummaryOperatorOnly: the summary lists a purge with the tenant's
+// first characters and no actor, and refuses an ordinary user.
+func TestAuditSummaryOperatorOnly(t *testing.T) {
+	ts, srv := newTestServer(t)
+	if err := srv.Store.AppendAudit(context.Background(), "0123456789abcdef", "tenant_purged", "someone", "reason"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(authedReq(t, "GET", ts.URL+"/v1/admin/audit/summary", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("user: want 403, got %d", resp.StatusCode)
+	}
+	raw := doOperatorGet(t, ts, "/v1/admin/audit/summary")
+	var got struct {
+		Counts map[string]int `json:"counts"`
+		Events []struct {
+			Tenant string `json:"tenant"`
+		} `json:"events"`
+		Actors int    `json:"distinct_actors"`
+		Since  string `json:"log_reaches_back_to"`
+	}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Counts["tenant_purged"] != 1 || len(got.Events) != 1 || got.Events[0].Tenant != "01234567" || got.Actors != 1 || got.Since == "" {
+		t.Fatalf("summary: %s", raw)
+	}
+	if strings.Contains(raw, "someone") || strings.Contains(raw, "reason") {
+		t.Fatalf("the summary leaks the actor or detail: %s", raw)
 	}
 }

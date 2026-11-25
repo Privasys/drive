@@ -441,6 +441,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/admin/tenant-keys/pending", s.configureAuth(s.handleTenantKeysPending))
 	mux.Handle("POST /v1/admin/tenant-keys/pending", s.configureAuth(s.handleTenantKeysPending))
 	mux.Handle("POST /v1/admin/tenant-keys/resweep", s.configureAuth(s.handleTenantKeysResweep))
+	mux.Handle("GET /v1/admin/audit/summary", s.configureAuth(s.handleAuditSummary))
 	mux.Handle("GET /v1/admin/tenant-keys/records", s.configureAuth(s.handleTenantKeyRecords))
 	mux.Handle("POST /v1/admin/tenant-keys/records", s.configureAuth(s.handleTenantKeyRecords))
 	mux.Handle("GET /v1/shared", s.auth(s.handleSharedWithMe))
