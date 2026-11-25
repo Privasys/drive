@@ -46,13 +46,15 @@ func TestEagerPolicyRecord(t *testing.T) {
 		Recorded    int      `json:"recorded"`
 		Missing     []string `json:"missing"`
 		AllRecorded bool     `json:"all_recorded"`
+		V1          int      `json:"binding_v1"`
+		V2          int      `json:"binding_v2"`
 	}
 	// The build cannot read it: listed, nothing recorded.
 	pass := srv.recordAllKeyPolicies(context.Background())
 	if pass.Filled != 0 || len(pass.Failed) != 1 {
 		t.Fatalf("unreadable key: %+v", pass)
 	}
-	_ = json.Unmarshal([]byte(doGet(t, ts, "/v1/admin/tenant-keys/records")), &state)
+	_ = json.Unmarshal([]byte(doOperatorGet(t, ts, "/v1/admin/tenant-keys/records")), &state)
 	if state.AllRecorded || state.Recorded != 0 || len(state.Missing) != 1 {
 		t.Fatalf("before: %+v", state)
 	}
@@ -68,8 +70,8 @@ func TestEagerPolicyRecord(t *testing.T) {
 	if string(got.Policy) != `{"principals":{}}` || got.PolicyVersion != 4 {
 		t.Fatalf("record: %s v%d", got.Policy, got.PolicyVersion)
 	}
-	_ = json.Unmarshal([]byte(doGet(t, ts, "/v1/admin/tenant-keys/records")), &state)
-	if !state.AllRecorded || state.Recorded != 1 {
+	_ = json.Unmarshal([]byte(doOperatorGet(t, ts, "/v1/admin/tenant-keys/records")), &state)
+	if !state.AllRecorded || state.Recorded != 1 || state.V1 != 1 || state.V2 != 0 {
 		t.Fatalf("after: %+v", state)
 	}
 

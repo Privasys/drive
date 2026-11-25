@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Privasys/drive/service/internal/config"
 	"github.com/Privasys/drive/service/internal/vaultmek"
 )
 
@@ -35,7 +36,7 @@ func (f *v2MEKs) RefreshTeesV2(_ context.Context, _ vaultmek.Ref, _ *vaultmek.Te
 
 func v2Server(t *testing.T, f *v2MEKs) string {
 	t.Helper()
-	ts := newFullServer(t, func(s *Server) { s.MEKs = f })
+	ts := newFullServer(t, func(s *Server) { s.MEKs = f; acceptApprovals(s) })
 	_, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
 	var tenant struct{ ID string }
 	_ = json.Unmarshal(body, &tenant)
@@ -134,7 +135,7 @@ func TestStaleRecordSurfacesNoFallback(t *testing.T) {
 	mek := sha256.Sum256([]byte("vault-held-tenant-mek"))
 	plan := &vaultmek.TeesApprovalV2{NewPolicyJSON: json.RawMessage(`{}`), Target: "t", PolicyVersion: 1}
 	fake := &v2RefuseMEKs{v2MEKs{fakeMEKs: &fakeMEKs{mek: mek[:]}, plan: plan}}
-	ts := newFullServer(t, func(s *Server) { s.MEKs = fake })
+	ts := newFullServer(t, func(s *Server) { s.MEKs = fake; acceptApprovals(s) })
 	_, _ = doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
 	resp, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth,
 		`{"grant":"g","handle":"apps.privasys.org/x/data/y/mek/v1","constellation":{"endpoints":["v1:1"],"mrenclave":"00","attestation_server":"as","threshold":1}}`)
@@ -148,5 +149,46 @@ func TestStaleRecordSurfacesNoFallback(t *testing.T) {
 	}
 	if len(fake.refreshed) != 0 {
 		t.Fatalf("the v1 path ran: %v", fake.refreshed)
+	}
+}
+
+// acceptApprovals turns accept_approval_tokens on, as the operator does once
+// vault_op bearers are refused everywhere.
+func acceptApprovals(s *Server) {
+	c := config.Config{}
+	if cur := s.CurrentConfig(); cur != nil {
+		c = *cur
+	}
+	c.AcceptApprovalTokens = true
+	s.InstallConfig(&c)
+}
+
+// TestApprovalTokensOffByDefault: with the switch off (the default), a
+// binding-2 key's re-arm neither describes an approval nor takes a token,
+// and nothing is sent to the vaults.
+func TestApprovalTokensOffByDefault(t *testing.T) {
+	mek := sha256.Sum256([]byte("vault-held-tenant-mek"))
+	plan := &vaultmek.TeesApprovalV2{NewPolicyJSON: json.RawMessage(`{}`), Target: "t", PolicyVersion: 1}
+	fake := &v2MEKs{fakeMEKs: &fakeMEKs{mek: mek[:], clearOnRefresh: true}, plan: plan}
+	ts := newFullServer(t, func(s *Server) { s.MEKs = fake })
+	_, _ = doJSON(t, "POST", ts.URL+"/v1/me/tenant", devAuth, "")
+	resp, body := doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth,
+		`{"grant":"g","handle":"apps.privasys.org/x/data/y/mek/v1","constellation":{"endpoints":["v1:1"],"mrenclave":"00","attestation_server":"as","threshold":1}}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("adopt: %d %s", resp.StatusCode, body)
+	}
+	fake.loadErr = errors.New("vaultmek: only 0/1 shares recovered: vault error: caller is not in policy.principals")
+	for _, req := range []string{
+		`{"grant":"fresh"}`,
+		`{"grant":"fresh","approval_token":"` + testJWT(`{"vault_op":"op"}`) + `"}`,
+	} {
+		resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, req)
+		if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "approval_not_accepted_yet") ||
+			strings.Contains(string(body), `"approval"`) {
+			t.Fatalf("switch off: %d %s", resp.StatusCode, body)
+		}
+	}
+	if len(fake.v2sent) != 0 || len(fake.refreshed) != 0 {
+		t.Fatal("an update was sent with the switch off")
 	}
 }

@@ -129,6 +129,11 @@ type Config struct {
 	// logs its audience instead, to check a list against real traffic.
 	OIDCAudience        string `json:"oidc_audience,omitempty"`
 	OIDCAudienceLogOnly bool   `json:"oidc_audience_log_only,omitempty"`
+	// AcceptApprovalTokens lets a re-arm take the holder's vault-approval
+	// token (binding 2). Off by default: an approval token is also a bearer
+	// the platform may accept as the owner until the runtime and the control
+	// plane refuse vault_op bearers, so the operator turns it on only then.
+	AcceptApprovalTokens bool `json:"accept_approval_tokens,omitempty"`
 
 	// UIAudience is the audience the web front asks privasys.id for (the
 	// platform audience of this environment). Empty: the sign-in

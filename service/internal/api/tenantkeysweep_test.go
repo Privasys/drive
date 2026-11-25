@@ -266,7 +266,7 @@ func TestTenantKeysPendingHidesSubjectsAndFiltersByConstellation(t *testing.T) {
 			Mrenclave  string `json:"mrenclave"`
 		} `json:"pending"`
 	}
-	raw := doGet(t, ts, "/v1/admin/tenant-keys/pending?mrenclave=new00")
+	raw := doOperatorGet(t, ts, "/v1/admin/tenant-keys/pending?mrenclave=new00")
 	if err := json.Unmarshal([]byte(raw), &listing); err != nil {
 		t.Fatalf("%v: %s", err, raw)
 	}
@@ -285,7 +285,7 @@ func TestTenantKeysPendingHidesSubjectsAndFiltersByConstellation(t *testing.T) {
 	}
 
 	// Asking about the constellation it is already on yields nothing.
-	raw = doGet(t, ts, "/v1/admin/tenant-keys/pending?mrenclave=0ld0ld")
+	raw = doOperatorGet(t, ts, "/v1/admin/tenant-keys/pending?mrenclave=0ld0ld")
 	if !strings.Contains(raw, `"count":0`) {
 		t.Errorf("a tenant already on the target was still listed: %s", raw)
 	}
@@ -381,7 +381,7 @@ func readFileForSweep(t *testing.T, ts *httptest.Server, tenantID, name string) 
 
 func doSweep(t *testing.T, ts *httptest.Server, body string) sweepResponse {
 	t.Helper()
-	resp, err := http.DefaultClient.Do(authedReq(t, "POST",
+	resp, err := http.DefaultClient.Do(operatorReq(t, "POST",
 		ts.URL+"/v1/admin/tenant-keys/resweep", body))
 	if err != nil {
 		t.Fatal(err)

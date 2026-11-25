@@ -69,6 +69,16 @@ func (c *Client) carriedRenewal(ctx context.Context, src Ref, secret []byte) (vs
 	if policy == nil {
 		return vsdk.Renewal{}, fmt.Errorf("vaultmek: carry: the source ref has no vaults")
 	}
+	// Carrying keeps the key's rules. A key without binding-2 approvals is
+	// moved to get them, so carrying its rules would defeat the move: it
+	// takes the grant's policy instead (a re-sweep without carry).
+	var typed vsdk.KeyPolicy
+	if err := json.Unmarshal(policy, &typed); err != nil {
+		return vsdk.Renewal{}, fmt.Errorf("vaultmek: carry: parse source policy: %w", err)
+	}
+	if !NeedsBindingV2(typed) {
+		return vsdk.Renewal{}, fmt.Errorf("vaultmek: carry: %s takes no binding-2 approvals; move it without carry so the new key gets them", src.Handle)
+	}
 	if billingID == "" {
 		// A vault from before the identity call: its billing id is the
 		// implicit one of the SOURCE constellation's issuer and audience,

@@ -107,6 +107,7 @@ type configureRequest struct {
 	// front's audience (see config.Config).
 	OIDCAudience        *string `json:"oidc_audience"`
 	OIDCAudienceLogOnly *bool   `json:"oidc_audience_log_only"`
+	AcceptApprovalTokens *bool `json:"accept_approval_tokens"`
 	UIAudience          *string `json:"ui_audience"`
 	UIClientID          *string `json:"ui_client_id"`
 	// Semantic-index embedding backend (see config.Config). The
@@ -162,6 +163,9 @@ func (req *configureRequest) overlay(cur *config.Config) *config.Config {
 	}
 	if req.OIDCAudienceLogOnly != nil {
 		cfg.OIDCAudienceLogOnly = *req.OIDCAudienceLogOnly
+	}
+	if req.AcceptApprovalTokens != nil {
+		cfg.AcceptApprovalTokens = *req.AcceptApprovalTokens
 	}
 	if req.UIClientID != nil {
 		cfg.UIClientID = *req.UIClientID

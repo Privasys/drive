@@ -66,6 +66,13 @@
                         "label": "Audience check: log only"
                     }
                 },
+                "accept_approval_tokens": {
+                    "type": "boolean",
+                    "description": "Let a key re-arm take the holder's bound (binding 2) approval token. Off by default; turn it on only once the runtime and the control plane refuse operation-bound tokens as bearers. Mutable.",
+                    "x-privasys": {
+                        "label": "Accept key approvals"
+                    }
+                },
                 "ui_audience": {
                     "type": "string",
                     "description": "The audience the web front asks privasys.id for: this environment's platform audience. Empty: the sign-in default. Mutable.",
@@ -229,6 +236,13 @@
                         "description": "Accept a bearer outside oidc_audience and log its audience instead of refusing it, to check a list against real traffic before enforcing it. Mutable.",
                         "x-privasys": {
                             "label": "Audience check: log only"
+                        }
+                    },
+                    "accept_approval_tokens": {
+                        "type": "boolean",
+                        "description": "Let a key re-arm take the holder's bound (binding 2) approval token. Off by default; turn it on only once the runtime and the control plane refuse operation-bound tokens as bearers. Mutable.",
+                        "x-privasys": {
+                            "label": "Accept key approvals"
                         }
                     },
                     "ui_audience": {
@@ -1186,6 +1200,30 @@
                     "reason"
                 ]
             }
+        },
+        {
+            "name": "tenant_key_records",
+            "title": "Tenant key policy records",
+            "endpoint": "/v1/admin/tenant-keys/records",
+            "description": "Whether every tenant key's policy is on record, and how many keys take bound (binding 2) approvals; POST records what it can first. The check before a runtime roll of a host serving Drive. Instance operator (app owner/admin) only.",
+            "x-privasys": { "auth": "owner" },
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "tenant_keys_pending",
+            "title": "Tenant keys not on a constellation",
+            "endpoint": "/v1/admin/tenant-keys/pending",
+            "description": "The tenant keys not on the named constellation (by mrenclave), for a re-sweep. Instance operator (app owner/admin) only.",
+            "x-privasys": { "auth": "owner" },
+            "inputSchema": { "type": "object", "properties": { "mrenclave": { "type": "string" } } }
+        },
+        {
+            "name": "tenant_keys_resweep",
+            "title": "Move tenant keys",
+            "endpoint": "/v1/admin/tenant-keys/resweep",
+            "description": "Move tenant keys onto new keys from operator-fetched grants (dry_run to check first). Instance operator (app owner/admin) only.",
+            "x-privasys": { "auth": "owner" },
+            "inputSchema": { "type": "object", "properties": { "dry_run": { "type": "boolean" }, "items": { "type": "array" } } }
         },
         {
             "name": "search_semantic",

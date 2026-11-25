@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Privasys/drive/service/internal/vaultmek"
+	vsdk "github.com/Privasys/enclave-vaults-client/go/vault"
 )
 
 // Every tenant key's policy is recorded while Drive can still open it.
@@ -125,11 +127,17 @@ func (s *Server) handleTenantKeyRecords(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	missing := []string{}
-	recorded := 0
+	recorded, v2, v1 := 0, 0, 0
 	for _, h := range holders {
 		ref, perr := vaultmek.ParseRef(h.MekRef)
 		if perr == nil && len(ref.Policy) > 0 {
 			recorded++
+			var kp vsdk.KeyPolicy
+			if json.Unmarshal(ref.Policy, &kp) == nil && vaultmek.NeedsBindingV2(kp) {
+				v2++
+			} else {
+				v1++
+			}
 			continue
 		}
 		missing = append(missing, short(h.TenantID))
@@ -140,5 +148,7 @@ func (s *Server) handleTenantKeyRecords(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"total": len(holders), "recorded": recorded, "missing": missing,
 		"all_recorded": len(missing) == 0, "last_pass": last,
+		// v1 keys take no bound approval: the operator moves them (re-sweep).
+		"binding_v2": v2, "binding_v1": v1,
 	})
 }

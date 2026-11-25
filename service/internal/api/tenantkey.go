@@ -337,6 +337,26 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 					return
 				}
 			}
+			if plan == nil {
+				// A key whose rule does not take binding 2 would need a v1
+				// "policy-update" approval, which is neither single-use nor
+				// bound to this key: Drive never asks for or takes one. The
+				// key is moved onto a binding-2 key by the operator's re-sweep
+				// while the running build can still open it.
+				log.Printf("tenant-key: measurement approval for tenant %.8s… refused: the key takes no binding-2 approval and must be moved", t.ID)
+				httpError(w, http.StatusConflict, errors.New(
+					"move_needed: this key must be moved onto a key with bound approvals by the operator before its measurement can be approved"))
+				return
+			}
+			if cfg := s.CurrentConfig(); cfg == nil || !cfg.AcceptApprovalTokens {
+				// Approval tokens are also bearers the platform may accept as
+				// the owner until vault_op bearers are refused everywhere; until
+				// the operator turns this on, Drive neither asks the holder for
+				// one nor takes one, and nothing is sent to the vaults.
+				httpError(w, http.StatusConflict, errors.New(
+					"approval_not_accepted_yet: Drive does not accept key approvals yet; your key will be updated by the operator"))
+				return
+			}
 			if req.ApprovalToken == "" {
 				// What the holder approves: the caller sends this body to
 				// privasys.id's vault-approval begin with its own session.
@@ -351,13 +371,7 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 					"approval_token must be a vault-approval token (bound to the operation)"))
 				return
 			}
-			var aerr error
-			if plan != nil {
-				aerr = v2p.RefreshTeesV2(r.Context(), ref, plan, req.ApprovalToken)
-			} else {
-				aerr = s.MEKs.RefreshTees(r.Context(), ref, req.Grant, req.ApprovalToken)
-			}
-			if aerr != nil {
+			if aerr := v2p.RefreshTeesV2(r.Context(), ref, plan, req.ApprovalToken); aerr != nil {
 				httpError(w, http.StatusBadGateway, aerr)
 				return
 			}

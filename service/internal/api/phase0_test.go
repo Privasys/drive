@@ -378,32 +378,21 @@ func TestMeasurementApprovalOnRearm(t *testing.T) {
 		t.Fatal("approval must not run without a grant")
 	}
 
-	// A re-arm WITH a fresh grant but no approval token answers with what
-	// the holder must approve; nothing is sent to the vaults.
-	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh-grant"}`)
-	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "owner_approval_required") ||
-		!strings.Contains(string(body), `"operation":"policy-update"`) {
-		t.Fatalf("re-arm without approval: %d %s", resp.StatusCode, body)
+	// A key without binding-2 approvals is never approved in place (a v1
+	// approval is neither single-use nor bound): move_needed, with or
+	// without an approval token, and nothing is sent to the vaults.
+	for _, req := range []string{
+		`{"grant":"fresh-grant"}`,
+		`{"grant":"fresh-grant","approval_token":"` + testJWT(`{"sub":"s","vault_op":"op-1"}`) + `"}`,
+	} {
+		resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, req)
+		if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "move_needed") ||
+			strings.Contains(string(body), "policy-update") {
+			t.Fatalf("v1 key: %d %s", resp.StatusCode, body)
+		}
 	}
 	if len(fake.refreshed) != 0 {
-		t.Fatal("an update ran before the holder approved")
-	}
-
-	// A token that is not an approval (no vault_op) is refused.
-	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh-grant","approval_token":"`+testJWT(`{"sub":"s"}`)+`"}`)
-	if resp.StatusCode != http.StatusBadRequest || len(fake.refreshed) != 0 {
-		t.Fatalf("non-approval token: %d %s", resp.StatusCode, body)
-	}
-
-	// With the approval token the caller obtained, the update goes out with
-	// that token alone, and the key loads.
-	approval := testJWT(`{"sub":"s","vault_op":"op-1"}`)
-	resp, body = doJSON(t, "POST", ts.URL+"/v1/me/tenant/key", devAuth, `{"grant":"fresh-grant","approval_token":"`+approval+`"}`)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"measurement_approved":true`) {
-		t.Fatalf("approving re-arm: %d %s", resp.StatusCode, body)
-	}
-	if len(fake.refreshed) != 1 || fake.refreshed[0][0] != "fresh-grant" || fake.refreshed[0][1] != approval {
-		t.Fatalf("RefreshTees called with %v", fake.refreshed)
+		t.Fatal("a v1 update was sent")
 	}
 
 	// owner_token (a platform token in the body) is refused outright: an

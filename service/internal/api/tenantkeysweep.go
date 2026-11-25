@@ -335,12 +335,20 @@ func (s *Server) resweepOneTenant(r *http.Request, item tenantKeyResweepItem, dr
 // authority. The effective authority for the mutating call is the
 // manager-minted grant each item carries: the vault verifies its IdP
 // signature, so possession cannot be faked here.
+//
+// These routes list every tenant, so they are the instance operator's only:
+// the caller must be the app's owner or admin as the runtime itself verified
+// it (X-Privasys-Configure-Authorized on a route the manifest declares
+// "owner"). An ordinary user, a sealed session or an app grant is refused.
 func (s *Server) sweepAllowed(p *Principal) error {
 	if !p.IsUser() {
 		return errors.New("app grants cannot re-key tenant vault keys")
 	}
 	if p.Via == viaSealed {
 		return errors.New("sealed-transport sessions cannot re-key tenant vault keys")
+	}
+	if p.Via != viaConfigureGrant {
+		return errors.New("only the instance operator (the app's owner or admin) may use the tenant key routes")
 	}
 	return nil
 }
