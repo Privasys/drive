@@ -80,6 +80,8 @@ func idpApprovalBegin(ctx context.Context, bearer, handle, audience string, v2 *
 		in["member_identities"] = v2.Identities
 		in["issuer_index"] = 0
 		in["new_policy"] = v2.NewPolicyJSON
+		// What the approval is for, in words: the wallet shows it as given.
+		in["context"].(map[string]any)["summary"] = "Let Privasys Drive open your Drive key with its updated build."
 		if v2.From {
 			// update_policy_from (formats §5.3): the policy replaced, as the
 			// vaults serialise it, so the wallet can show the difference.

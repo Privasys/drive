@@ -41,6 +41,7 @@ func TestApprovalBeginBindingV2Body(t *testing.T) {
 		"binding_version": `2`, "operation": `"update_policy"`, "handle": `"h"`,
 		"target": `"ab"`, "policy_version": `3`, "members": `["m1","m2"]`,
 		"issuer_index": `0`, "new_policy": `{"version":1}`, "audience": `"aud"`,
+		"context": `{"app_name":"Privasys Drive","key_type":"Your Drive key","source":"Privasys Drive was updated; approve the new version to keep opening your files.","summary":"Let Privasys Drive open your Drive key with its updated build."}`,
 	}
 	for k, v := range want {
 		if string(got[k]) != v {

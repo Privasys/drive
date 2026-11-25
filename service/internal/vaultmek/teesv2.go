@@ -174,13 +174,18 @@ func (c *Client) PrepareTeesApprovalV2(ctx context.Context, ref Ref, grant, owne
 	}
 	np := *cur
 	np.Principals.Tees = tees
-	raw, err := json.Marshal(np)
+	typed, err := json.Marshal(np)
 	if err != nil {
 		return nil, err
 	}
-	target, err := vsdk.PolicyDigestJSON(raw)
+	// The new policy goes out in the vault's own stored form, every field
+	// written, as CanonicalisePolicy returns it: the form the current policy
+	// is read in, so the wallet compares like with like and shows only what
+	// changes, and the form a vault from v0.44.0 requires. Every member must
+	// return the same.
+	raw, target, err := c.canonicalNewPolicy(ctx, ref, tok, ownerBearer, typed)
 	if err != nil {
-		return nil, fmt.Errorf("vaultmek: approval v2: new policy digest: %w", err)
+		return nil, err
 	}
 	members := make([]string, 0, len(ids))
 	from := len(ids) > 0
@@ -244,4 +249,38 @@ func (c *Client) RefreshTeesV2(ctx context.Context, ref Ref, a *TeesApprovalV2, 
 	delete(c.meks, ref.Handle)
 	c.mu.Unlock()
 	return nil
+}
+
+// canonicalNewPolicy asks every member for its canonical form of a new
+// policy and returns those bytes with their digest; the members must agree,
+// and the digest of the bytes must be the one the vault reports.
+func (c *Client) canonicalNewPolicy(ctx context.Context, ref Ref, tok, ownerBearer string, policy json.RawMessage) (json.RawMessage, string, error) {
+	var (
+		canon json.RawMessage
+		pd    string
+	)
+	for _, ep := range ref.Endpoints {
+		vc, err := c.dialAs(ctx, ep, ref.MrenclaveHex, ref.AttServer, tok, ownerBearer)
+		if err != nil {
+			return nil, "", fmt.Errorf("vaultmek: approval v2: dial %s: %w", ep, err)
+		}
+		cp, vpd, cerr := vc.CanonicalPolicy(ctx, policy)
+		vc.Close()
+		if cerr != nil {
+			return nil, "", fmt.Errorf("vaultmek: approval v2: canonicalise the new policy on %s: %w", ep, cerr)
+		}
+		d, derr := vsdk.PolicyDigestJSON(cp)
+		if derr != nil || d != strings.ToLower(vpd) {
+			return nil, "", fmt.Errorf("vaultmek: approval v2: %s's canonical policy does not match its digest", ep)
+		}
+		if canon == nil {
+			canon, pd = cp, d
+		} else if d != pd {
+			return nil, "", fmt.Errorf("vaultmek: approval v2: the vaults disagree on the canonical form of the new policy")
+		}
+	}
+	if canon == nil {
+		return nil, "", fmt.Errorf("vaultmek: approval v2: the key has no vaults")
+	}
+	return canon, pd, nil
 }
