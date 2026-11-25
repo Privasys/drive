@@ -207,6 +207,9 @@ func (s *Server) withHolderToken(r *http.Request, p *Principal) (*Principal, err
 	if tok == "" {
 		return p, nil
 	}
+	if isPlatformToken(tok) {
+		return nil, errHolderToken
+	}
 	id, err := s.Verifier.Verify(r.Context(), tok)
 	if err != nil || id == nil || id.Sub != p.Sub || (s.Revoked != nil && s.Revoked.Has(id.SID)) {
 		return nil, errHolderToken

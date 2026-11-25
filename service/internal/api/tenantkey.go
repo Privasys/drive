@@ -230,13 +230,9 @@ type tenantKeyRequest struct {
 		OIDCAudience      string   `json:"oidc_audience"`
 		OIDCIssuer        string   `json:"oidc_issuer"`
 	} `json:"constellation"`
-	// OwnerToken is the data owner's PLATFORM token, the credential the
-	// vault checks a measurement approval against. The key is owned by the
-	// account (the control plane's grant names it), so the approval needs a
-	// token whose subject is the account. Drive's own token stops being one
-	// once Drive has per-app subjects, which is why this field wins over
-	// the request's bearer whenever both are present. Used for nothing
-	// else.
+	// OwnerToken is no longer accepted: it carried the person's platform
+	// token into the app. Present only so a request that still sends it is
+	// refused (400), never silently ignored.
 	OwnerToken string `json:"owner_token,omitempty"`
 }
 
@@ -270,6 +266,11 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
+	if req.OwnerToken != "" {
+		httpError(w, http.StatusBadRequest, errors.New(
+			"owner_token is not accepted: an app never receives a platform token"))
+		return
+	}
 
 	if existing, _ := s.Store.TenantMekRef(r.Context(), t.ID); existing != "" {
 		handle, status, rerr := s.rearmTenantKey(r.Context(), t.ID, existing, req.AttestationToken)
@@ -290,13 +291,10 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 		// vault authorises the tees update against the owner
 		// credential, so this works only for the key's own owner.
 		if vaultmek.PrincipalMismatch(rerr) {
-			// The platform token the caller supplied names the key's owner;
-			// the request's own bearer only did while Drive's subjects were
-			// the account ids, so it is the fallback.
-			bearer := req.OwnerToken
-			if bearer == "" {
-				bearer = p.Bearer
-			}
+			// The request's own bearer: a token Drive is the audience of.
+			// Drive never holds a platform token (owner_token is refused
+			// at the top of the handler).
+			bearer := p.Bearer
 			if req.Grant == "" || bearer == "" {
 				httpError(w, http.StatusConflict, errors.New(
 					"measurement_approval_required: the Drive app was upgraded; re-arm with a fresh grant bundle (and owner_token on a sealed session) to approve the new measurement for your key"))
@@ -321,15 +319,17 @@ func (s *Server) handleTenantKey(w http.ResponseWriter, r *http.Request, p *Prin
 			// attempt first (vaultmek/teesv2.go).
 			if v2p, ok := s.MEKs.(teesV2Provider); ok {
 				plan, verr := v2p.PrepareTeesApprovalV2(r.Context(), ref, req.Grant, bearer)
-				if errors.Is(verr, vaultmek.ErrPolicyNotLossless) {
+				if verr != nil {
+					// The binding version is the KEY's own rule, read from its
+					// vaults. If it could not be read, or a binding-2 plan could
+					// not be built, Drive does not know which approval the key
+					// takes: it fails closed, with no card and no v1 attempt (a
+					// binding-0 card for a binding-2 key could never work and
+					// only misleads the holder). The error names the member and
+					// the step, never the policy.
+					log.Printf("tenant-key: measurement approval for tenant %.8s… refused: %v", t.ID, verr)
 					httpError(w, http.StatusBadGateway, verr)
 					return
-				}
-				if verr != nil {
-					// Not knowing is not a reason to fail: the v1 path below still
-					// works on every key that does not take binding v2.
-					log.Printf("tenant-key: binding-v2 check for tenant %.8s… skipped: %v", t.ID, verr)
-					plan = nil
 				}
 				if plan != nil {
 					tok, terr := s.ownerApprovalToken(r.Context(), t.ID, bearer, ref.Handle, audience, plan)

@@ -143,6 +143,10 @@ func (s *Server) holderBearer(w http.ResponseWriter, r *http.Request, p *Princip
 		http.Error(w, "app folders need your own session token: send it in "+holderTokenHeader, http.StatusUnauthorized)
 		return "", "", false
 	}
+	if isPlatformToken(tok) {
+		http.Error(w, "a platform sign-in token is not accepted by an app", http.StatusBadRequest)
+		return "", "", false
+	}
 	id, err := s.Verifier.Verify(r.Context(), tok)
 	if err != nil || id == nil || id.Sub != p.Sub {
 		http.Error(w, "the token in "+holderTokenHeader+" is not yours or not valid", http.StatusUnauthorized)

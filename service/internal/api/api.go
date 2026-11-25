@@ -584,6 +584,10 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *Principal))
 		h := r.Header.Get("Authorization")
 		switch {
 		case strings.HasPrefix(h, "Bearer "):
+			if isPlatformToken(strings.TrimPrefix(h, "Bearer ")) {
+				http.Error(w, "a platform sign-in token is not accepted by an app", http.StatusBadRequest)
+				return
+			}
 			id, err := s.Verifier.Verify(r.Context(), strings.TrimPrefix(h, "Bearer "))
 			if err != nil {
 				http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)

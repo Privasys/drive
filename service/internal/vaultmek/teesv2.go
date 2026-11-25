@@ -1,6 +1,7 @@
 package vaultmek
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -251,36 +252,75 @@ func (c *Client) RefreshTeesV2(ctx context.Context, ref Ref, a *TeesApprovalV2, 
 	return nil
 }
 
-// canonicalNewPolicy asks every member for its canonical form of a new
-// policy and returns those bytes with their digest; the members must agree,
-// and the digest of the bytes must be the one the vault reports.
+// canonicaliser is the one vault call canonicalNewPolicy needs.
+type canonicaliser interface {
+	CanonicalPolicy(ctx context.Context, policy json.RawMessage) (json.RawMessage, string, error)
+}
+
+// canonicalNewPolicy returns the new policy in the vaults' stored form, with
+// its digest, as every member of the key's constellation agrees on it.
 func (c *Client) canonicalNewPolicy(ctx context.Context, ref Ref, tok, ownerBearer string, policy json.RawMessage) (json.RawMessage, string, error) {
-	var (
-		canon json.RawMessage
-		pd    string
-	)
-	for _, ep := range ref.Endpoints {
+	open := func(ep string) (canonicaliser, func(), error) {
 		vc, err := c.dialAs(ctx, ep, ref.MrenclaveHex, ref.AttServer, tok, ownerBearer)
+		if err != nil {
+			return nil, nil, err
+		}
+		return vc, func() { vc.Close() }, nil
+	}
+	return canonicalAcross(ctx, ref.Endpoints, open, policy)
+}
+
+// canonicalAcross asks every member for its stored form of a new policy.
+// Every member must return byte-identical bytes, so the digest the holder
+// approves is PD of exactly what the update sends.
+func canonicalAcross(ctx context.Context, endpoints []string, open func(string) (canonicaliser, func(), error), policy json.RawMessage) (json.RawMessage, string, error) {
+	var (
+		stored json.RawMessage
+		pd     string
+	)
+	for _, ep := range endpoints {
+		cz, closeFn, err := open(ep)
 		if err != nil {
 			return nil, "", fmt.Errorf("vaultmek: approval v2: dial %s: %w", ep, err)
 		}
-		cp, vpd, cerr := vc.CanonicalPolicy(ctx, policy)
-		vc.Close()
-		if cerr != nil {
-			return nil, "", fmt.Errorf("vaultmek: approval v2: canonicalise the new policy on %s: %w", ep, cerr)
+		cp, d, serr := storedForm(ctx, cz, policy)
+		closeFn()
+		if serr != nil {
+			return nil, "", fmt.Errorf("vaultmek: approval v2: %s: %w", ep, serr)
 		}
-		d, derr := vsdk.PolicyDigestJSON(cp)
-		if derr != nil || d != strings.ToLower(vpd) {
-			return nil, "", fmt.Errorf("vaultmek: approval v2: %s's canonical policy does not match its digest", ep)
-		}
-		if canon == nil {
-			canon, pd = cp, d
-		} else if d != pd {
-			return nil, "", fmt.Errorf("vaultmek: approval v2: the vaults disagree on the canonical form of the new policy")
+		if stored == nil {
+			stored, pd = cp, d
+		} else if !bytes.Equal(cp, stored) {
+			return nil, "", fmt.Errorf("vaultmek: approval v2: %s: the vaults return different stored forms of the new policy", ep)
 		}
 	}
-	if canon == nil {
+	if stored == nil {
 		return nil, "", fmt.Errorf("vaultmek: approval v2: the key has no vaults")
 	}
-	return canon, pd, nil
+	return stored, pd, nil
+}
+
+// storedForm asks one member twice: first for its stored form of the policy,
+// then to check those exact bytes as stored form. A vault from v0.44.0
+// reports the digest of the policy AS SENT and refuses anything not already
+// in stored form; an older one reports the digest of what it returns. On
+// both, the second answer must be byte-identical to the first and its digest
+// must be PD of those bytes.
+func storedForm(ctx context.Context, cz canonicaliser, policy json.RawMessage) (json.RawMessage, string, error) {
+	cp, _, err := cz.CanonicalPolicy(ctx, policy)
+	if err != nil {
+		return nil, "", fmt.Errorf("stored form of the new policy: %w", err)
+	}
+	again, vpd, err := cz.CanonicalPolicy(ctx, cp)
+	if err != nil {
+		return nil, "", fmt.Errorf("check of the stored form: %w", err)
+	}
+	if !bytes.Equal(again, cp) {
+		return nil, "", errors.New("the stored form is not stable")
+	}
+	d, err := vsdk.PolicyDigestJSON(cp)
+	if err != nil || d != strings.ToLower(vpd) {
+		return nil, "", errors.New("the stored form does not match its digest")
+	}
+	return cp, d, nil
 }
