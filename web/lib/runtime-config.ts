@@ -21,6 +21,12 @@ export interface DriveRuntimeConfig {
     /** The OAuth client a link's visitor signs in with: the one Drive binds a
      * link's billing grant to. Empty means the page's own client. */
     linkClientId: string;
+    /** The audience the sign-in asks privasys.id for: this environment's
+     * platform audience. Empty means the sign-in default. */
+    audience: string;
+    /** The OAuth client the sign-in uses (ui_client_id). Empty means the
+     * built-in client. */
+    clientId: string;
 }
 
 declare global {
@@ -33,7 +39,9 @@ const FALLBACK: DriveRuntimeConfig = {
     apiBase: process.env.NEXT_PUBLIC_API_BASE_URL ?? 'https://api.developer.privasys.org',
     appId: process.env.NEXT_PUBLIC_DRIVE_APP_ID ?? '',
     appHost: process.env.NEXT_PUBLIC_DRIVE_APP_HOST ?? '',
-    linkClientId: process.env.NEXT_PUBLIC_DRIVE_LINK_CLIENT_ID ?? ''
+    linkClientId: process.env.NEXT_PUBLIC_DRIVE_LINK_CLIENT_ID ?? '',
+    audience: process.env.NEXT_PUBLIC_AUTH_AUDIENCE ?? '',
+    clientId: ''
 };
 
 function read(): DriveRuntimeConfig {
@@ -42,7 +50,9 @@ function read(): DriveRuntimeConfig {
         apiBase: injected?.apiBase || FALLBACK.apiBase,
         appId: injected?.appId || FALLBACK.appId,
         appHost: injected?.appHost || FALLBACK.appHost,
-        linkClientId: injected?.linkClientId || FALLBACK.linkClientId
+        linkClientId: injected?.linkClientId || FALLBACK.linkClientId,
+        audience: injected?.audience || FALLBACK.audience,
+        clientId: injected?.clientId || FALLBACK.clientId
     };
 }
 

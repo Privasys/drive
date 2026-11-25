@@ -52,6 +52,34 @@
                         "label": "Control-plane URL (token self-heal)"
                     }
                 },
+                "oidc_audience": {
+                    "type": "string",
+                    "description": "Audiences a user bearer must carry, comma-separated (this environment's platform audience, and app:<this app id> for direct-name sign-ins). Only access tokens are accepted. Empty: privasys-platform, privasys-platform-test and app:<this app id>, enforced. Mutable.",
+                    "x-privasys": {
+                        "label": "Accepted audiences"
+                    }
+                },
+                "oidc_audience_log_only": {
+                    "type": "boolean",
+                    "description": "Accept a bearer outside oidc_audience and log its audience instead of refusing it, to check a list against real traffic before enforcing it. Mutable.",
+                    "x-privasys": {
+                        "label": "Audience check: log only"
+                    }
+                },
+                "ui_audience": {
+                    "type": "string",
+                    "description": "The audience the web front asks privasys.id for: this environment's platform audience. Empty: the sign-in default. Mutable.",
+                    "x-privasys": {
+                        "label": "Web sign-in audience"
+                    }
+                },
+                "ui_client_id": {
+                    "type": "string",
+                    "description": "The OAuth client the web front signs in with (dev: the test platform's own client). Empty: the built-in client. Mutable.",
+                    "x-privasys": {
+                        "label": "Web sign-in client"
+                    }
+                },
                 "embeddings_base_url": {
                     "type": "string",
                     "description": "OpenAI-compatible embeddings endpoint base URL on the confidential-AI fleet, tried first for semantic indexing; the local CPU embedder is the fallback. Mutable.",
@@ -187,6 +215,34 @@
                         "description": "Control-plane API base URL. When set, the instance refreshes stale vault attestation tokens itself via its manager-minted app identity (self-heal for 409 vault_key_stale). Mutable.",
                         "x-privasys": {
                             "label": "Control-plane URL (token self-heal)"
+                        }
+                    },
+                    "oidc_audience": {
+                        "type": "string",
+                        "description": "Audiences a user bearer must carry, comma-separated (this environment's platform audience, and app:<this app id> for direct-name sign-ins). Only access tokens are accepted. Empty: privasys-platform, privasys-platform-test and app:<this app id>, enforced. Mutable.",
+                        "x-privasys": {
+                            "label": "Accepted audiences"
+                        }
+                    },
+                    "oidc_audience_log_only": {
+                        "type": "boolean",
+                        "description": "Accept a bearer outside oidc_audience and log its audience instead of refusing it, to check a list against real traffic before enforcing it. Mutable.",
+                        "x-privasys": {
+                            "label": "Audience check: log only"
+                        }
+                    },
+                    "ui_audience": {
+                        "type": "string",
+                        "description": "The audience the web front asks privasys.id for: this environment's platform audience. Empty: the sign-in default. Mutable.",
+                        "x-privasys": {
+                            "label": "Web sign-in audience"
+                        }
+                    },
+                    "ui_client_id": {
+                        "type": "string",
+                        "description": "The OAuth client the web front signs in with (dev: the test platform's own client). Empty: the built-in client. Mutable.",
+                        "x-privasys": {
+                            "label": "Web sign-in client"
                         }
                     },
                     "embeddings_base_url": {

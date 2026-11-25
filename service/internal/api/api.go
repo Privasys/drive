@@ -306,6 +306,10 @@ func (s *Server) applyConfigSideEffects(c *config.Config) {
 	// injects no operator env), so a fresh/changed object_backend rebuilds
 	// s.Backend here — independent of the control-plane settings below.
 	s.applyObjectBackend(c)
+	// The user-bearer audience list (the built-in default when unset).
+	if v, ok := s.Verifier.(*oidc.JWKSVerifier); ok {
+		v.SetAudience(c.OIDCAudience, !c.OIDCAudienceLogOnly)
+	}
 	if c.MgmtBaseURL == "" {
 		return
 	}

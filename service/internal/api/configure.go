@@ -103,6 +103,12 @@ type configureRequest struct {
 	// AppMessages switches wallet notifications to the generic app
 	// message (see config.Config).
 	AppMessages *bool `json:"app_messages"`
+	// The user-bearer audience list, its log-only switch, and the web
+	// front's audience (see config.Config).
+	OIDCAudience        *string `json:"oidc_audience"`
+	OIDCAudienceLogOnly *bool   `json:"oidc_audience_log_only"`
+	UIAudience          *string `json:"ui_audience"`
+	UIClientID          *string `json:"ui_client_id"`
 	// Semantic-index embedding backend (see config.Config). The
 	// dependency pin makes every embeddings call verify the fleet's
 	// attested identity before sending data.
@@ -150,6 +156,18 @@ func (req *configureRequest) overlay(cur *config.Config) *config.Config {
 	}
 	if req.UIOrigin != nil {
 		cfg.UIOrigin = *req.UIOrigin
+	}
+	if req.OIDCAudience != nil {
+		cfg.OIDCAudience = *req.OIDCAudience
+	}
+	if req.OIDCAudienceLogOnly != nil {
+		cfg.OIDCAudienceLogOnly = *req.OIDCAudienceLogOnly
+	}
+	if req.UIClientID != nil {
+		cfg.UIClientID = *req.UIClientID
+	}
+	if req.UIAudience != nil {
+		cfg.UIAudience = *req.UIAudience
 	}
 	if req.AppMessages != nil {
 		cfg.AppMessages = *req.AppMessages

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -28,8 +29,18 @@ import (
 // signature algorithms (RS*, ES*). Only the (cached) JWKS is fetched.
 type JWKSVerifier struct {
 	issuer   string
-	audience string // required aud; empty skips the check
-	typ      string // required JOSE typ (WithType); also demands ES256 and exp
+	audience string // required aud list (comma-separated); empty skips the check
+	// enforce refuses a token outside audience; false only logs it (the
+	// log-only step before enforcing a list on a running instance).
+	enforce bool
+	audMu   sync.RWMutex
+	seenAud map[string]bool // audiences already logged in log-only mode
+	typ     string          // required JOSE typ (WithType); also demands ES256 and exp
+	// access accepts only access tokens (WithAccessTokens).
+	access bool
+	// defaultAudience is what SetAudience("") restores: the list given at
+	// construction, enforced.
+	defaultAudience string
 
 	client *http.Client
 
@@ -42,10 +53,12 @@ type JWKSVerifier struct {
 // audience may be empty to skip the aud check.
 func NewJWKSVerifier(issuer, audience string) *JWKSVerifier {
 	return &JWKSVerifier{
-		issuer:   strings.TrimRight(issuer, "/"),
-		audience: audience,
-		client:   &http.Client{Timeout: 10 * time.Second},
-		keys:     map[string]*jwk{},
+		issuer:          strings.TrimRight(issuer, "/"),
+		audience:        audience,
+		defaultAudience: audience,
+		enforce:         audience != "",
+		client:          &http.Client{Timeout: 10 * time.Second},
+		keys:            map[string]*jwk{},
 	}
 }
 
@@ -77,6 +90,9 @@ func (v *JWKSVerifier) Verify(ctx context.Context, token string) (*Identity, err
 		return nil, fmt.Errorf("oidc: header parse: %w", err)
 	}
 
+	if v.access && header.Typ != "" && header.Typ != "JWT" {
+		return nil, fmt.Errorf("oidc: token type %q is not an access token", header.Typ)
+	}
 	if v.typ != "" && (header.Typ != v.typ || header.Alg != "ES256") {
 		return nil, fmt.Errorf("oidc: token type %q/%s, want %q/ES256", header.Typ, header.Alg, v.typ)
 	}
@@ -104,11 +120,29 @@ func (v *JWKSVerifier) Verify(ctx context.Context, token string) (*Identity, err
 		return nil, fmt.Errorf("oidc: claims parse: %w", err)
 	}
 
+	if v.access {
+		// The IdP's own rule for an access token (VerifyAccessToken): the
+		// typ claim at+jwt, and never an operation-bound approval. Every
+		// other statement its key signs (spend tokens, approvals, grants,
+		// disclosures, form answers) is refused here.
+		if typ, _ := claims["typ"].(string); typ != "at+jwt" {
+			return nil, errors.New("oidc: not an access token")
+		}
+		if _, ok := claims["vault_op"]; ok {
+			return nil, errors.New("oidc: an operation-bound token is not a bearer")
+		}
+	}
 	if iss, _ := claims["iss"].(string); iss != v.issuer {
 		return nil, fmt.Errorf("oidc: issuer %q != %q", iss, v.issuer)
 	}
-	if v.audience != "" && !checkAnyAudience(claims, v.audience) {
-		return nil, fmt.Errorf("oidc: audience missing %q", v.audience)
+	v.audMu.RLock()
+	audience, enforce := v.audience, v.enforce
+	v.audMu.RUnlock()
+	if audience != "" && !checkAnyAudience(claims, audience) {
+		if enforce {
+			return nil, fmt.Errorf("oidc: audience missing %q", audience)
+		}
+		v.logUnlisted(claims)
 	}
 	if exp, ok := claims["exp"].(float64); ok {
 		if time.Now().Unix() > int64(exp) {
@@ -118,7 +152,7 @@ func (v *JWKSVerifier) Verify(ctx context.Context, token string) (*Identity, err
 		return nil, errors.New("oidc: token has no exp")
 	}
 
-	id := &Identity{Issuer: v.issuer, Audience: v.audience, Roles: rolesClaim(claims), Claims: claims}
+	id := &Identity{Issuer: v.issuer, Audience: audience, Roles: rolesClaim(claims), Claims: claims}
 	id.Sub, _ = claims["sub"].(string)
 	id.Email, _ = claims["email"].(string)
 	id.SID, _ = claims["sid"].(string)
@@ -378,4 +412,54 @@ func jwkVerifyEC(key *jwk, signingInput, sig []byte) error {
 		return errors.New("EC signature invalid")
 	}
 	return nil
+}
+
+// SetAudience sets the accepted audiences (a comma-separated list) at
+// runtime, from the instance's configuration. enforce refuses a token
+// outside the list; without it the token is accepted and its audience
+// logged once, so a list can be checked against real traffic first. An
+// empty list restores the list given at construction, enforced.
+func (v *JWKSVerifier) SetAudience(audience string, enforce bool) {
+	if strings.TrimSpace(audience) == "" {
+		audience, enforce = v.defaultAudience, v.defaultAudience != ""
+	}
+	v.audMu.Lock()
+	defer v.audMu.Unlock()
+	v.audience, v.enforce = strings.TrimSpace(audience), enforce
+	v.seenAud = nil
+}
+
+// logUnlisted logs, once per distinct value, the audience of a token that
+// the log-only mode accepted outside the list.
+func (v *JWKSVerifier) logUnlisted(claims map[string]any) {
+	var auds []string
+	switch a := claims["aud"].(type) {
+	case string:
+		auds = []string{a}
+	case []any:
+		for _, x := range a {
+			if s, ok := x.(string); ok {
+				auds = append(auds, s)
+			}
+		}
+	}
+	key := strings.Join(auds, ",")
+	v.audMu.Lock()
+	if v.seenAud == nil {
+		v.seenAud = map[string]bool{}
+	}
+	seen := v.seenAud[key]
+	v.seenAud[key] = true
+	v.audMu.Unlock()
+	if !seen {
+		azp, _ := claims["azp"].(string)
+		log.Printf("oidc: accepted a token outside the audience list (log-only): aud=%q azp=%q", key, azp)
+	}
+}
+
+// WithAccessTokens returns a verifier that accepts only access tokens, as
+// the IdP itself does (JOSE typ JWT or none, typ claim at+jwt, no vault_op).
+func (v *JWKSVerifier) WithAccessTokens() *JWKSVerifier {
+	v.access = true
+	return v
 }

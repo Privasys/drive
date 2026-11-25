@@ -21,7 +21,12 @@ const SDK_CONFIG = {
     rpId: process.env.NEXT_PUBLIC_IDP_RP_ID ?? 'privasys.id',
     brokerUrl:
         process.env.NEXT_PUBLIC_BROKER_URL ?? 'wss://relay.privasys.org/relay',
-    clientId: process.env.NEXT_PUBLIC_AUTH_CLIENT_ID ?? 'privasys-platform',
+    // The environment's own client when the service names one (dev: the
+    // test platform's), so dev and production sign-ins never share a session.
+    clientId: RUNTIME.clientId || process.env.NEXT_PUBLIC_AUTH_CLIENT_ID || 'privasys-platform',
+    // The platform audience of the environment this Drive runs in, as the
+    // service writes it (ui_audience). Unset: the sign-in default.
+    ...(RUNTIME.audience ? { audience: RUNTIME.audience } : {}),
     scope: ['openid', 'email', 'profile', 'offline_access'] as const,
     // Explicitly ask the wallet to share these so it prompts for consent at
     // sign-in (the `profile` scope alone does not raise the picker). Shared

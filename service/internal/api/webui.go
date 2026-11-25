@@ -127,6 +127,10 @@ type webUIConfig struct {
 	// grant a link carries is spendable by that sign-in. Empty: the page's
 	// own client.
 	LinkClientID string `json:"linkClientId,omitempty"`
+	// Audience is the audience the front asks privasys.id for (ui_audience).
+	Audience string `json:"audience,omitempty"`
+	// ClientID is the OAuth client the front signs in with (ui_client_id).
+	ClientID string `json:"clientId,omitempty"`
 }
 
 var hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
@@ -142,6 +146,8 @@ func (s *Server) webUIConfigFor(r *http.Request) webUIConfig {
 	out := webUIConfig{APIBase: controlPlaneFor(host), AppID: dashedAppID(s.Platform.AppID), AppHost: host}
 	if cfg := s.CurrentConfig(); cfg != nil {
 		out.LinkClientID = cfg.OIDCClientID
+		out.Audience = cfg.UIAudience
+		out.ClientID = cfg.UIClientID
 	}
 	return out
 }

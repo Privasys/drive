@@ -159,7 +159,11 @@ func serve(args []string) error {
 	if *dev {
 		verifier = oidc.DevVerifier{}
 	} else {
-		verifier = oidc.NewJWKSVerifier(issuer, os.Getenv("OIDC_AUDIENCE"))
+		// Only access tokens, and only for the audiences this instance
+		// serves: never a token minted for another app, nor any other
+		// statement the IdP signs. Configure narrows the list per
+		// environment (oidc_audience); unset, the default below is enforced.
+		verifier = oidc.NewJWKSVerifier(issuer, defaultAudience(pf.AppID)).WithAccessTokens()
 		if feed := env("OIDC_REVOKED_URL", issuer+"/sessions/revoked"); feed != "off" {
 			revoked = oidc.NewRevokedSet(feed, 0)
 		}
@@ -336,4 +340,19 @@ func loadMEK(mekHex, stateDir string, dev bool) ([]byte, error) {
 	}
 	log.Printf("drive: generated instance MEK, persisted on %s", filepath.Clean(stateDir))
 	return mek, nil
+}
+
+// defaultAudience is the audience list enforced until configure sets one:
+// OIDC_AUDIENCE when given, otherwise the platform audiences (the web front
+// and the wallet's Drive section) and this app's own audience (a sign-in
+// over Drive's direct name).
+func defaultAudience(appID string) string {
+	if v := strings.TrimSpace(os.Getenv("OIDC_AUDIENCE")); v != "" {
+		return v
+	}
+	auds := []string{"privasys-platform", "privasys-platform-test"}
+	if id := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(appID)), "-", ""); id != "" {
+		auds = append(auds, "app:"+id)
+	}
+	return strings.Join(auds, ",")
 }

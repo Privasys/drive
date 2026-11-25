@@ -122,6 +122,23 @@ type Config struct {
 	// Mutable ops setting.
 	AppMessages bool `json:"app_messages,omitempty"`
 
+	// OIDCAudience is the comma-separated list of audiences a user bearer
+	// must carry (the platform audience of this environment, and this
+	// app's own). Empty keeps the built-in default list. Mutable ops
+	// setting; OIDCAudienceLogOnly accepts a token outside the list and
+	// logs its audience instead, to check a list against real traffic.
+	OIDCAudience        string `json:"oidc_audience,omitempty"`
+	OIDCAudienceLogOnly bool   `json:"oidc_audience_log_only,omitempty"`
+
+	// UIAudience is the audience the web front asks privasys.id for (the
+	// platform audience of this environment). Empty: the sign-in
+	// default. Mutable ops setting.
+	UIAudience string `json:"ui_audience,omitempty"`
+	// UIClientID is the OAuth client the web front signs in with: on dev
+	// the test platform's own client, so dev and production sessions never
+	// mix. Empty: the front's built-in client. Mutable ops setting.
+	UIClientID string `json:"ui_client_id,omitempty"`
+
 	// Semantic-index embedding backend: an OpenAI-compatible embeddings
 	// endpoint (the confidential-AI fleet), tried first; the local CPU
 	// embedder is the fallback. Mutable ops settings.
@@ -211,6 +228,17 @@ func (c *Config) Validate() error {
 		!strings.HasPrefix(c.MgmtBaseURL, "https://") && !strings.HasPrefix(c.MgmtBaseURL, "http://") {
 		return errors.New("mgmt_base_url must be an http(s) URL")
 	}
+	for _, a := range strings.Split(c.OIDCAudience, ",") {
+		if a = strings.TrimSpace(a); a != "" && strings.ContainsAny(a, badAudienceChars) {
+			return fmt.Errorf("oidc_audience: %q is not an audience", a)
+		}
+	}
+	if strings.ContainsAny(c.UIClientID, ","+badAudienceChars) {
+		return errors.New("ui_client_id must be a single client id")
+	}
+	if strings.ContainsAny(c.UIAudience, ","+badAudienceChars) {
+		return errors.New("ui_audience must be a single audience")
+	}
 	if c.UIOrigin != "" && !IsOrigin(c.UIOrigin) {
 		return errors.New("ui_origin must be an https origin, such as https://drive.example.org")
 	}
@@ -298,3 +326,7 @@ func (c *Config) Save(stateDir string) error {
 	}
 	return os.Rename(tmp, path(stateDir))
 }
+
+// badAudienceChars may not appear in an audience (oidc_audience,
+// ui_audience): whitespace, quotes and markup.
+const badAudienceChars = " \t\r\n\"'<>"
