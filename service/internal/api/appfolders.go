@@ -39,6 +39,11 @@ import (
 
 const holderFilesPath = "/__privasys/v1/holders/files"
 
+// appFoldersPaused stops every app-folder route before any token is read or
+// forwarded (see holderBearer). A var only so tests of the old behaviour
+// can still run against it.
+var appFoldersPaused = true
+
 var appIDPattern = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
 
 // appFolderView is one app that holds a folder for the holder.
@@ -117,6 +122,15 @@ const holderTokenHeader = "X-Holder-Token"
 // It returns the token and the issuer that minted it (where the holder's
 // consents are listed).
 func (s *Server) holderBearer(w http.ResponseWriter, r *http.Request, p *Principal) (string, string, bool) {
+	// Paused (2026-11-25): app folders forwarded the holder's own sign-in
+	// token to every app with a grant or a spend consent, and an app that
+	// serves this path itself (no resources declared) received it. Nothing
+	// is forwarded until each call carries a token minted for its target
+	// app alone. Every app-folder route passes through here first.
+	if appFoldersPaused {
+		http.Error(w, "app folders are paused: they will return once each app receives a token of its own", http.StatusServiceUnavailable)
+		return "", "", false
+	}
 	if !p.IsUser() {
 		http.Error(w, "only a user may look at their app folders", http.StatusForbidden)
 		return "", "", false
