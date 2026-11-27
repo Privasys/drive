@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import { getQuota, type Quota, type Tenant } from '~/lib/drive-api';
 import { formatBytes } from '~/lib/format';
 import { StorageIcon } from './icons';
@@ -15,7 +15,7 @@ export function StorageGauge({
     tenant,
     onOpenFolder
 }: {
-    session: SealedSession;
+    session: AppChannel;
     tenant: Tenant;
     /** Jump to a folder from the breakdown (optional). */
     onOpenFolder?: (nodeID: string, name: string) => void;

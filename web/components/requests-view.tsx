@@ -6,7 +6,7 @@
 // per-file grant. No email lists, no stored identities.
 
 import { useCallback, useEffect, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import {
     decideLinkRequest,
     listLinkRequests,
@@ -16,7 +16,7 @@ import {
 import { FileIcon, PeopleIcon } from './icons';
 import { attributeLabel, loadShareAttributes, type ShareAttribute } from '~/lib/share-attributes';
 
-export function RequestsView({ session, tenant }: { session: SealedSession; tenant: Tenant }) {
+export function RequestsView({ session, tenant }: { session: AppChannel; tenant: Tenant }) {
     const [requests, setRequests] = useState<LinkRequest[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);

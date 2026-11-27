@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import {
     deleteAppFolderPath,
     downloadAppFolderFile,
@@ -24,7 +24,7 @@ import { AppsIcon, DownloadIcon, FileIcon, FolderIcon, TrashIcon } from './icons
 
 const encoder = new TextDecoder();
 
-export function AppFoldersView({ session, token }: { session: SealedSession; token: string | undefined }) {
+export function AppFoldersView({ session, token }: { session: AppChannel; token: string | undefined }) {
     const [apps, setApps] = useState<AppFolder[] | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [open, setOpen] = useState<AppFolder | null>(null);

@@ -1,49 +1,62 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
+import type { AuthFrameConfig } from '@privasys/auth';
 import { PrivasysAuthProvider } from './privasys-auth';
+import { driveHost } from './drive-api';
 import { RUNTIME } from './runtime-config';
 
-// SDK config for drive.privasys.org (Privasys wallet auth via privasys.id).
-//
-// Reuses the shared `privasys-platform` OIDC client on privasys.id
-// (the hosted iframe handles redirect_uri internally on privasys.id,
-// so no per-adopter redirect registration is required). When chat
-// gets its own backend audience we'll switch this to a `privasys-chat`
-// client.
-const SDK_CONFIG = {
-    // The control plane of the platform this Drive runs on (runtime config),
-    // so the cached session row names the right origin on dev too.
-    apiBase: RUNTIME.apiBase,
-    appName: 'Privasys Drive',
-    authOrigin:
-        process.env.NEXT_PUBLIC_IDP_ORIGIN ?? 'https://privasys.id',
-    rpId: process.env.NEXT_PUBLIC_IDP_RP_ID ?? 'privasys.id',
-    brokerUrl:
-        process.env.NEXT_PUBLIC_BROKER_URL ?? 'wss://relay.privasys.org/relay',
-    // The environment's own client when the service names one (dev: the
-    // test platform's), so dev and production sign-ins never share a session.
-    clientId: RUNTIME.clientId || process.env.NEXT_PUBLIC_AUTH_CLIENT_ID || 'privasys-platform',
-    // The platform audience of the environment this Drive runs in, as the
-    // service writes it (ui_audience). Unset: the sign-in default.
-    ...(RUNTIME.audience ? { audience: RUNTIME.audience } : {}),
-    scope: ['openid', 'email', 'profile', 'offline_access'] as const,
-    // Explicitly ask the wallet to share these so it prompts for consent at
-    // sign-in (the `profile` scope alone does not raise the picker). Shared
-    // transiently for display only; the platform stores no PII of its own.
-    requestedAttributes: ['name', 'email'],
-    privacyPolicyUrl: 'https://privasys.org/legal/',
-    // Spend consent (acting-subject plan v2): Drive pays for a user's
-    // query-time embeddings with the USER's credits, under a monthly cap
-    // the wallet asks them to approve at sign-in. Suggested cap £5.
-    // Typed natively by @privasys/auth 0.12.0; the hosted iframe honours
-    // it whatever client version renders the page.
-    spend: { cap: 5_000_000 },
-    // A sign-in without the wallet reaches Drive over its direct name, with a
-    // bearer whose audience is this app. Drive treats that person as a guest.
-    ...(RUNTIME.appId ? { direct: { audience: `app:${RUNTIME.appId.replace(/-/g, '')}` } } : {})
+// Drive's pitch for the SDK gate's left panel (page presentation). The SDK
+// styles it; strings only.
+const DRIVE_PITCH = {
+    title: 'Your files, sealed.',
+    description:
+        'Privasys Drive keeps every file end-to-end encrypted inside a ' +
+        'hardware-protected enclave. The operator can never read your data, ' +
+        'and you can verify it yourself by remote attestation.',
+    bullets: [
+        'Sealed browser-to-enclave transport. The gateway only sees ciphertext.',
+        'Directories and per-file, per-folder sharing you control.',
+        'No passwords. Sign in with the Privasys Wallet on your phone.',
+        'Attestation-verified confidential computing. Verify it yourself, no need to trust the operator.'
+    ]
 };
 
+// The sign-in for drive.privasys.org. Every method is offered: a wallet
+// sign-in reaches Drive over the sealed channel the wallet approves in the
+// same tap (`apps`); any other reaches it directly, as a guest (see
+// use-drive).
+function driveConfig(): AuthFrameConfig {
+    const host = driveHost();
+    return {
+        // The environment's own client when the service names one (dev: the
+        // test platform's), so dev and production sign-ins never share a session.
+        clientId: RUNTIME.clientId || process.env.NEXT_PUBLIC_AUTH_CLIENT_ID || 'privasys-platform',
+        // The platform audience of the environment this Drive runs in, as the
+        // service writes it (ui_audience). Unset: the sign-in default.
+        ...(RUNTIME.audience ? { audience: RUNTIME.audience } : {}),
+        appName: 'Privasys Drive',
+        authOrigin: process.env.NEXT_PUBLIC_IDP_ORIGIN ?? 'https://privasys.id',
+        brokerUrl: process.env.NEXT_PUBLIC_BROKER_URL ?? 'wss://relay.privasys.org/relay',
+        scope: ['openid', 'email', 'profile', 'offline_access'],
+        privacyPolicyUrl: 'https://privasys.org/legal/',
+        ...(host ? { apps: [host] } : {}),
+        // Drive pays for a user's query-time embeddings with the user's
+        // credits, under a monthly cap the wallet asks them to approve at
+        // sign-in. Suggested cap £5.
+        spend: { cap: 5_000_000 },
+        presentation: 'page',
+        pitch: DRIVE_PITCH,
+        app: {
+            displayName: 'Privasys Drive',
+            ...(typeof window !== 'undefined'
+                ? { logoUrl: `${window.location.origin}/favicon/privasys-logo.mini.svg` }
+                : {})
+        }
+    };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-    return <PrivasysAuthProvider config={SDK_CONFIG}>{children}</PrivasysAuthProvider>;
+    const config = useMemo(driveConfig, []);
+    return <PrivasysAuthProvider config={config}>{children}</PrivasysAuthProvider>;
 }

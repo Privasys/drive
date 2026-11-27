@@ -13,7 +13,7 @@
 // and never reaches a server log.
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import { Navbar, Footer } from '@privasys/ui';
 import { useDrive } from '~/lib/use-drive';
 import { claimString, decodeTokenClaims } from '~/lib/token-claims';
@@ -59,7 +59,7 @@ export default function LinkPage() {
 }
 
 function LinkLanding() {
-    const { status, error: driveError, session, me, signInInto, holderToken, reconnect, signOut } = useDrive();
+    const { status, error: driveError, session, approval, me, signInInto, holderToken, reconnect, signOut } = useDrive();
     // A Drive session that failed, or is taking far longer than it should,
     // is shown for what it is, with a way out. This page used to render
     // only its own errors, so a connection that never came up read as
@@ -163,7 +163,7 @@ function LinkLanding() {
     // to provide something (a restricted link's details) signs them in, which
     // is how those details are sourced. If Drive refuses the link-only read
     // (this page is not on the direct name), the sign-in takes over.
-    const [linkOnly, setLinkOnly] = useState<SealedSession | null>(null);
+    const [linkOnly, setLinkOnly] = useState<AppChannel | null>(null);
     const [linkOnlyFailed, setLinkOnlyFailed] = useState(false);
     const [wantsSignIn, setWantsSignIn] = useState(false);
     const opensWithLink = !!preview?.opens_without_sign_in && !wantsSignIn && !linkOnlyFailed && status === 'signed-out';
@@ -479,6 +479,7 @@ function LinkLanding() {
                         <Card>
                             <p className="py-6 text-center text-sm" style={{ color: 'var(--drv-text-muted)' }}>
                                 {error ??
+                                    approval ??
                                     (status === 'error' || status === 'misconfigured'
                                         ? (driveError ?? 'Could not connect to Drive.')
                                         : slow

@@ -6,7 +6,7 @@
 // open it, a file to preview (or download when not previewable).
 
 import { useCallback, useEffect, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import { downloadFile, listChildren, type DriveNode } from '~/lib/drive-api';
 import { formatBytes, kindLabel } from '~/lib/format';
 import { FileViewer, canPreview } from './file-viewer';
@@ -23,7 +23,7 @@ export function SharedBrowser({
     rootID,
     rootName
 }: {
-    session: SealedSession;
+    session: AppChannel;
     tenantID: string;
     rootID: string;
     rootName: string;

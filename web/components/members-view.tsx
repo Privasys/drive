@@ -6,7 +6,7 @@
 // change roles and remove; anyone can leave (never the last owner).
 
 import { useCallback, useEffect, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import {
     addMember,
     listMembers,
@@ -26,7 +26,7 @@ export function MembersView({
     tenant,
     mySub
 }: {
-    session: SealedSession;
+    session: AppChannel;
     tenant: Tenant;
     mySub: string;
 }) {

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import {
     createFolder,
     deleteNode,
@@ -74,7 +74,7 @@ export function FileBrowser({
     tenant,
     me
 }: {
-    session: SealedSession;
+    session: AppChannel;
     tenant: Tenant;
     me: Me | null;
 }) {

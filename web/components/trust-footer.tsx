@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import {
     AttestationStatusBadge,
     attestationStatusOf,
@@ -30,18 +30,18 @@ export function TrustFooter({
     session,
     onOpenSecurity
 }: {
-    session: SealedSession;
+    session: AppChannel;
     /** Open the full-pane Security view (the whole pill is the trigger). */
     onOpenSecurity?: () => void;
 }) {
-    const { getTokenForAudience } = useAuth();
+    const { token } = useAuth();
 
     const attestUrl = APP_ID ? `${API_BASE}/api/v1/apps/${APP_ID}/attest` : '';
     const [state] = useAttestation({
         attestUrl,
         verifyQuoteUrl: AS_VERIFY,
-        token: () => getTokenForAudience('attestation-server'),
-        verifyQuoteToken: () => getTokenForAudience('attestation-server'),
+        token: () => token('attestation-server'),
+        verifyQuoteToken: () => token('attestation-server'),
         autoInspect: Boolean(attestUrl),
         autoVerifyQuote: true
     });

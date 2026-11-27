@@ -1,13 +1,13 @@
 // Client for the Privasys Drive enclave backend.
 //
-// The browser reaches Drive over a DEDICATED SEALED SESSION (PrivasysSession
-// from @privasys/auth) - never plain fetch. File bytes and metadata are
-// sealed browser->enclave (CBOR-AES-GCM); the gateway only ever sees
-// ciphertext. Drive authenticates the sealed session itself: the enclave
-// relay asserts the wallet-vouched sub (X-Privasys-Sub) toward the app, so
-// no bearer travels in the clear. Mirrors chat's lib/chat-service-api.ts.
+// The browser reaches Drive over the AuthFrame's channel to it (AppChannel
+// from @privasys/auth), never plain fetch. For a wallet session the channel
+// is sealed browser->enclave (CBOR-AES-GCM): the gateway only ever sees
+// ciphertext, and the enclave relay asserts the wallet-vouched sub
+// (X-Privasys-Sub) toward the app, so no bearer travels in the clear. Any
+// other session reaches Drive directly, with a token for Drive's audience.
 
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import {
     DriveError,
     driveHostFromEnv,
@@ -44,7 +44,7 @@ export interface DriveStatus {
 }
 
 /** Read the backend's /status over the sealed session (build id + mode). */
-export function getStatus(session: SealedSession): Promise<DriveStatus> {
+export function getStatus(session: AppChannel): Promise<DriveStatus> {
     return json<DriveStatus>(session, 'GET', '/status');
 }
 
@@ -135,12 +135,12 @@ export interface SharedItem {
 
 // ---- Identity + workspace --------------------------------------------
 
-export function getMe(session: SealedSession): Promise<Me> {
+export function getMe(session: AppChannel): Promise<Me> {
     return json<Me>(session, 'GET', '/v1/me');
 }
 
 /** Get-or-create the caller's personal drive (User tenant). Idempotent. */
-export function ensurePersonalTenant(session: SealedSession): Promise<Tenant> {
+export function ensurePersonalTenant(session: AppChannel): Promise<Tenant> {
     return json<Tenant>(session, 'POST', '/v1/me/tenant');
 }
 
@@ -152,11 +152,11 @@ export interface Member {
 }
 
 /** Create an enterprise workspace; the caller becomes its owner. */
-export function createWorkspace(session: SealedSession, name: string): Promise<Tenant> {
+export function createWorkspace(session: AppChannel, name: string): Promise<Tenant> {
     return json<Tenant>(session, 'POST', '/v1/tenants', { kind: 'enterprise', name });
 }
 
-export async function listMembers(session: SealedSession, tenantID: string): Promise<Member[]> {
+export async function listMembers(session: AppChannel, tenantID: string): Promise<Member[]> {
     const data = await json<{ members: Member[] }>(
         session,
         'GET',
@@ -167,7 +167,7 @@ export async function listMembers(session: SealedSession, tenantID: string): Pro
 
 /** Add a member by their Privasys ID sub (upserts the role). */
 export async function addMember(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     sub: string,
     role: MemberRole
@@ -183,7 +183,7 @@ export async function addMember(
 }
 
 export async function setMemberRole(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     sub: string,
     role: MemberRole
@@ -199,7 +199,7 @@ export async function setMemberRole(
 }
 
 export async function removeMember(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     sub: string
 ): Promise<void> {
@@ -217,7 +217,7 @@ export async function removeMember(
 
 /** List a folder's children; pass null/'' for the tenant root. */
 export function listChildren(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     folderID: string | null
 ): Promise<DriveNode[]> {
@@ -228,7 +228,7 @@ export function listChildren(
 }
 
 export function createFolder(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     parentID: string | null,
     name: string
@@ -241,7 +241,7 @@ export function createFolder(
 
 /** Download a file's plaintext bytes (decrypted inside the enclave). */
 export async function downloadFile(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     fileID: string
 ): Promise<Uint8Array> {
@@ -266,7 +266,7 @@ export async function downloadFile(
  * while the enclave went on to finish the delete.
  */
 export async function deleteNode(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string
 ): Promise<void> {
@@ -288,7 +288,7 @@ export interface SubtreeStats {
  * far longer than one large one.
  */
 export function subtreeStats(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string
 ): Promise<SubtreeStats> {
@@ -314,7 +314,7 @@ export interface SearchHit {
 
 /** Semantic search over the tenant's indexed files. */
 export async function searchTenant(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     query: string,
     topK = 10
@@ -329,7 +329,7 @@ export async function searchTenant(
 
 /** Mark a node (typically a folder) searchable or non-searchable. */
 export async function setNodeIndexing(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string,
     enabled: boolean
@@ -346,7 +346,7 @@ export async function setNodeIndexing(
 
 /** Reparent a node under parentID (null/'' moves it to the tenant root). */
 export async function moveNode(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string,
     parentID: string | null
@@ -360,7 +360,7 @@ export async function moveNode(
 // ---- Permissioning ---------------------------------------------------
 
 export function getPermissions(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string
 ): Promise<NodePermissions> {
@@ -373,7 +373,7 @@ export function getPermissions(
 
 /** Share a node with a person (Google-Drive style). scope e.g. ['read'] or ['read','write']. */
 export function shareWithUser(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string,
     granteeSub: string,
@@ -388,7 +388,7 @@ export function shareWithUser(
 }
 
 export async function revokeGrant(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     grantID: string
 ): Promise<void> {
@@ -398,7 +398,7 @@ export async function revokeGrant(
 
 /** Set/clear a folder's ACL override (SharePoint-style). Empty roles clears it (inherit). */
 export function setNodeACL(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string,
     roles: string[]
@@ -407,7 +407,7 @@ export function setNodeACL(
 }
 
 /** The caller's inbound shares across all tenants ("Shared with me"). */
-export async function listShared(session: SealedSession): Promise<SharedItem[]> {
+export async function listShared(session: AppChannel): Promise<SharedItem[]> {
     const data = await json<{ shared: SharedItem[] }>(session, 'GET', '/v1/shared');
     return data.shared ?? [];
 }
@@ -507,7 +507,7 @@ export interface LinkRequest {
  * in X-Holder-Token, as it does for app folders.
  */
 export function createLink(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string,
     opts: {
@@ -561,7 +561,7 @@ export type AttributeOffer = (
     allowed?: string[];
 };
 
-export async function getAttributeOffer(session: SealedSession, holderToken?: string): Promise<AttributeOffer> {
+export async function getAttributeOffer(session: AppChannel, holderToken?: string): Promise<AttributeOffer> {
     const res = await json<{
         paid: boolean;
         reason?: 'no_marketplace' | 'no_payer' | 'no_referential';
@@ -587,7 +587,7 @@ export async function getAttributeOffer(session: SealedSession, holderToken?: st
 
 /** Owner: list a node's active links (no secrets). */
 export async function listLinks(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string
 ): Promise<ShareLink[]> {
@@ -601,7 +601,7 @@ export async function listLinks(
 
 /** Recipient: fetch a link's target metadata (requires the secret). */
 export function resolveLink(
-    session: SealedSession,
+    session: AppChannel,
     linkID: string,
     secret: string,
     holderToken?: string
@@ -620,7 +620,7 @@ export function resolveLink(
 
 /** Recipient: redeem a link. Open -> granted; restricted -> pending request. */
 export function redeemLink(
-    session: SealedSession,
+    session: AppChannel,
     linkID: string,
     secret: string,
     attributes?: Record<string, string>,
@@ -673,13 +673,13 @@ export async function previewLinkPublic(linkID: string, previewKey: string): Pro
 }
 
 /**
- * A reader holding nothing but an open link. Drive's API client takes a
- * SealedSession, so this presents the link as one: each request goes to this
+ * A reader holding nothing but an open link. Drive's API client takes an
+ * AppChannel, so this presents the link as one: each request goes to this
  * page's own origin, a direct name where TLS ends in the enclave, with the
  * link itself as the credential. Drive lets it read the shared node and what
  * is beneath it, and nothing else.
  */
-export function linkReader(linkID: string, secret: string): SealedSession {
+export function linkReader(linkID: string, secret: string): AppChannel {
     const send = async (method: string, path: string, body?: unknown, init?: RequestInit): Promise<Response> => {
         const headers = new Headers(init?.headers);
         headers.set('Authorization', `DriveLink ${linkID}.${secret}`);
@@ -695,14 +695,12 @@ export function linkReader(linkID: string, secret: string): SealedSession {
     };
     const record = (h: Headers): Record<string, string> => Object.fromEntries(h.entries());
     return {
-        sessionId: 'link',
-        appHost: typeof window === 'undefined' ? '' : window.location.host,
-        expiresAt: Number.MAX_SAFE_INTEGER,
-        state: { status: 'ok' },
+        transport: 'direct',
+        state: 'ok',
         onState: () => () => {},
         async request(method, path, body, init) {
             const r = await send(method, path, body, init);
-            return { status: r.status, headers: record(r.headers), body: new Uint8Array(await r.arrayBuffer()), sealed: false };
+            return { status: r.status, headers: record(r.headers), body: new Uint8Array(await r.arrayBuffer()), transport: 'direct' };
         },
         async stream(method, path, body, init) {
             const r = await send(method, path, body, init);
@@ -710,17 +708,17 @@ export function linkReader(linkID: string, secret: string): SealedSession {
                 status: r.status,
                 headers: record(r.headers),
                 body: r.body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() }),
-                sealed: false
+                transport: 'direct'
             };
         },
-        openWebSocket() {
+        async openWebSocket() {
             throw new Error('Sign in to get live updates.');
         }
     };
 }
 
 /** What an open link shares, read with the link alone (see linkReader). */
-export async function viewLink(reader: SealedSession, linkID: string): Promise<ResolvedLink> {
+export async function viewLink(reader: AppChannel, linkID: string): Promise<ResolvedLink> {
     const r = await json<Omit<ResolvedLink, 'already_granted' | 'request_status'>>(
         reader,
         'GET',
@@ -731,7 +729,7 @@ export async function viewLink(reader: SealedSession, linkID: string): Promise<R
 
 /** Owner: list restricted-link access requests (default pending). */
 export async function listLinkRequests(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     status = 'pending'
 ): Promise<LinkRequest[]> {
@@ -782,7 +780,7 @@ export interface TenantMetrics {
 
 /** Owner/admin: access metrics for the tenant over the last N days. */
 export async function getTenantMetrics(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     days = 30
 ): Promise<TenantMetrics> {
@@ -802,7 +800,7 @@ export async function getTenantMetrics(
 
 /** Owner: approve or deny a restricted-link request. */
 export function decideLinkRequest(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     requestID: string,
     decision: 'approve' | 'deny'
@@ -843,7 +841,7 @@ export interface DriveGraph {
 }
 
 /** The tenant's knowledge graph: nodes plus containment and typed links. */
-export async function getGraph(session: SealedSession, tenantID: string): Promise<DriveGraph> {
+export async function getGraph(session: AppChannel, tenantID: string): Promise<DriveGraph> {
     const data = await json<DriveGraph>(session, 'GET', `/v1/tenants/${tenantID}/graph`);
     return {
         nodes: data.nodes ?? [],
@@ -864,7 +862,7 @@ export interface GraphLint {
 }
 
 /** Graph hygiene: links that point nowhere and nodes nothing links to. */
-export async function getLint(session: SealedSession, tenantID: string): Promise<GraphLint> {
+export async function getLint(session: AppChannel, tenantID: string): Promise<GraphLint> {
     const data = await json<GraphLint>(session, 'GET', `/v1/tenants/${tenantID}/lint`);
     return {
         dangling_links: data.dangling_links ?? [],
@@ -895,7 +893,7 @@ export interface Quota {
     apps?: UsageEntry[];
 }
 
-export function getQuota(session: SealedSession, tenantID: string): Promise<Quota> {
+export function getQuota(session: AppChannel, tenantID: string): Promise<Quota> {
     return json<Quota>(session, 'GET', `/v1/tenants/${tenantID}/quota`);
 }
 
@@ -911,7 +909,7 @@ export interface AppAccess {
     via?: string;
 }
 
-export async function listAppsWithAccess(session: SealedSession, tenantID: string): Promise<AppAccess[]> {
+export async function listAppsWithAccess(session: AppChannel, tenantID: string): Promise<AppAccess[]> {
     const res = await json<{ apps: AppAccess[] }>(session, 'GET', `/v1/tenants/${tenantID}/apps`);
     return res.apps ?? [];
 }
@@ -939,7 +937,7 @@ export class StaleWriteError extends Error {
  * than a silent overwrite.
  */
 export async function writeTextContent(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string,
     text: string,
@@ -986,7 +984,7 @@ export interface FileVersion {
 
 /** A file's retained revisions, newest first. */
 export async function listVersions(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string
 ): Promise<{ node_id: string; rev: number; versions: FileVersion[] }> {
@@ -995,7 +993,7 @@ export async function listVersions(
 
 /** The bytes a file held at one revision. */
 export async function readVersion(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string,
     rev: number
@@ -1016,7 +1014,7 @@ export async function readVersion(
  * restoring is itself undoable and the history stays in order.
  */
 export async function restoreVersion(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string,
     rev: number
@@ -1055,7 +1053,7 @@ export interface DiffResult {
  * answers what the last save changed. Text files only.
  */
 export async function diffVersions(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeID: string,
     opts: { from?: number; to?: number; context?: number } = {}
@@ -1074,7 +1072,7 @@ export async function diffVersions(
  * and zipping in the page would hold every byte in memory.
  */
 export async function downloadZip(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     nodeIDs: string[],
     name?: string
@@ -1091,7 +1089,7 @@ export async function downloadZip(
 }
 
 export async function exportWorkspaceZip(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     folderID: string
 ): Promise<Uint8Array> {
@@ -1142,7 +1140,7 @@ function holderHeaders(token: string): RequestInit {
     return { headers: { 'X-Holder-Token': token } };
 }
 
-export async function listAppFolders(session: SealedSession, token: string): Promise<AppFolder[]> {
+export async function listAppFolders(session: AppChannel, token: string): Promise<AppFolder[]> {
     const res = await json<{ app_folders: AppFolder[] }>(
         session,
         'GET',
@@ -1155,7 +1153,7 @@ export async function listAppFolders(session: SealedSession, token: string): Pro
 }
 
 export function listAppFolder(
-    session: SealedSession,
+    session: AppChannel,
     token: string,
     appID: string,
     path: string
@@ -1171,7 +1169,7 @@ export function listAppFolder(
 }
 
 export async function downloadAppFolderFile(
-    session: SealedSession,
+    session: AppChannel,
     token: string,
     appID: string,
     path: string
@@ -1189,7 +1187,7 @@ export async function downloadAppFolderFile(
 }
 
 export async function deleteAppFolderPath(
-    session: SealedSession,
+    session: AppChannel,
     token: string,
     appID: string,
     path: string

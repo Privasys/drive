@@ -1,8 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useDrive } from '~/lib/use-drive';
-import { DIRECT_SIGN_IN_REFUSED } from '~/lib/privasys-auth';
+import { DIRECT_SIGN_IN_REFUSED, useDrive } from '~/lib/use-drive';
 
 // Full-page sign-in gate. The auth SDK renders the ENTIRE surface (page
 // presentation, Option C): a templated header with Drive's logo and name,
@@ -12,7 +11,7 @@ import { DIRECT_SIGN_IN_REFUSED } from '~/lib/privasys-auth';
 // and reactions to three outcomes: ready (drive bootstraps), cancelled
 // (a quiet closed panel with a way back in), error (banner with retry).
 export function SignInGate() {
-    const { status, error, connectInto, signOut } = useDrive();
+    const { status, error, approval, connectInto, signOut } = useDrive();
     const ceremonyRef = useRef<HTMLDivElement>(null);
     const started = useRef(false);
     const [closed, setClosed] = useState(false);
@@ -90,6 +89,16 @@ export function SignInGate() {
                         </button>
                     )}
                 </div>
+            )}
+            {status === 'connecting' && approval && (
+                // The wallet is asked to approve Drive: the first time, or
+                // again after the enclave changed.
+                <p
+                    className="mx-auto mt-6 max-w-md rounded-lg border px-4 py-3 text-center text-sm"
+                    style={{ borderColor: 'var(--drv-border)', color: 'var(--drv-text-muted)' }}
+                >
+                    {approval}
+                </p>
             )}
             {/* The SDK gate fills the viewport (page presentation). */}
             <div ref={ceremonyRef} className="min-h-[640px] w-full flex-1" />

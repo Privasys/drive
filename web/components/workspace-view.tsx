@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import { deleteNode, downloadFile, exportWorkspaceZip, type DriveNode, type Tenant } from '~/lib/drive-api';
 import { formatBytes, relativeTime } from '~/lib/format';
 import { buildTree, parseWorkspaceManifest, summarise, type TreeDir, type WorkspaceManifest } from '~/lib/workspace-manifest';
@@ -19,7 +19,7 @@ export function WorkspaceView({
     onBack,
     onDeleted
 }: {
-    session: SealedSession;
+    session: AppChannel;
     tenant: Tenant;
     node: DriveNode;
     onBack: () => void;

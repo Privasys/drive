@@ -7,7 +7,7 @@
 // decoration channel later.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import {
     DriveError,
     getTenantMetrics,
@@ -70,7 +70,7 @@ function useMeasuredWidth(): [React.RefObject<HTMLDivElement | null>, number] {
     return [ref, width];
 }
 
-export function InsightsView({ session, tenant }: { session: SealedSession; tenant: Tenant }) {
+export function InsightsView({ session, tenant }: { session: AppChannel; tenant: Tenant }) {
     const [days, setDays] = useState<number>(30);
     const [metrics, setMetrics] = useState<TenantMetrics | null>(null);
     const [loading, setLoading] = useState(true);

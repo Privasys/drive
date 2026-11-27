@@ -7,7 +7,7 @@
 // download prompt. Nothing leaves the browser.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { downloadFile, type DriveNode } from '~/lib/drive-api';
@@ -58,7 +58,7 @@ export function FileViewer({
     onDownload,
     onEdit
 }: {
-    session: SealedSession;
+    session: AppChannel;
     tenantID: string;
     node: DriveNode;
     onClose: () => void;

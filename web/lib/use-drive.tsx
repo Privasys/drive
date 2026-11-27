@@ -1,14 +1,13 @@
 'use client';
 
-// DriveProvider - owns the sealed session to the Drive enclave and the
-// caller's personal drive (tenant). Wraps the wallet auth context.
+// DriveProvider - owns the channel to the Drive enclave and the caller's
+// personal drive (tenant). Wraps the Privasys ID auth context.
 //
-// Flow: the user signs in with `sessionRelayHost = driveHost()`, so the
-// wallet attests the Drive enclave's quote and binds the session to a
-// sealed CBOR-AES-GCM transport in the same ceremony. We then resume that
-// sealed session with getSealedSession(driveHost()) (silent across
-// reloads; a voucher request covers the cold case), and bootstrap the
-// personal tenant.
+// A wallet sign-in approves the Drive enclave in the same tap, so its
+// channel is sealed and opens silently, across reloads too; a later change
+// of the enclave asks the wallet for one more tap. Any other sign-in reaches
+// Drive directly with a token for Drive's audience, as a guest who opens
+// what was shared with them and owns no drive.
 
 import {
     createContext,
@@ -19,7 +18,7 @@ import {
     useState,
     type ReactNode
 } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import { useAuth } from './privasys-auth';
 import {
     createWorkspace,
@@ -30,6 +29,7 @@ import {
     type Tenant
 } from './drive-api';
 import { fetchUserProfile, type UserProfile } from './me-api';
+import { RUNTIME } from './runtime-config';
 
 /** Best display name for the signed-in user, falling back gracefully. */
 export function displayName(profile: UserProfile | null, me: Me | null): string {
@@ -51,26 +51,53 @@ export type DriveStatus =
     | 'error'
     | 'misconfigured';
 
-// Drive's pitch for the SDK gate's left panel (page presentation). The SDK
-// styles it; strings only.
-const DRIVE_PITCH = {
-    title: 'Your files, sealed.',
-    description:
-        'Privasys Drive keeps every file end-to-end encrypted inside a ' +
-        'hardware-protected enclave. The operator can never read your data, ' +
-        'and you can verify it yourself by remote attestation.',
-    bullets: [
-        'Sealed browser-to-enclave transport. The gateway only sees ciphertext.',
-        'Directories and per-file, per-folder sharing you control.',
-        'No passwords. Sign in with the Privasys Wallet on your phone.',
-        'Attestation-verified confidential computing. Verify it yourself, no need to trust the operator.'
-    ]
-};
+/** Shown when the runtime refuses a direct sign-in; the gate offers a new one. */
+export const DIRECT_SIGN_IN_REFUSED = 'Your sign-in is not valid for Drive. Sign in again to continue.';
+
+// The audience of a direct channel's token: this app.
+const DRIVE_AUDIENCE = RUNTIME.appId ? `app:${RUNTIME.appId.replace(/-/g, '')}` : undefined;
+
+// A sign-in method, as the SDK names it.
+type Method = 'wallet' | 'passkey' | 'social';
+
+/** What the wallet is asked to approve again, in words, or null for a first approval. */
+export function approvalMessage(reason: string | null): string {
+    if (reason === 'workload-changed') return 'Privasys Drive was updated since you last approved it. Approve it in your Privasys Wallet to continue.';
+    if (reason === 'enc-changed') return 'The platform Privasys Drive runs on was updated. Approve it in your Privasys Wallet to continue.';
+    return 'Approve Privasys Drive in your Privasys Wallet to continue.';
+}
+
+// refusalAware names the runtime's refusal of a direct sign-in: it refused the
+// sign-in itself, not Drive a request, and retrying sends the same token, so
+// only a new sign-in helps.
+function refusalAware(ch: AppChannel): AppChannel {
+    return {
+        get transport() {
+            return ch.transport;
+        },
+        get state() {
+            return ch.state;
+        },
+        onState: (cb) => ch.onState(cb),
+        async request(method, path, body, init) {
+            const r = await ch.request(method, path, body, init);
+            if (r.status === 401 && new TextDecoder().decode(r.body).includes('not valid for this app')) {
+                throw new Error(DIRECT_SIGN_IN_REFUSED);
+            }
+            return r;
+        },
+        stream: (method, path, body, init) => ch.stream(method, path, body, init),
+        openWebSocket: (path) => ch.openWebSocket(path)
+    };
+}
 
 interface DriveContextValue {
     status: DriveStatus;
     error: string | null;
-    session: SealedSession | null;
+    /** The channel to Drive, once open. */
+    session: AppChannel | null;
+    /** Set while the wallet is asked to approve Drive: the message to show. */
+    approval: string | null;
     me: Me | null;
     profile: UserProfile | null;
     name: string; // best display name for the signed-in user
@@ -81,27 +108,24 @@ interface DriveContextValue {
     switchTenant: (t: Tenant) => void;
     /** Create an enterprise workspace, refresh memberships, switch to it. */
     newWorkspace: (name: string) => Promise<void>;
-    signIn: () => Promise<void>;
+    /**
+     * A share link's sign-in, inline in `el`: the minimal scope, exactly the
+     * attributes the link needs, and the link's client and billing grant.
+     * Rejects when it did not complete, so the page can offer a retry.
+     */
     signInInto: (
         el: HTMLElement,
-        requestedAttributes?: readonly string[],
-        link?: { clientId?: string; billingGrant?: string; methods?: readonly ('wallet' | 'passkey' | 'social')[] }
+        attributes?: readonly string[],
+        link?: { clientId?: string; billingGrant?: string; methods?: readonly Method[] }
     ) => Promise<void>;
     /**
-     * The one-call gate (SDK connect()): mounts the whole sign-in surface
-     * (header + pitch + ceremony/approval states) into `el` and bootstraps
-     * the drive on success. Returns the outcome so the gate can render a
-     * "closed" panel on user cancel (the SDK's Close button); 'error'
-     * (with a message) only when the SDK gave up.
+     * The gate: restores the session or runs the sign-in inside `el`; the
+     * drive opens once signed in. 'cancelled' when the person closed it,
+     * 'error' (with `error` set) when it failed.
      */
     connectInto: (el: HTMLElement) => Promise<'ready' | 'cancelled' | 'error'>;
     signOut: () => void;
-    /**
-     * Recover after the enclave restarted or went unreachable: retry the
-     * sealed session, force-rebuild it if needed, and re-bootstrap. Lands
-     * on 'need-approval' when the enclave's identity changed (fresh
-     * wallet ceremony required).
-     */
+    /** Open the channel to Drive again and re-bootstrap. */
     reconnect: () => Promise<void>;
     /**
      * The holder's own IdP token, for the calls Drive makes on their behalf
@@ -114,6 +138,7 @@ const DriveContext = createContext<DriveContextValue>({
     status: 'signed-out',
     error: null,
     session: null,
+    approval: null,
     me: null,
     profile: null,
     name: '',
@@ -121,7 +146,6 @@ const DriveContext = createContext<DriveContextValue>({
     tenants: [],
     switchTenant: () => {},
     newWorkspace: async () => {},
-    signIn: async () => {},
     signInInto: async () => {},
     connectInto: async () => 'error' as const,
     signOut: () => {},
@@ -138,58 +162,65 @@ export function DriveProvider({ children }: { children: ReactNode }) {
     const host = driveHost();
     const [status, setStatus] = useState<DriveStatus>('connecting');
     const [error, setError] = useState<string | null>(null);
-    const [session, setSession] = useState<SealedSession | null>(null);
+    const [session, setSession] = useState<AppChannel | null>(null);
+    const [approval, setApproval] = useState<string | null>(null);
     const [me, setMe] = useState<Me | null>(null);
     const [profile, setProfile] = useState<UserProfile | null>(null);
     const [tenant, setTenant] = useState<Tenant | null>(null);
-    const bootstrapping = useRef(false);
+    // Bumped to open the channel again: a channel that signed out, or a retry.
+    const [attempt, setAttempt] = useState(0);
+    const connecting = useRef(false);
+    const signedIn = !!auth.session;
+    const token = auth.session?.token;
+    const tokenRef = useRef(token);
+    useEffect(() => {
+        tokenRef.current = token;
+    }, [token]);
 
-    const bootstrap = useCallback(
-        async (s: SealedSession) => {
-            // Right after a fresh wallet ceremony the sealed channel can
-            // need a beat before the first request lands (the enclave-side
-            // session is still settling); retry briefly instead of
-            // surfacing a scary banner on first sign-in.
-            let meRes!: Me, tenantRes!: Tenant | null;
-            for (let attempt = 0; ; attempt++) {
-                try {
-                    meRes = await getMe(s);
-                    // A guest (no wallet) owns no drive: only what was shared
-                    // with them, and any workspace they were made a member of.
-                    tenantRes = meRes.guest ? (meRes.tenants[0] ?? null) : await ensurePersonalTenant(s);
-                    break;
-                } catch (e) {
-                    if (attempt >= 2) throw e;
-                    await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
-                }
+    const bootstrap = useCallback(async (ch: AppChannel) => {
+        // Right after a fresh wallet ceremony the sealed channel can need a
+        // beat before the first request lands (the enclave-side session is
+        // still settling); retry briefly instead of surfacing a scary banner
+        // on first sign-in.
+        let meRes!: Me, tenantRes!: Tenant | null;
+        for (let n = 0; ; n++) {
+            try {
+                meRes = await getMe(ch);
+                // A guest (no wallet) owns no drive: only what was shared
+                // with them, and any workspace they were made a member of.
+                tenantRes = meRes.guest ? (meRes.tenants[0] ?? null) : await ensurePersonalTenant(ch);
+                break;
+            } catch (e) {
+                if (n >= 2) throw e;
+                await new Promise((r) => setTimeout(r, 1200 * (n + 1)));
             }
-            setMe(meRes);
-            // Default the active tenant to the personal drive, keeping a
-            // previously selected workspace across reconnects.
-            setTenant((cur) => {
-                if (cur) {
-                    const still = meRes.tenants.find((t) => t.id === cur.id);
-                    if (still) return still;
-                }
-                return tenantRes;
-            });
-            setSession(s);
-            setStatus('ready');
-            // Profile (real name) lives behind the management-service /me,
-            // not the sealed identity (the relay asserts only the sub).
-            const token = auth.session?.accessToken;
-            if (token) {
-                fetchUserProfile(token)
-                    .then(setProfile)
-                    .catch(() => {
-                        /* name is a nicety; fall back to email/sub */
-                    });
+        }
+        setMe(meRes);
+        // Default the active tenant to the personal drive, keeping a
+        // previously selected workspace across reconnects.
+        setTenant((cur) => {
+            if (cur) {
+                const still = meRes.tenants.find((t) => t.id === cur.id);
+                if (still) return still;
             }
-        },
-        [auth.session?.accessToken]
-    );
+            return tenantRes;
+        });
+        setSession(ch);
+        setStatus('ready');
+        // Profile (real name) lives behind the management-service /me, not
+        // the sealed identity (the relay asserts only the sub).
+        if (tokenRef.current) {
+            fetchUserProfile(tokenRef.current)
+                .then(setProfile)
+                .catch(() => {
+                    /* name is a nicety; fall back to email/sub */
+                });
+        }
+    }, []);
 
-    // Resolve the sealed Drive session whenever the wallet session changes.
+    // Open the channel to Drive whenever the person signs in or out, the
+    // page's frame is replaced (auth.app changes), or a retry asks for it.
+    // A renewal changes none of these.
     useEffect(() => {
         if (!host) {
             setStatus('misconfigured');
@@ -200,65 +231,72 @@ export function DriveProvider({ children }: { children: ReactNode }) {
             setStatus('connecting');
             return;
         }
-        if (!auth.session) {
+        if (!signedIn) {
             setStatus('signed-out');
             setSession(null);
+            setApproval(null);
             setMe(null);
             setTenant(null);
             return;
         }
         let cancelled = false;
+        let offState: (() => void) | undefined;
         setStatus('connecting');
         setError(null);
         void auth
-            .getSealedSession(host)
-            .then(async (s) => {
-                if (cancelled) return;
-                if (!s) {
-                    // Signed in, but no live sealed session for Drive — the
-                    // gate's connect() handles re-approval or a fresh
-                    // ceremony from here.
-                    setStatus('signed-out');
-                    return;
+            .app(host, {
+                audience: DRIVE_AUDIENCE,
+                onApproval: (reason) => {
+                    if (!cancelled) setApproval(approvalMessage(reason));
                 }
-                await bootstrap(s);
+            })
+            .then(async (ch) => {
+                if (cancelled) return;
+                setApproval(null);
+                // A channel that cannot continue (the session ended, or the
+                // enclave needs a new approval) is opened again.
+                offState = ch.onState((st) => {
+                    if (st === 'signed-out') setAttempt((n) => n + 1);
+                });
+                await bootstrap(ch.transport === 'direct' ? refusalAware(ch) : ch);
             })
             .catch((e: unknown) => {
                 if (cancelled) return;
+                setApproval(null);
                 setStatus('error');
                 setError(e instanceof Error ? e.message : 'Could not connect to Drive.');
             });
         return () => {
             cancelled = true;
+            offState?.();
         };
-    }, [auth.session, auth.loading, auth.getSealedSession, host, bootstrap]);
+    }, [signedIn, auth.loading, auth.app, host, bootstrap, attempt]);
 
-    const signIn = useCallback(async () => {
-        setError(null);
-        try {
-            await auth.signIn({ sessionRelayHost: host });
-        } catch (e) {
-            if (e instanceof Error && e.message !== 'Authentication cancelled') {
-                setError(e.message);
-                setStatus('error');
-            }
-        }
-    }, [auth, host]);
-
-    // Inline ceremony: the wallet SDK renders its own sign-in surface
-    // (install-the-wallet / connect-with-passkey) into the container.
+    // A share link's sign-in: an open link is a minimal identity flow (no
+    // PII), and a restricted one asks for exactly what it requires, so its
+    // visitor is never prompted for their name or email otherwise. The link
+    // signs its visitor in with the client Drive binds the link's billing
+    // grant to, and passes the grant, so the sharer, not the client's owner,
+    // pays for a paid attribute.
     const signInInto = useCallback(
         async (
             el: HTMLElement,
-            requestedAttributes?: readonly string[],
-            link?: { clientId?: string; billingGrant?: string; methods?: readonly ('wallet' | 'passkey' | 'social')[] }
+            attributes?: readonly string[],
+            link?: { clientId?: string; billingGrant?: string; methods?: readonly Method[] }
         ) => {
             setError(null);
             try {
-                await auth.signInInto(el, { sessionRelayHost: host, requestedAttributes, ...link });
+                await auth.connect(el, {
+                    presentation: 'inline',
+                    scope: ['openid', 'offline_access'],
+                    attributes: attributes ?? [],
+                    ...(link?.methods ? { methods: link.methods } : {}),
+                    ...(link?.clientId ? { clientId: link.clientId } : {}),
+                    ...(link?.billingGrant ? { billingGrant: link.billingGrant } : {})
+                });
             } catch (e) {
-                if (e instanceof Error && e.message !== 'Authentication cancelled') {
-                    setError(e.message);
+                if ((e as { code?: string }).code !== 'cancelled') {
+                    setError(e instanceof Error ? e.message : 'The sign-in did not complete.');
                     setStatus('error');
                 }
                 // Rethrow so the caller can offer a retry: a swallowed
@@ -268,42 +306,34 @@ export function DriveProvider({ children }: { children: ReactNode }) {
                 throw e;
             }
         },
-        [auth, host]
+        [auth]
     );
 
-    // The one-call gate: SDK connect() renders every state (silent restore,
-    // one-tap re-approval, full ceremony) inside `el`; we bootstrap the
-    // drive when it hands back the sealed session.
-    const connectInto = useCallback(async (el: HTMLElement): Promise<'ready' | 'cancelled' | 'error'> => {
-        if (bootstrapping.current) return 'error';
-        bootstrapping.current = true;
-        setError(null);
-        try {
-            const s = await auth.connectInto(el, {
-                appHost: host,
-                pitch: DRIVE_PITCH,
-                app: {
-                    displayName: 'Privasys Drive',
-                    ...(typeof window !== 'undefined'
-                        ? { logoUrl: `${window.location.origin}/favicon/privasys-logo.mini.svg` }
-                        : {})
+    // The gate: connect() renders every state (silent restore, full
+    // ceremony) inside `el`; the effect above opens the drive once signed in.
+    const connectInto = useCallback(
+        async (el: HTMLElement): Promise<'ready' | 'cancelled' | 'error'> => {
+            if (connecting.current) return 'error';
+            connecting.current = true;
+            setError(null);
+            try {
+                await auth.connect(el);
+                setAttempt((n) => n + 1);
+                return 'ready';
+            } catch (e) {
+                if ((e as { code?: string }).code === 'cancelled') {
+                    setStatus('signed-out');
+                    return 'cancelled';
                 }
-            });
-            if (!s) throw new Error('Drive connection was not completed.');
-            await bootstrap(s);
-            return 'ready';
-        } catch (e) {
-            if ((e as { code?: string }).code === 'cancelled') {
-                setStatus('signed-out');
-                return 'cancelled';
+                setStatus('error');
+                setError(e instanceof Error ? e.message : 'Could not connect to Drive.');
+                return 'error';
+            } finally {
+                connecting.current = false;
             }
-            setStatus('error');
-            setError(e instanceof Error ? e.message : 'Could not connect to Drive.');
-            return 'error';
-        } finally {
-            bootstrapping.current = false;
-        }
-    }, [auth, host, bootstrap]);
+        },
+        [auth]
+    );
 
     const switchTenant = useCallback((t: Tenant) => setTenant(t), []);
 
@@ -321,42 +351,11 @@ export function DriveProvider({ children }: { children: ReactNode }) {
 
     const reconnect = useCallback(async () => {
         setError(null);
-        setStatus('connecting');
-        try {
-            // The cached per-host session self-heals at request level once
-            // the enclave is back; try it first.
-            let s = await auth.getSealedSession(host);
-            if (s) {
-                try {
-                    await bootstrap(s);
-                    return;
-                } catch {
-                    /* fall through to a forced rebuild */
-                }
-            }
-            const outcome = await auth.reestablishSealed(host);
-            if (outcome === 'rejected') {
-                // The enclave's identity/measurement changed: the wallet
-                // must verify it again — hand over to the gate (its
-                // connect() renders the one-tap approval).
-                setStatus('signed-out');
-                return;
-            }
-            s = await auth.getSealedSession(host);
-            if (s) {
-                await bootstrap(s);
-                return;
-            }
-            setStatus('error');
-            setError('Could not reconnect to Drive. Try again in a moment.');
-        } catch (e) {
-            setStatus('error');
-            setError(e instanceof Error ? e.message : 'Could not reconnect to Drive.');
-        }
-    }, [auth, host, bootstrap]);
+        setAttempt((n) => n + 1);
+    }, []);
 
     const signOut = useCallback(() => {
-        auth.signOut();
+        void auth.signOut();
         setSession(null);
         setMe(null);
         setProfile(null);
@@ -370,6 +369,7 @@ export function DriveProvider({ children }: { children: ReactNode }) {
                 status,
                 error,
                 session,
+                approval,
                 me,
                 profile,
                 name: displayName(profile, me),
@@ -377,12 +377,11 @@ export function DriveProvider({ children }: { children: ReactNode }) {
                 tenants: me?.tenants ?? [],
                 switchTenant,
                 newWorkspace,
-                signIn,
                 signInInto,
                 connectInto,
                 signOut,
                 reconnect,
-                holderToken: auth.session?.accessToken
+                holderToken: token
             }}
         >
             {children}

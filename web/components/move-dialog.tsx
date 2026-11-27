@@ -5,7 +5,7 @@
 // part of the selection are not offerable as targets.
 
 import { useCallback, useEffect, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import { listChildren, type DriveNode } from '~/lib/drive-api';
 import { ChevronRight, CloseIcon, FolderIcon } from './icons';
 
@@ -21,7 +21,7 @@ export function MoveDialog({
     onCancel,
     onMove
 }: {
-    session: SealedSession;
+    session: AppChannel;
     tenantID: string;
     moving: Set<string>;
     onCancel: () => void;

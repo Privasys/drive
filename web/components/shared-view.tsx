@@ -1,14 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import { downloadFile, listShared, type SharedItem } from '~/lib/drive-api';
 import type { SharedFocus } from '~/lib/deep-link';
 import { avatarColor, formatBytes, granteeLabel, initials } from '~/lib/format';
 import { SharedBrowser } from './shared-browser';
 import { ChevronRight, DownloadIcon, FileIcon, FolderIcon, PeopleIcon } from './icons';
 
-export function SharedView({ session, focus }: { session: SealedSession; focus?: SharedFocus | null }) {
+export function SharedView({ session, focus }: { session: AppChannel; focus?: SharedFocus | null }) {
     const [items, setItems] = useState<SharedItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);

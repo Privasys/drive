@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import { listAppsWithAccess, revokeGrant, type AppAccess, type Tenant } from '~/lib/drive-api';
 import { formatDate, relativeTime } from '~/lib/format';
 import { AppsIcon } from './icons';
@@ -11,7 +11,7 @@ import { AppsIcon } from './icons';
 // GET /v1/tenants/{t}/apps; Revoke is the ordinary grant DELETE, after which
 // the app's next write fails and it asks again through the wallet.
 
-export function AppsView({ session, tenant }: { session: SealedSession; tenant: Tenant }) {
+export function AppsView({ session, tenant }: { session: AppChannel; tenant: Tenant }) {
     const [apps, setApps] = useState<AppAccess[] | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState<string | null>(null);

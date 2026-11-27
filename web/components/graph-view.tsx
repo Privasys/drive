@@ -8,7 +8,7 @@
 // always on, which is the sanctioned contrast relief for the lightest hue.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import {
     DriveError,
     getGraph,
@@ -146,7 +146,7 @@ interface View {
     scale: number;
 }
 
-export function GraphView({ session, tenant }: { session: SealedSession; tenant: Tenant }) {
+export function GraphView({ session, tenant }: { session: AppChannel; tenant: Tenant }) {
     const [graph, setGraph] = useState<DriveGraph | null>(null);
     const [lint, setLint] = useState<GraphLint | null>(null);
     const [loading, setLoading] = useState(true);

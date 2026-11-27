@@ -1,198 +1,50 @@
 'use client';
 
-import {
-    createContext,
-    useCallback,
-    useContext,
-    useEffect,
-    useRef,
-    useState,
-    type ReactNode
-} from 'react';
-import { AuthFrame, type AuthFrameConfig, type SealedSession, type SealedSessionState } from '@privasys/auth';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { AuthFrame, type AppChannel, type AuthFrameConfig, type Session } from '@privasys/auth';
 
-// Auth context for the Privasys Chat front-end.
-//
-// Mirrors the developer-portal implementation
-// (`developer.privasys.org/lib/privasys-auth.tsx`). The full
-// portal version also handles role decoding and a session-cookie
-// for Next.js middleware; chat doesn't currently need either, so
-// this is the trimmed-down variant.
-//
-// All websites use the hosted `@privasys/auth` SDK against
-// privasys.id (OIDC PKCE inside an iframe).
-
-export interface AuthSession {
-    /** JWT access_token issued by the IdP. */
-    accessToken: string;
-    /** RP ID this session is authenticated for. */
-    rpId: string;
-    /** When the session was established (epoch ms). */
-    authenticatedAt: number;
-}
+// The page's sign-in with Privasys ID: one AuthFrame, the session it holds,
+// and the channels it opens to enclave apps.
 
 /**
- * Outcome of a sealed-session (re-)establish attempt.
- *
- * - `ok`         — a live sealed session is installed.
- * - `no-voucher` — the user never completed a sealed sign-in for this app.
- * - `rejected`   — the enclave refused the voucher; its identity/measurement
- *                  changed and a fresh wallet ceremony is required.
- * - `unavailable`— transient transport failure, worth retrying.
+ * What one sign-in may ask differently from the provider's configuration. A
+ * share link signs its visitor in with the link's client, billing grant,
+ * attributes and methods, inline in the link page.
  */
-export type SealedResumeOutcome = 'ok' | 'no-voucher' | 'rejected' | 'unavailable';
-
-/**
- * Why the enclave refused the EncAuth voucher, when it said (SDK rejects
- * with `rejected:<reason>`): `workload-changed` = the app's code/config
- * was updated since the user verified it; `enc-changed` = the hosting
- * platform's identity changed. Both need a fresh wallet ceremony — the
- * wallet then shows the user exactly what changed. Null when the enclave
- * gave no reason (older enclave, or a voucher-lifecycle refusal).
- */
-export type SealedStaleReason = 'workload-changed' | 'enc-changed' | null;
-
-function parseStaleReason(msg: string): SealedStaleReason {
-    if (msg.includes('workload-changed')) return 'workload-changed';
-    if (msg.includes('enc-changed')) return 'enc-changed';
-    return null;
-}
-
-// withTimeout rejects with `label` if p does not settle within ms, so a hung
-// sealed-session ceremony (iframe/enclave never responds) cannot park a
-// caller's await indefinitely.
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error(label)), ms);
-        p.then(
-            (v) => { clearTimeout(t); resolve(v); },
-            (e) => { clearTimeout(t); reject(e as Error); }
-        );
-    });
-}
+export type SignInOptions = Partial<
+    Pick<AuthFrameConfig, 'clientId' | 'scope' | 'attributes' | 'methods' | 'billingGrant' | 'presentation'>
+>;
 
 interface AuthContextValue {
-    session: AuthSession | null;
+    /** The person's session, or null when signed out. */
+    session: Session | null;
+    /** True until the frame has reported the stored session. */
     loading: boolean;
-    expired: boolean;
-    /**
-     * Sealed CBOR-AES-GCM session against the enclave that the wallet
-     * attested during sign-in. Only populated when the caller passed
-     * `sessionRelayHost` to `signIn`/`signInInto` — typically the
-     * `instance.session_relay.app_host` returned by the management
-     * service.
-     */
-    sealedSession: SealedSession | null;
-    /**
-     * Mint a per-audience JWT (challenge mode) without rotating the
-     * primary session. Used to call attestation-server's verify-quote
-     * endpoint with `aud=attestation-server`. The returned token is
-     * single-use-shaped (15-minute lifetime, audience-bound) and is
-     * never persisted into the session context.
-     */
-    getTokenForAudience: (audience: string) => Promise<string>;
-    /** Open the auth ceremony in a full-screen overlay (default). */
-    signIn: (opts?: { sessionRelayHost?: string; extraAppHosts?: string[] }) => Promise<void>;
-    /**
-     * Mount the auth iframe inline inside `container` (instead of a
-     * full-screen overlay). Used by the in-panel sign-in view so the
-     * surrounding chat shell stays visible. The provider builds a
-     * one-shot `AuthFrame` per call; once the ceremony resolves, the
-     * persistent renewal frame picks up the session via cross-origin
-     * SSO and starts the silent-renewal timer.
-     */
-    signInInto: (container: HTMLElement, opts?: { sessionRelayHost?: string; extraAppHosts?: string[]; requestedAttributes?: readonly string[]; clientId?: string; billingGrant?: string; methods?: readonly ('wallet' | 'passkey' | 'social')[] }) => Promise<void>;
-    /**
-     * One-call gate (SDK `connect()`): silent restore → one-tap wallet
-     * re-approval (enclave measurement changed) → full ceremony, all
-     * rendered by the SDK inside `container` in page presentation with
-     * the app's `pitch`. Registers the sealed session under `appHost`
-     * so `getSealedSession(appHost)` returns it. Resolves with the
-     * sealed session; rejects with the SDK's typed ConnectError
-     * (`code: 'cancelled' | 'timeout' | 'failed'`).
-     */
-    connectInto: (container: HTMLElement, opts: {
-        appHost: string;
-        pitch?: { title?: string; description?: string; bullets?: string[]; logoUrl?: string };
-        /** App identity for the SDK gate header (logo + display name). */
-        app?: { logoUrl?: string; displayName?: string };
-        methods?: readonly ('wallet' | 'passkey' | 'social')[];
-    }) => Promise<SealedSession | null>;
-    /**
-     * Abort an in-flight `signInInto`/`connectInto` ceremony. The pending
-     * promise rejects and the SDK removes its iframe. No-op when nothing
-     * is in flight.
-     */
-    cancelSignIn: () => void;
-    /**
-     * Re-establish the sealed enclave session after a page reload with
-     * no wallet ceremony and no push: the privasys.id iframe bootstraps
-     * against the enclave using the EncAuth voucher stored at the IdP.
-     * No-op when a sealed session is already live; silently leaves
-     * `sealedSession` null when no voucher exists or the enclave
-     * refused it (sign-in then re-creates it).
-     */
-    resumeSealed: (appHost: string) => Promise<void>;
-    /**
-     * Force-rebuild the primary sealed enclave session, tearing down the
-     * existing (possibly dead) transport first. Unlike `resumeSealed` this
-     * does NOT short-circuit when a sealed session is already present — it is
-     * the recovery path after the enclave was redeployed or went unreachable.
-     * Returns the outcome so the caller can distinguish a transient failure
-     * (retry) from a measurement change (`rejected` → prompt re-sign-in).
-     * Leaves the per-host sessions (e.g. chat-service) untouched; those
-     * self-heal via PrivasysSession's request()-level silent rebind.
-     */
-    reestablishSealed: (appHost: string) => Promise<SealedResumeOutcome>;
-    /**
-     * Why the last `reestablishSealed` rejection happened, when the enclave
-     * said (`workload-changed` = app updated, `enc-changed` = platform
-     * changed). Cleared when a sealed session is (re-)established. Drives
-     * the specific wording on the stale-transport banner.
-     */
-    staleReason: SealedStaleReason;
-    /**
-     * True while a sealed-session recovery is waiting on a wallet push
-     * approval — most often because the enclave's platform was upgraded and
-     * the user must approve the new measurement on their phone.
-     */
-    sealedApprovalPending: boolean;
-    /**
-     * Return a sealed session for an arbitrary enclave `appHost` (e.g. the
-     * chat-service back-end), independent of the primary `sealedSession`
-     * (which is the inference instance). Per-host cached; resumes silently
-     * via the EncAuth voucher. Returns null when not signed in, no voucher
-     * exists, or the enclave refused — callers then degrade gracefully.
-     */
-    getSealedSession: (appHost: string) => Promise<SealedSession | null>;
-    /**
-     * Ask the wallet (via push notification) to voucher an additional enclave
-     * host for the current session — one biometric approval on the phone, no
-     * sign-out. Rejects with `no-push` (session not wallet-backed), `timeout`
-     * (not approved / old wallet), or `no-session`.
-     */
-    requestAppVoucher: (appHost: string) => Promise<void>;
+    /** Restore the session silently, or run the gate inside `container`.
+     *  Rejects with the SDK's ConnectError (`code: 'cancelled' | 'timeout' | 'failed'`). */
+    connect: (container: HTMLElement, opts?: SignInOptions) => Promise<Session>;
+    /** Abort the gate in progress, if any. */
+    cancel: () => void;
+    /** The channel to the enclave app at `host`: sealed for a wallet session,
+     *  direct with a token for `audience` otherwise. Changes identity when the
+     *  frame is replaced, so a caller holding a channel opens it again. */
+    app: (host: string, opts?: { audience?: string; onApproval?: (reason: string | null) => void }) => Promise<AppChannel>;
+    /** The session's token, or one minted for `audience`. */
+    token: (audience?: string) => Promise<string>;
     signOut: () => Promise<void>;
 }
+
+const outside = async (): Promise<never> => {
+    throw new Error('Privasys auth used outside PrivasysAuthProvider');
+};
 
 const AuthContext = createContext<AuthContextValue>({
     session: null,
     loading: true,
-    expired: false,
-    sealedSession: null,
-    getTokenForAudience: async () => {
-        throw new Error('getTokenForAudience called outside PrivasysAuthProvider');
-    },
-    signIn: async () => {},
-    signInInto: async () => {},
-    connectInto: async () => null,
-    cancelSignIn: () => {},
-    resumeSealed: async () => {},
-    reestablishSealed: async () => 'unavailable',
-    staleReason: null,
-    sealedApprovalPending: false,
-    getSealedSession: async () => null,
-    requestAppVoucher: async () => {},
+    connect: outside,
+    cancel: () => {},
+    app: outside,
+    token: outside,
     signOut: async () => {}
 });
 
@@ -200,588 +52,78 @@ export function useAuth(): AuthContextValue {
     return useContext(AuthContext);
 }
 
-function isJwt(token: string): boolean {
-    return typeof token === 'string' && token.split('.').length === 3;
+interface Current {
+    frame: AuthFrame;
+    /** The SignInOptions the frame was built with, serialised. */
+    key: string;
+    off: () => void;
 }
 
-function sessionFromToken(
-    token: string,
-    rpId: string,
-    authenticatedAt?: number
-): AuthSession {
-    return {
-        accessToken: token,
-        rpId,
-        authenticatedAt: authenticatedAt ?? Date.now()
-    };
-}
-
-interface PrivasysAuthProviderProps {
-    children: ReactNode;
-    config: AuthFrameConfig;
-}
-
-// Every sign-in path here offers the wallet, a passkey and the federated
-// providers. A wallet sign-in reaches Drive over the sealed session, which
-// the wallet attested; any other reaches it over Drive's direct name (TLS
-// ends in the enclave and the runtime checks the bearer), as a guest who
-// opens what was shared with them and owns no drive. The frame config's
-// `direct` is what lets the SDK pick; without it a non-wallet sign-in has
-// nowhere to go.
-const DRIVE_METHODS = ['wallet', 'passkey', 'social'] as const;
-
-/** Shown when the runtime refuses a direct sign-in; the gate offers a new one. */
-export const DIRECT_SIGN_IN_REFUSED = 'Your sign-in is not valid for Drive. Sign in again to continue.';
-
-// directSession presents the frame's direct transport as a SealedSession, the
-// type Drive's API client takes, so every view works unchanged for a guest.
-function directSession(frame: AuthFrame, appHost: string): SealedSession {
-    const state: SealedSessionState = { status: 'ok' };
-    return {
-        sessionId: 'direct',
-        appHost,
-        expiresAt: Number.MAX_SAFE_INTEGER,
-        state,
-        onState: () => () => {},
-        async request(method, path, body, init) {
-            const r = await frame.request(method, path, body, init);
-            // The runtime refused the sign-in itself, not Drive a request:
-            // retrying sends the same token, so only a new sign-in helps.
-            if (r.status === 401 && new TextDecoder().decode(r.body).includes('not valid for this app')) {
-                throw new Error(DIRECT_SIGN_IN_REFUSED);
-            }
-            return { status: r.status, headers: r.headers, body: r.body, sealed: false };
-        },
-        async stream(method, path, body, init) {
-            const r = await frame.stream(method, path, body, init);
-            return { status: r.status, headers: r.headers, body: r.body, sealed: false };
-        },
-        openWebSocket(path) {
-            return frame.openWebSocket(path);
-        }
-    };
-}
-
-export function PrivasysAuthProvider({ children, config }: PrivasysAuthProviderProps) {
-    const [session, setSession] = useState<AuthSession | null>(null);
+export function PrivasysAuthProvider({ children, config }: { children: ReactNode; config: AuthFrameConfig }) {
+    const [session, setSession] = useState<Session | null>(null);
     const [loading, setLoading] = useState(true);
-    const [expired, setExpired] = useState(false);
-    const [sealedSession, setSealedSession] = useState<SealedSession | null>(null);
-    const [staleReason, setStaleReason] = useState<SealedStaleReason>(null);
-    // True while a sealed-session recovery is waiting on a wallet push
-    // approval (most often the enclave's platform was upgraded and the user
-    // must approve the new measurement on their phone).
-    // The SDK gate now renders the "approve on your phone" state itself; kept
-    // on the context so consumers need no change.
-    const sealedApprovalPending = false;
-    const frameRef = useRef<AuthFrame | null>(null);
-    // In-flight one-shot inline/connect frame; lets cancelSignIn abort the
-    // ceremony when the user navigates away.
-    const inlineFrameRef = useRef<AuthFrame | null>(null);
-    // Dedicated frame for voucher-based sealed resume. Separate from the
-    // persistent renewal frame because `sessionRelay.appHost` is a
-    // constructor-only option and the appHost is per-instance (only
-    // known once the instance metadata loads).
-    const sealedFrameRef = useRef<AuthFrame | null>(null);
-    const sealedHostRef = useRef<string | null>(null);
-    const sealedResumeInFlight = useRef<Promise<void> | null>(null);
-    // Per-host sealed sessions for enclaves other than the inference instance
-    // (e.g. the chat-service back-end). Each enclave needs its own sealed
-    // session; this map keeps one frame + session per appHost.
-    const sealedByHost = useRef<Map<string, { frame: AuthFrame; session: SealedSession }>>(new Map());
-    const sealedByHostInFlight = useRef<Map<string, Promise<SealedSession | null>>>(new Map());
-    // Live mirror of the primary sealed session for callbacks that must not
-    // re-create on every change.
-    const sealedSessionRef = useRef<SealedSession | null>(null);
-    useEffect(() => { sealedSessionRef.current = sealedSession; }, [sealedSession]);
+    // Bumped when the frame is replaced: the callbacks below change identity,
+    // which tells a consumer its channels belong to the old frame.
+    const [generation, setGeneration] = useState(0);
+    const current = useRef<Current | null>(null);
 
-    // Follow a sealed session's liveness: a refused voucher names what
-    // changed (the stale banner shows it); a recovered session clears it.
-    const follow = useCallback((s: SealedSession) => {
-        s.onState((st) => {
-            if (st.status === 'reapproval-required') setStaleReason(parseStaleReason(`rejected:${st.reason ?? ''}`));
-            else if (st.status === 'ok') setStaleReason(null);
-        });
+    const drop = useCallback(() => {
+        current.current?.off();
+        current.current?.frame.destroy();
+        current.current = null;
     }, []);
 
-    const getFrame = useCallback(() => {
-        if (!frameRef.current) {
-            frameRef.current = new AuthFrame(config);
-            frameRef.current.onSessionExpired = () => {
-                setSession(null);
-                setExpired(true);
-            };
-            frameRef.current.onSessionRenewed = (_rpId, accessToken) => {
-                // Adopt the freshly-renewed token directly. Round-tripping
-                // through getSession() can return a cached, already-expired
-                // token → false "session expired" cleared only by reload.
-                if (accessToken) {
-                    setSession(sessionFromToken(accessToken, config.rpId ?? config.appName));
-                    setExpired(false);
-                }
-            };
-        }
-        return frameRef.current;
-    }, [config]);
-
-    // Cross-site SSO check on mount.
-    useEffect(() => {
-        const frame = getFrame();
-        frame
-            .getSession()
-            .then((s) => {
-                if (s) {
-                    if (!isJwt(s.token)) {
-                        // Stale opaque session token. Clear it; next interaction
-                        // will trigger a fresh OIDC sign-in.
-                        frame.clearSession().catch(() => undefined);
-                    } else {
-                        setSession(
-                            sessionFromToken(s.token, s.rpId, s.authenticatedAt)
-                        );
-                    }
-                }
+    // frameFor returns the page's one AuthFrame, built for `opts`. The SDK
+    // takes the client, attributes and grant at construction only, so a
+    // sign-in that asks for others replaces the frame; the session it reports
+    // is then the one stored for that configuration.
+    const frameFor = useCallback(
+        (opts?: SignInOptions): AuthFrame => {
+            const key = JSON.stringify(opts ?? {});
+            if (current.current?.key === key) return current.current.frame;
+            const replacing = current.current !== null;
+            drop();
+            const frame = new AuthFrame({ ...config, ...opts });
+            const off = frame.onSessionChange((s) => {
+                if (current.current?.frame !== frame) return;
+                setSession(s);
                 setLoading(false);
-            })
-            .catch(() => setLoading(false));
-    }, [getFrame]);
-
-    const acceptResultToken = useCallback(
-        (token: string) => {
-            setSession(sessionFromToken(token, config.rpId ?? config.appName));
-            setExpired(false);
-            // Bootstrap (or refresh) the silent-renewal iframe via the
-            // persistent frame; it reads the session out of the auth
-            // origin's localStorage.
-            getFrame().getSession();
-        },
-        [config, getFrame]
-    );
-
-    const signIn = useCallback(
-        async (opts?: { sessionRelayHost?: string; extraAppHosts?: string[] }) => {
-            // For the sealed-transport flow we need a one-shot frame whose
-            // `sessionRelay.appHost` was set at construction time so the QR
-            // includes the SDK pubkey. The persistent frame (used for SSO
-            // check + silent renewal) doesn't need it.
-            if (opts?.sessionRelayHost) {
-                // signIn() opens no direct transport, so this path stays
-                // wallet-only; connectInto and signInInto offer the rest.
-                const oneShot = new AuthFrame({
-                    ...config,
-                    methods: ['wallet'],
-                    sessionRelay: {
-                        appHost: opts.sessionRelayHost,
-                        ...(opts.extraAppHosts?.length ? { extraAppHosts: opts.extraAppHosts } : {})
-                    }
-                });
-                const result = await oneShot.signIn();
-                acceptResultToken(result.accessToken ?? result.sessionToken);
-                if (result.sessionRelay) {
-                    try {
-                        const s = await oneShot.session();
-                        setSealedSession(s);
-                        setStaleReason(null);
-                    } catch (err) {
-                        console.warn('[chat-auth] sealed session install failed:', err);
-                    }
-                }
-                return;
-            }
-            const frame = getFrame();
-            const result = await frame.signIn();
-            acceptResultToken(result.accessToken ?? result.sessionToken);
-        },
-        [config, getFrame, acceptResultToken]
-    );
-
-    const signInInto = useCallback(
-        async (container: HTMLElement, opts?: { sessionRelayHost?: string; extraAppHosts?: string[]; requestedAttributes?: readonly string[]; clientId?: string; billingGrant?: string; methods?: readonly ('wallet' | 'passkey' | 'social')[] }) => {
-            // One-shot inline frame. We don't reuse `frameRef` because
-            // `container` is a constructor-only option in @privasys/auth
-            // and the persistent frame must keep its renewal iframe
-            // attached to <body>.
-            // Share-link redeem is a MINIMAL identity flow: prove a wallet sub
-            // to open a sealed session, nothing more. The account sign-in
-            // (connectInto) still asks for name+email for display, but a visitor
-            // opening a shared file should not be prompted for PII. The frame
-            // derives the wallet prompt from `scope` bundles plus `attributes`
-            // named one by one, so the base config's email+profile scope must
-            // be overridden here — a restricted link that genuinely needs
-            // attributes names exactly those (and only then).
-            const inlineConfig = {
-                ...config,
-                container,
-                methods: opts?.methods ?? DRIVE_METHODS,
-                scope: ['openid', 'offline_access'] as const,
-                attributes: opts?.requestedAttributes ?? [],
-                // A share link signs its visitor in with the client Drive binds
-                // the link's billing grant to, and passes the grant so the
-                // sharer, not the client's owner, pays for a paid attribute.
-                ...(opts?.clientId ? { clientId: opts.clientId } : {}),
-                ...(opts?.billingGrant ? { billingGrant: opts.billingGrant } : {}),
-                ...(opts?.sessionRelayHost
-                    ? {
-                        sessionRelay: {
-                            appHost: opts.sessionRelayHost,
-                            ...(opts.extraAppHosts?.length ? { extraAppHosts: opts.extraAppHosts } : {})
-                        }
-                    }
-                    : {})
-            };
-            const inline = new AuthFrame(inlineConfig);
-            inlineFrameRef.current = inline;
-            try {
-                // connect() rather than signIn(): it decides the transport,
-                // sealed for a wallet sign-in and direct for any other.
-                const res = await inline.connect({ container });
-                const appHost = opts?.sessionRelayHost;
-                // The session is adopted for the host BEFORE the token, whose
-                // arrival is what makes Drive look the session up.
-                if (appHost && res.session) {
-                    sealedByHost.current.set(appHost, { frame: inline, session: res.session });
-                    setSealedSession(res.session);
-                    setStaleReason(null);
-                } else if (appHost && res.transport === 'direct') {
-                    sealedByHost.current.set(appHost, { frame: inline, session: directSession(inline, appHost) });
-                }
-                acceptResultToken(res.accessToken);
-            } finally {
-                if (inlineFrameRef.current === inline) inlineFrameRef.current = null;
-            }
-        },
-        [config, acceptResultToken]
-    );
-
-    // One-call gate: SDK connect() in page presentation. The SDK owns the
-    // whole surface (pitch panel + ceremony/approval states); we only adopt
-    // the resulting sealed session into the per-host cache.
-    const connectInto = useCallback(
-        async (
-            container: HTMLElement,
-            opts: {
-                appHost: string;
-                pitch?: { title?: string; description?: string; bullets?: string[]; logoUrl?: string };
-                app?: { logoUrl?: string; displayName?: string };
-                methods?: readonly ('wallet' | 'passkey' | 'social')[];
-            }
-        ): Promise<SealedSession | null> => {
-            // Recovery on the SAME frame: when this host already has a frame,
-            // connect() on it runs the one-tap approval or the sign-in in the
-            // new container and re-points the session object Drive holds.
-            const existing = sealedByHost.current.get(opts.appHost)?.frame ?? null;
-            const frame = existing ?? new AuthFrame({
-                ...config,
-                container,
-                presentation: 'page',
-                ...(opts.pitch ? { pitch: opts.pitch } : {}),
-                ...(opts.app ? { app: opts.app } : {}),
-                methods: opts.methods ?? DRIVE_METHODS,
-                sessionRelay: { appHost: opts.appHost }
             });
-            inlineFrameRef.current = frame;
-            try {
-                const res = await frame.connect({ container });
-                acceptResultToken(res.accessToken);
-                if (res.session) {
-                    // Adopt as the canonical per-host sealed session.
-                    sealedByHost.current.set(opts.appHost, { frame, session: res.session });
-                    sealedByHostInFlight.current.delete(opts.appHost);
-                    follow(res.session);
-                    setStaleReason(null);
-                    return res.session;
-                }
-                if (res.transport === 'direct') {
-                    // A sign-in without the wallet: Drive is reached over its
-                    // direct name, through this frame.
-                    const d = directSession(frame, opts.appHost);
-                    sealedByHost.current.set(opts.appHost, { frame, session: d });
-                    sealedByHostInFlight.current.delete(opts.appHost);
-                    return d;
-                }
-                return null;
-            } finally {
-                if (inlineFrameRef.current === frame) inlineFrameRef.current = null;
-            }
+            current.current = { frame, key, off };
+            if (replacing) setGeneration((g) => g + 1);
+            return frame;
         },
-        [config, acceptResultToken]
+        [config, drop]
     );
 
-    // Abort the in-flight inline/connect ceremony (if any). AuthFrame.cancel()
-    // is a no-op once the ceremony has resolved, so this can never tear down
-    // a live sealed session.
-    const cancelSignIn = useCallback(() => {
-        inlineFrameRef.current?.cancel();
-    }, []);
-
-    const resumeSealed = useCallback(
-        async (appHost: string) => {
-            if (sealedSession) return;
-            if (sealedResumeInFlight.current) return sealedResumeInFlight.current;
-            const run = (async () => {
-                let frame = sealedFrameRef.current;
-                if (!frame || sealedHostRef.current !== appHost) {
-                    sealedFrameRef.current?.destroy();
-                    frame = new AuthFrame({
-                        ...config,
-                        sessionRelay: { appHost }
-                    });
-                    sealedFrameRef.current = frame;
-                    sealedHostRef.current = appHost;
-                }
-                try {
-                    const s = await frame.resumeSession();
-                    setSealedSession(s);
-                    setStaleReason(null);
-                } catch (err) {
-                    // no-voucher    → user never completed a sealed sign-in here
-                    // rejected      → enclave identity/measurement changed; a
-                    //                 wallet ceremony is required
-                    // unavailable   → transient transport failure
-                    // All three leave sealedSession null; the sign-in flow
-                    // (or a later retry) re-creates the sealed transport.
-                    console.log('[chat-auth] sealed resume unavailable:', (err as Error).message);
-                }
-            })();
-            sealedResumeInFlight.current = run;
-            try {
-                await run;
-            } finally {
-                sealedResumeInFlight.current = null;
-            }
-        },
-        [config, sealedSession]
-    );
-
-    // Recovery path: tear down the (possibly dead) primary sealed frame and
-    // rebuild it from the EncAuth voucher. Used by the chat shell after the
-    // enclave was redeployed (stale session → unsealed 401) or came back from
-    // an outage (VM stopped → 502). Returns the outcome so the shell can show
-    // "reconnecting" vs. a hard "the back-end changed, sign in again" prompt.
-    const reestablishSealed = useCallback(
-        async (appHost: string): Promise<SealedResumeOutcome> => {
-            // A live session recovers ITSELF: the SDK rebinds a forgotten
-            // session from the voucher (requests and sockets alike) and
-            // reports where it stands. Read that instead of tearing frames
-            // down and rebuilding them, which is what used to lose the
-            // shared refresh token mid-renewal and sign every site out.
-            const live = sealedByHost.current.get(appHost)?.session
-                ?? (sealedHostRef.current === appHost ? sealedSessionRef.current : null);
-            if (live) {
-                const st = live.state;
-                switch (st.status) {
-                    case 'ok':
-                        return 'ok';
-                    case 'recovering':
-                        return 'unavailable';
-                    case 'reapproval-required':
-                        // The gate's connectInto() runs the one-tap approval
-                        // on this host's frame; keep the reason for the banner.
-                        setStaleReason(parseStaleReason(`rejected:${st.reason ?? ''}`));
-                        return st.reason === 'no-voucher' ? 'no-voucher' : 'rejected';
-                    case 'signed-out':
-                        return 'no-voucher';
-                }
-            }
-            // No session yet for this host (cold reload): resume from the
-            // voucher on the host's frame, building it once.
-            sealedResumeInFlight.current = null;
-            let frame = sealedFrameRef.current;
-            if (!frame || sealedHostRef.current !== appHost) {
-                frame?.destroy();
-                frame = new AuthFrame({ ...config, sessionRelay: { appHost } });
-                sealedFrameRef.current = frame;
-                sealedHostRef.current = appHost;
-            }
-            try {
-                // Bound the rebind: the voucher ceremony runs in the privasys.id
-                // iframe and can hang (enclave rebind endpoint stalls, iframe
-                // never posts back). Without a timeout a hang parks the shell's
-                // recovery loop on `await` forever, so the "Connecting…" spinner
-                // never advances to the actionable Reconnect (`stale`) prompt.
-                // A timeout surfaces as `unavailable`, which the recovery loop
-                // retries a few times and then escalates to `stale`.
-                const s = await withTimeout(frame.resumeSession(), 15_000, 'sealed-resume-timeout');
-                setSealedSession(s);
-                setStaleReason(null);
-                return 'ok';
-            } catch (err) {
-                const msg = (err as Error).message ?? '';
-
-                // A `no-voucher` or `rejected:<reason>` resume is recoverable
-                // WITHOUT a sign-out: the enclave has no usable voucher (none
-                // yet, or it refused the current one because the PLATFORM was
-                // upgraded — `enc-changed`, the session-relay enc_pub is pinned
-                // to the platform measurement — or the app changed,
-                // `workload-changed`). A voucher-only push re-attests through
-                // the wallet: the user reviews what changed and, on one
-                // approval, a fresh voucher is minted against the CURRENT
-                // enc_pub. This turns a platform roll from a dead-end into a
-                // one-tap re-approval — never a wallet forget/re-add. A hung
-                // silent resume (timeout) is NOT recoverable this way.
-                // A refused or missing voucher is answered by the gate: its
-                // connectInto() runs the SDK's one-tap approval on this
-                // host's frame (the wallet re-attests and mints a fresh
-                // voucher), so no push is hand-rolled here and the frame is
-                // kept. Keep the enclave's reason so the stale banner says
-                // WHAT changed instead of a generic prompt.
-                if (msg.includes('rejected')) {
-                    console.warn(`[drive-auth] sealed session for ${appHost} rejected:`, msg);
-                    setStaleReason(parseStaleReason(msg));
-                    return 'rejected';
-                }
-                if (msg.includes('no-voucher')) {
-                    console.warn(`[drive-auth] no voucher for ${appHost} — interactive sign-in needed`);
-                    return 'no-voucher';
-                }
-                console.log('[drive-auth] sealed reestablish failed:', msg);
-                return 'unavailable';
-            }
-        },
-        [config]
-    );
-
-    // resumeDirect reopens Drive's direct transport after a reload, for a
-    // person who signed in without the wallet and so never had a sealed
-    // session to resume. Without it the gate showed for a moment before its
-    // connect() came to the same answer. connect() runs container-less here,
-    // so nothing may make it open a gate: it only runs on a stored session
-    // (none would mean a ceremony), the frame asks for exactly what that
-    // session was minted for (a wider ask would mean an approval), and it
-    // carries no spend ask (a spend consent is a gate too). Only a session the
-    // frame host recorded as a non-wallet sign-in (`wallet: false`) is
-    // reopened here: a wallet session may need a re-approval, and a session
-    // stored before the record cannot be told apart, so both go to the gate.
-    const resumeDirect = useCallback(
-        async (appHost: string): Promise<SealedSession | null> => {
-            if (!config.direct) return null;
-            const existing = await getFrame().getSession().catch(() => null);
-            if (!existing?.token || existing.wallet !== false) return null;
-            const frame = new AuthFrame({
-                ...config,
-                scope: (existing.scope ?? 'openid offline_access').split(/\s+/).filter(Boolean) as NonNullable<AuthFrameConfig['scope']>,
-                attributes: existing.requestedAttributes ?? [],
-                spend: undefined,
-                sessionRelay: { appHost }
-            });
-            try {
-                const res = await frame.connect();
-                if (res.transport === 'direct') {
-                    const d = directSession(frame, appHost);
-                    sealedByHost.current.set(appHost, { frame, session: d });
-                    return d;
-                }
-            } catch {
-                /* the gate takes over */
-            }
-            frame.destroy();
-            return null;
-        },
-        [config, getFrame]
-    );
-
-    // getSealedSession returns (and caches) a sealed session for an arbitrary
-    // enclave appHost, independent of the primary instance session. Used to
-    // reach the chat-service back-end (a separate enclave) without the bearer
-    // or tool data ever crossing the gateway's terminate path.
-    const getSealedSession = useCallback(
-        async (appHost: string): Promise<SealedSession | null> => {
-            if (!session) return null;
-            const cached = sealedByHost.current.get(appHost);
-            if (cached) return cached.session;
-            const inflight = sealedByHostInFlight.current.get(appHost);
-            if (inflight) return inflight;
-            const run = (async (): Promise<SealedSession | null> => {
-                const frame = new AuthFrame({ ...config, sessionRelay: { appHost } });
-                try {
-                    const s = await frame.resumeSession();
-                    sealedByHost.current.set(appHost, { frame, session: s });
-                    return s;
-                } catch (err) {
-                    frame.destroy();
-                    const msg = (err as Error).message ?? '';
-                    if (msg.startsWith('no-voucher')) {
-                        const d = await resumeDirect(appHost);
-                        if (d) return d;
-                    }
-                    // no-voucher / rejected / unavailable — caller degrades.
-                    console.log(`[chat-auth] sealed session for ${appHost} unavailable:`, msg);
-                    return null;
-                }
-            })();
-            sealedByHostInFlight.current.set(appHost, run);
-            try {
-                return await run;
-            } finally {
-                sealedByHostInFlight.current.delete(appHost);
-            }
-        },
-        [config, session, resumeDirect]
-    );
-
-    const signOut = useCallback(async () => {
-        const frame = getFrame();
-        await frame.clearSession();
-        setSession(null);
-        setSealedSession(null);
-        sealedFrameRef.current?.destroy();
-        sealedFrameRef.current = null;
-        sealedHostRef.current = null;
-        for (const { frame: f } of sealedByHost.current.values()) f.destroy();
-        sealedByHost.current.clear();
-    }, [getFrame]);
-
-    const getTokenForAudience = useCallback(
-        async (audience: string) => {
-            const frame = getFrame();
-            // The persistent renewal iframe must be live for the
-            // postMessage relay; cross-site SSO bootstraps it on mount,
-            // but call getSession() defensively to ensure it's mounted
-            // (no-op if a session iframe is already attached).
-            await frame.getSession();
-            return frame.getTokenForAudience(audience);
-        },
-        [getFrame]
-    );
-
-    // Ask the wallet (via push) to voucher an additional enclave host for
-    // the live session — incremental multi-app attestation. On success the
-    // per-host sealed session can then resume silently; we drop any cached
-    // null so getSealedSession re-resumes on the next call.
-    const requestAppVoucher = useCallback(
-        async (appHost: string) => {
-            const frame = getFrame();
-            await frame.getSession(); // ensure the persistent iframe is mounted
-            await frame.requestAppVoucher(appHost);
-            sealedByHost.current.get(appHost)?.frame.destroy();
-            sealedByHost.current.delete(appHost);
-            sealedByHostInFlight.current.delete(appHost);
-        },
-        [getFrame]
-    );
-
-    // Expose a minimal helper on `window.PrivasysAuth` so the copy-paste
-    // quote-verification snippet (and other dev-console flows) can mint
-    // an audience-scoped token without having to wire the React context
-    // out by hand. Only the audience-token method is exposed - sign-in /
-    // sign-out flows stay routed through the React context.
     useEffect(() => {
-        if (typeof window === 'undefined') return;
-        const w = window as unknown as {
-            PrivasysAuth?: { getTokenForAudience: (_audience: string) => Promise<string> };
-        };
-        w.PrivasysAuth = { getTokenForAudience };
-        return () => {
-            if (w.PrivasysAuth?.getTokenForAudience === getTokenForAudience) {
-                delete w.PrivasysAuth;
-            }
-        };
-    }, [getTokenForAudience]);
+        frameFor();
+        return drop;
+    }, [frameFor, drop]);
+
+    // Every call but connect() acts on the frame as it is: a share link's
+    // frame stays the page's frame until another sign-in replaces it.
+    const live = useCallback(() => current.current?.frame ?? frameFor(), [frameFor]);
+
+    const connect = useCallback(
+        (container: HTMLElement, opts?: SignInOptions) => frameFor(opts).connect({ container }),
+        [frameFor]
+    );
+
+    const cancel = useCallback(() => current.current?.frame.cancel(), []);
+
+    const app = useCallback(
+        (host: string, opts?: { audience?: string; onApproval?: (reason: string | null) => void }) => live().app(host, opts),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [live, generation]
+    );
+
+    const token = useCallback((audience?: string) => live().token(audience), [live]);
+
+    const signOut = useCallback(() => live().signOut(), [live]);
 
     return (
-        <AuthContext.Provider
-            value={{ session, loading, expired, sealedSession, getTokenForAudience, signIn, signInInto, connectInto, cancelSignIn, resumeSealed, reestablishSealed, staleReason, sealedApprovalPending, getSealedSession, requestAppVoucher, signOut }}
-        >
+        <AuthContext.Provider value={{ session, loading, connect, cancel, app, token, signOut }}>
             {children}
         </AuthContext.Provider>
     );

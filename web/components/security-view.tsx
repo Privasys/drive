@@ -15,13 +15,13 @@ const APP_ID = RUNTIME.appId;
 const AS_VERIFY = 'https://as.privasys.org/verify-quote';
 
 export function SecurityView({ onBack }: { onBack?: () => void }) {
-    const { getTokenForAudience } = useAuth();
+    const { token } = useAuth();
     const attestUrl = APP_ID ? `${API_BASE}/api/v1/apps/${APP_ID}/attest` : '';
     const [state, actions] = useAttestation({
         attestUrl,
         verifyQuoteUrl: AS_VERIFY,
-        token: () => getTokenForAudience('attestation-server'),
-        verifyQuoteToken: () => getTokenForAudience('attestation-server'),
+        token: () => token('attestation-server'),
+        verifyQuoteToken: () => token('attestation-server'),
         autoInspect: Boolean(attestUrl),
         autoVerifyQuote: Boolean(attestUrl)
     });

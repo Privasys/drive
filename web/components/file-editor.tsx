@@ -8,7 +8,7 @@
 // else's is refused by the enclave rather than silently winning.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import {
     diffVersions,
     downloadFile,
@@ -34,7 +34,7 @@ export function FileEditor({
     onClose,
     onSaved
 }: {
-    session: SealedSession;
+    session: AppChannel;
     tenantID: string;
     node: DriveNode;
     onClose: () => void;

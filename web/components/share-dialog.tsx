@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import {
     createLink,
     getAttributeOffer,
@@ -76,7 +76,7 @@ export function ShareDialog({
     mySub,
     onClose
 }: {
-    session: SealedSession;
+    session: AppChannel;
     tenantID: string;
     tenantKind?: TenantKind;
     node: DriveNode;
