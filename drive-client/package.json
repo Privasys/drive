@@ -19,7 +19,7 @@
         "README.md"
     ],
     "peerDependencies": {
-        "@privasys/auth": ">=0.13.0",
+        "@privasys/auth": ">=1.0.0",
         "react": ">=19",
         "react-dom": ">=19"
     },
