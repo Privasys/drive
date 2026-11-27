@@ -108,13 +108,14 @@ interface DriveContextValue {
     newWorkspace: (name: string) => Promise<void>;
     /**
      * A share link's sign-in, inline in `el`: the link page's frame asks for
-     * the minimal scope, plus the attributes the link needs, paid by its grant.
+     * the minimal scope, plus the attributes the link needs, paid by its grant,
+     * offered only to the wallet when only the wallet can share them.
      * Rejects when it did not complete, so the page can offer a retry.
      */
     signInInto: (
         el: HTMLElement,
         attributes?: readonly string[],
-        billingGrant?: string
+        link?: { billingGrant?: string; methods?: readonly ('wallet' | 'passkey' | 'social')[] }
     ) => Promise<void>;
     /**
      * The gate: restores the session or runs the sign-in inside `el`; the
@@ -280,13 +281,14 @@ export function DriveProvider({ children }: { children: ReactNode }) {
         async (
             el: HTMLElement,
             attributes?: readonly string[],
-            billingGrant?: string
+            link?: { billingGrant?: string; methods?: readonly ('wallet' | 'passkey' | 'social')[] }
         ) => {
             setError(null);
             try {
                 await auth.connect(el, {
                     ...(attributes?.length ? { attributes } : {}),
-                    ...(billingGrant ? { billingGrant } : {})
+                    ...(link?.billingGrant ? { billingGrant: link.billingGrant } : {}),
+                    ...(link?.methods ? { methods: link.methods } : {})
                 });
             } catch (e) {
                 if ((e as { code?: string }).code !== 'cancelled') {

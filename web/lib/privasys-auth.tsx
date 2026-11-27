@@ -7,10 +7,12 @@ import { AuthFrame, type AppChannel, type AuthFrameConfig, type Session } from '
 // and the channels it opens to enclave apps.
 
 /** What one sign-in asks beyond the configuration: a share link's step-up
- *  attributes, and the billing grant that pays for them. */
+ *  attributes, the billing grant that pays for them, and the methods that
+ *  can share them. */
 export interface SignInOptions {
     attributes?: readonly string[];
     billingGrant?: string;
+    methods?: AuthFrameConfig['methods'];
 }
 
 interface AuthContextValue {

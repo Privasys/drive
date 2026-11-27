@@ -190,7 +190,7 @@ function LinkLanding() {
 
     // A fact certified from an official ID reaches Drive only as a proof the
     // Privasys Wallet presents; a passkey or Google/Microsoft sign-in has no
-    // way to carry one. Such a link says so, and how to get the wallet.
+    // way to carry one. Such a link offers the wallet alone, and says why.
     const certified = useCallback(
         (keys: readonly string[]): boolean => {
             const paid = new Set([...(preview?.paid_attributes ?? []), ...(resolved?.paid_attributes ?? [])]);
@@ -199,6 +199,10 @@ function LinkLanding() {
         [preview, resolved, shareAttrs]
     );
     const walletOnly = preview?.mode === 'restricted' && certified(preview.required_attributes ?? []);
+    const linkSignIn = useMemo(
+        () => ({ billingGrant, ...(walletOnly ? { methods: ['wallet'] as const } : {}) }),
+        [billingGrant, walletOnly]
+    );
 
     useEffect(() => {
         if (status !== 'signed-out' || ceremonyError || started.current || !ceremonyRef.current) return;
@@ -209,11 +213,11 @@ function LinkLanding() {
                 ? askable(preview.required_attributes ?? [])
                 : []
             : params.attrs;
-        signInInto(ceremonyRef.current, ask.length > 0 ? ask : undefined, billingGrant).catch(() => {
+        signInInto(ceremonyRef.current, ask.length > 0 ? ask : undefined, linkSignIn).catch(() => {
             started.current = false;
             setCeremonyError('The sign-in did not complete. Scan the code again to open the link.');
         });
-    }, [status, signInInto, ceremonyError, params.attrs, preview, askable, billingGrant, opensWithLink]);
+    }, [status, signInInto, ceremonyError, params.attrs, preview, askable, linkSignIn, opensWithLink]);
 
     // Restricted-link step-up: re-run the ceremony requesting exactly the
     // attributes the link requires, then resolve + redeem again.
@@ -227,7 +231,7 @@ function LinkLanding() {
             // link states that mapping; the referential answers for links
             // created before it did.
             try {
-                await signInInto(ceremonyRef.current!, askable(missingAttrs), billingGrant);
+                await signInInto(ceremonyRef.current!, askable(missingAttrs), linkSignIn);
             } catch {
                 stepUpStarted.current = false;
                 setCeremonyError('The sign-in did not complete. Scan the code again to open the link.');
@@ -238,7 +242,7 @@ function LinkLanding() {
             stepUpStarted.current = false;
             setState('resolving');
         })();
-    }, [stepUp, ceremonyError, missingAttrs, askable, billingGrant, signInInto]);
+    }, [stepUp, ceremonyError, missingAttrs, askable, linkSignIn, signInInto]);
 
     // The attributes the visitor already consented to share at sign-in,
     // matched against what the link requires.
