@@ -1,7 +1,7 @@
 # `drive-client/`: `@privasys/drive-client`
 
-The browser side of Privasys Drive's sealed transport: the request carrier over
-a `@privasys/auth` sealed session, chunked uploads, and the file-drop hook. The
+The browser side of Privasys Drive's channel: the request carrier over
+an `@privasys/auth` AppChannel (sealed or direct), chunked uploads, and the file-drop hook. The
 Drive UI (`web/`) uses it from this directory; Privasys Chat pins the published
 package.
 

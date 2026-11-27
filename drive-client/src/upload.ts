@@ -5,7 +5,7 @@
 // through the same seal path). Shared by both fronts so the chunking
 // thresholds and progress contract stay identical.
 
-import type { SealedSession } from '@privasys/auth';
+import type { AppChannel } from '@privasys/auth';
 import { DriveError, decodeError, json, ok, textOf, timed, TRANSFER_TIMEOUT_MS } from './transport';
 
 // Files above this go through the chunked upload session; below it, one
@@ -28,7 +28,7 @@ export interface UploadOptions {
 
 /** Upload a file's bytes (sealed). Small-file path (single request). */
 export async function uploadFile<T = { id: string }>(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     parentID: string | null,
     name: string,
@@ -58,7 +58,7 @@ export async function uploadFile<T = { id: string }>(
  * staged upload is best-effort cleaned up.
  */
 export async function uploadFileStreaming<T = { id: string }>(
-    session: SealedSession,
+    session: AppChannel,
     tenantID: string,
     parentID: string | null,
     file: File,

@@ -1,14 +1,14 @@
-// Sealed-transport core for the Privasys Drive enclave.
+// Transport core for the Privasys Drive enclave.
 //
-// The browser reaches Drive over a DEDICATED SEALED SESSION (PrivasysSession
-// from @privasys/auth) — never plain fetch. Bytes and metadata are sealed
-// browser->enclave (CBOR-AES-GCM); the gateway only ever sees ciphertext,
-// and Drive authenticates the sealed session itself (the enclave relay
-// asserts the wallet-vouched sub via X-Privasys-Sub). This module is the
-// shared plumbing consumed by both drive.privasys.org and chat.privasys.org
-// so the request conventions, timeouts and error shape never drift.
+// The browser reaches Drive over an AppChannel from @privasys/auth, never
+// plain fetch: sealed browser->enclave (CBOR-AES-GCM) for a wallet session,
+// so the gateway only ever sees ciphertext and the enclave relay asserts the
+// wallet-vouched sub via X-Privasys-Sub; direct with a token for Drive's
+// audience otherwise. This module is the shared plumbing consumed by both
+// drive.privasys.org and chat.privasys.org so the request conventions,
+// timeouts and error shape never drift.
 
-import type { SealedResponse, SealedSession } from '@privasys/auth';
+import type { AppChannel, AppResponse } from '@privasys/auth';
 
 const decoder = new TextDecoder();
 
@@ -36,7 +36,7 @@ export class DriveError extends Error {
     }
 }
 
-export function decodeError(res: SealedResponse): DriveError {
+export function decodeError(res: AppResponse): DriveError {
     // A reply without a numeric status is not an HTTP error but a sealed
     // channel hiccup (typically the enclave session still settling right
     // after a fresh ceremony) — name it, and mark it retryable.
@@ -54,7 +54,7 @@ export function decodeError(res: SealedResponse): DriveError {
     return new DriveError(res.status, msg);
 }
 
-export function ok(res: SealedResponse): boolean {
+export function ok(res: AppResponse): boolean {
     return typeof res.status === 'number' && res.status >= 200 && res.status < 300;
 }
 
@@ -65,20 +65,20 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 export const TRANSFER_TIMEOUT_MS = 180_000; // uploads/downloads of larger files
 
 /**
- * A sealed session request with a hard deadline. `init` carries request
+ * A request over the channel with a hard deadline. `init` carries request
  * headers where the API needs them: the conditional-write fence is an
  * If-Match header, so a caller that must not clobber a concurrent writer
  * has to be able to set one.
  */
 export function timed(
-    session: SealedSession,
+    session: AppChannel,
     method: string,
     path: string,
     body: unknown,
     ms: number = REQUEST_TIMEOUT_MS,
     init?: RequestInit
-): Promise<SealedResponse> {
-    return new Promise<SealedResponse>((resolve, reject) => {
+): Promise<AppResponse> {
+    return new Promise<AppResponse>((resolve, reject) => {
         const t = setTimeout(
             () =>
                 reject(
@@ -102,9 +102,9 @@ export function timed(
     });
 }
 
-/** JSON request over the sealed session; throws DriveError on non-2xx. */
+/** JSON request over the channel; throws DriveError on non-2xx. */
 export async function json<T>(
-    session: SealedSession,
+    session: AppChannel,
     method: string,
     path: string,
     body?: unknown,
@@ -118,7 +118,7 @@ export async function json<T>(
 }
 
 /** Decode a sealed response body as UTF-8 text (empty string when absent). */
-export function textOf(res: SealedResponse): string {
+export function textOf(res: AppResponse): string {
     return res.body && res.body.byteLength ? decoder.decode(res.body) : '';
 }
 
