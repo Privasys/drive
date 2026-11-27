@@ -6,14 +6,12 @@ import { AuthFrame, type AppChannel, type AuthFrameConfig, type Session } from '
 // The page's sign-in with Privasys ID: one AuthFrame, the session it holds,
 // and the channels it opens to enclave apps.
 
-/**
- * What one sign-in may ask differently from the provider's configuration. A
- * share link signs its visitor in with the link's client, billing grant,
- * attributes and methods, inline in the link page.
- */
-export type SignInOptions = Partial<
-    Pick<AuthFrameConfig, 'clientId' | 'scope' | 'attributes' | 'methods' | 'billingGrant' | 'presentation'>
->;
+/** What one sign-in asks beyond the configuration: a share link's step-up
+ *  attributes, and the billing grant that pays for them. */
+export interface SignInOptions {
+    attributes?: readonly string[];
+    billingGrant?: string;
+}
 
 interface AuthContextValue {
     /** The person's session, or null when signed out. */
@@ -26,8 +24,7 @@ interface AuthContextValue {
     /** Abort the gate in progress, if any. */
     cancel: () => void;
     /** The channel to the enclave app at `host`: sealed for a wallet session,
-     *  direct with a token for `audience` otherwise. Changes identity when the
-     *  frame is replaced, so a caller holding a channel opens it again. */
+     *  direct with a token for `audience` otherwise. */
     app: (host: string, opts?: { audience?: string; onApproval?: (reason: string | null) => void }) => Promise<AppChannel>;
     /** The session's token, or one minted for `audience`. */
     token: (audience?: string) => Promise<string>;
@@ -52,75 +49,44 @@ export function useAuth(): AuthContextValue {
     return useContext(AuthContext);
 }
 
-interface Current {
-    frame: AuthFrame;
-    /** The SignInOptions the frame was built with, serialised. */
-    key: string;
-    off: () => void;
-}
-
 export function PrivasysAuthProvider({ children, config }: { children: ReactNode; config: AuthFrameConfig }) {
     const [session, setSession] = useState<Session | null>(null);
     const [loading, setLoading] = useState(true);
-    // Bumped when the frame is replaced: the callbacks below change identity,
-    // which tells a consumer its channels belong to the old frame.
-    const [generation, setGeneration] = useState(0);
-    const current = useRef<Current | null>(null);
+    const frameRef = useRef<AuthFrame | null>(null);
 
-    const drop = useCallback(() => {
-        current.current?.off();
-        current.current?.frame.destroy();
-        current.current = null;
-    }, []);
-
-    // frameFor returns the page's one AuthFrame, built for `opts`. The SDK
-    // takes the client, attributes and grant at construction only, so a
-    // sign-in that asks for others replaces the frame; the session it reports
-    // is then the one stored for that configuration.
-    const frameFor = useCallback(
-        (opts?: SignInOptions): AuthFrame => {
-            const key = JSON.stringify(opts ?? {});
-            if (current.current?.key === key) return current.current.frame;
-            const replacing = current.current !== null;
-            drop();
-            const frame = new AuthFrame({ ...config, ...opts });
-            const off = frame.onSessionChange((s) => {
-                if (current.current?.frame !== frame) return;
+    // The frame lives for the page; built on first use, removed on unmount.
+    const frame = useCallback((): AuthFrame => {
+        if (!frameRef.current) {
+            const f = new AuthFrame(config);
+            f.onSessionChange((s) => {
+                if (frameRef.current !== f) return;
                 setSession(s);
                 setLoading(false);
             });
-            current.current = { frame, key, off };
-            if (replacing) setGeneration((g) => g + 1);
-            return frame;
-        },
-        [config, drop]
-    );
+            frameRef.current = f;
+        }
+        return frameRef.current;
+    }, [config]);
 
     useEffect(() => {
-        frameFor();
-        return drop;
-    }, [frameFor, drop]);
-
-    // Every call but connect() acts on the frame as it is: a share link's
-    // frame stays the page's frame until another sign-in replaces it.
-    const live = useCallback(() => current.current?.frame ?? frameFor(), [frameFor]);
+        frame();
+        return () => {
+            frameRef.current?.destroy();
+            frameRef.current = null;
+        };
+    }, [frame]);
 
     const connect = useCallback(
-        (container: HTMLElement, opts?: SignInOptions) => frameFor(opts).connect({ container }),
-        [frameFor]
+        (container: HTMLElement, opts?: SignInOptions) => frame().connect({ container, ...opts }),
+        [frame]
     );
-
-    const cancel = useCallback(() => current.current?.frame.cancel(), []);
-
+    const cancel = useCallback(() => frameRef.current?.cancel(), []);
     const app = useCallback(
-        (host: string, opts?: { audience?: string; onApproval?: (reason: string | null) => void }) => live().app(host, opts),
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        [live, generation]
+        (host: string, opts?: { audience?: string; onApproval?: (reason: string | null) => void }) => frame().app(host, opts),
+        [frame]
     );
-
-    const token = useCallback((audience?: string) => live().token(audience), [live]);
-
-    const signOut = useCallback(() => live().signOut(), [live]);
+    const token = useCallback((audience?: string) => frame().token(audience), [frame]);
+    const signOut = useCallback(() => frame().signOut(), [frame]);
 
     return (
         <AuthContext.Provider value={{ session, loading, connect, cancel, app, token, signOut }}>

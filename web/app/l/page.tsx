@@ -18,7 +18,6 @@ import { Navbar, Footer } from '@privasys/ui';
 import { useDrive } from '~/lib/use-drive';
 import { claimString, decodeTokenClaims } from '~/lib/token-claims';
 import { linkPreviewKey, parseLinkURL, type LinkParams } from '~/lib/share-link-url';
-import { RUNTIME } from '~/lib/runtime-config';
 import {
     DriveError,
     downloadFile,
@@ -133,26 +132,20 @@ function LinkLanding() {
         };
     }, [params.id, params.secret]);
 
-    // The sign-in a link's visitor runs: with the client Drive binds the
-    // link's billing grant to, and that grant, so the sharer pays for what
-    // they required. A paid attribute is only asked for with a grant to pay
-    // for it: without one the bill would land on the client's owner.
-    const linkSignIn = useMemo(
-        () => ({
-            clientId: RUNTIME.linkClientId || undefined,
-            billingGrant: preview?.billing_grant || undefined
-        }),
-        [preview]
-    );
+    // The link's billing grant pays for what the sharer required. A paid
+    // attribute is only asked for with a grant to pay for it: without one
+    // the bill would land on the client's owner. The page's frame signs the
+    // visitor in with the client Drive binds that grant to (auth-provider).
+    const billingGrant = preview?.billing_grant || undefined;
     const askable = useCallback(
         (keys: readonly string[]): string[] => {
             const paid = new Set(preview?.paid_attributes ?? resolved?.paid_attributes ?? []);
             const claims = { ...(resolved?.attribute_claims ?? {}), ...(preview?.attribute_claims ?? {}) };
             return keys
-                .filter((k) => !paid.has(k) || !!linkSignIn.billingGrant)
+                .filter((k) => !paid.has(k) || !!billingGrant)
                 .map((k) => claims[k] ?? requestKeyFor(shareAttrs, k));
         },
-        [preview, resolved, linkSignIn, shareAttrs]
+        [preview, resolved, billingGrant, shareAttrs]
     );
     const unfunded = !!preview && (preview.paid_attributes ?? []).length > 0 && !preview.billing_grant;
 
@@ -197,7 +190,7 @@ function LinkLanding() {
 
     // A fact certified from an official ID reaches Drive only as a proof the
     // Privasys Wallet presents; a passkey or Google/Microsoft sign-in has no
-    // way to carry one. Such a link offers the wallet alone, and says why.
+    // way to carry one. Such a link says so, and how to get the wallet.
     const certified = useCallback(
         (keys: readonly string[]): boolean => {
             const paid = new Set([...(preview?.paid_attributes ?? []), ...(resolved?.paid_attributes ?? [])]);
@@ -206,10 +199,6 @@ function LinkLanding() {
         [preview, resolved, shareAttrs]
     );
     const walletOnly = preview?.mode === 'restricted' && certified(preview.required_attributes ?? []);
-    const linkMethods = useMemo(
-        () => ({ ...linkSignIn, ...(walletOnly ? { methods: ['wallet'] as const } : {}) }),
-        [linkSignIn, walletOnly]
-    );
 
     useEffect(() => {
         if (status !== 'signed-out' || ceremonyError || started.current || !ceremonyRef.current) return;
@@ -220,11 +209,11 @@ function LinkLanding() {
                 ? askable(preview.required_attributes ?? [])
                 : []
             : params.attrs;
-        signInInto(ceremonyRef.current, ask.length > 0 ? ask : undefined, linkMethods).catch(() => {
+        signInInto(ceremonyRef.current, ask.length > 0 ? ask : undefined, billingGrant).catch(() => {
             started.current = false;
             setCeremonyError('The sign-in did not complete. Scan the code again to open the link.');
         });
-    }, [status, signInInto, ceremonyError, params.attrs, preview, askable, linkMethods, opensWithLink]);
+    }, [status, signInInto, ceremonyError, params.attrs, preview, askable, billingGrant, opensWithLink]);
 
     // Restricted-link step-up: re-run the ceremony requesting exactly the
     // attributes the link requires, then resolve + redeem again.
@@ -238,7 +227,7 @@ function LinkLanding() {
             // link states that mapping; the referential answers for links
             // created before it did.
             try {
-                await signInInto(ceremonyRef.current!, askable(missingAttrs), linkMethods);
+                await signInInto(ceremonyRef.current!, askable(missingAttrs), billingGrant);
             } catch {
                 stepUpStarted.current = false;
                 setCeremonyError('The sign-in did not complete. Scan the code again to open the link.');
@@ -249,7 +238,7 @@ function LinkLanding() {
             stepUpStarted.current = false;
             setState('resolving');
         })();
-    }, [stepUp, ceremonyError, missingAttrs, askable, linkMethods, signInInto]);
+    }, [stepUp, ceremonyError, missingAttrs, askable, billingGrant, signInInto]);
 
     // The attributes the visitor already consented to share at sign-in,
     // matched against what the link requires.

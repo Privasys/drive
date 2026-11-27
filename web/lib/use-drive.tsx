@@ -57,8 +57,6 @@ export const DIRECT_SIGN_IN_REFUSED = 'Your sign-in is not valid for Drive. Sign
 // The audience of a direct channel's token: this app.
 const DRIVE_AUDIENCE = RUNTIME.appId ? `app:${RUNTIME.appId.replace(/-/g, '')}` : undefined;
 
-// A sign-in method, as the SDK names it.
-type Method = 'wallet' | 'passkey' | 'social';
 
 /** What the wallet is asked to approve again, in words, or null for a first approval. */
 export function approvalMessage(reason: string | null): string {
@@ -109,14 +107,14 @@ interface DriveContextValue {
     /** Create an enterprise workspace, refresh memberships, switch to it. */
     newWorkspace: (name: string) => Promise<void>;
     /**
-     * A share link's sign-in, inline in `el`: the minimal scope, exactly the
-     * attributes the link needs, and the link's client and billing grant.
+     * A share link's sign-in, inline in `el`: the link page's frame asks for
+     * the minimal scope, plus the attributes the link needs, paid by its grant.
      * Rejects when it did not complete, so the page can offer a retry.
      */
     signInInto: (
         el: HTMLElement,
         attributes?: readonly string[],
-        link?: { clientId?: string; billingGrant?: string; methods?: readonly Method[] }
+        billingGrant?: string
     ) => Promise<void>;
     /**
      * The gate: restores the session or runs the sign-in inside `el`; the
@@ -274,25 +272,21 @@ export function DriveProvider({ children }: { children: ReactNode }) {
 
     // A share link's sign-in: an open link is a minimal identity flow (no
     // PII), and a restricted one asks for exactly what it requires, so its
-    // visitor is never prompted for their name or email otherwise. The link
-    // signs its visitor in with the client Drive binds the link's billing
-    // grant to, and passes the grant, so the sharer, not the client's owner,
-    // pays for a paid attribute.
+    // visitor is never prompted for their name or email otherwise (the link
+    // page's frame, auth-provider). The link's billing grant pays for this
+    // ceremony, so the sharer, not the client's owner, pays for a paid
+    // attribute.
     const signInInto = useCallback(
         async (
             el: HTMLElement,
             attributes?: readonly string[],
-            link?: { clientId?: string; billingGrant?: string; methods?: readonly Method[] }
+            billingGrant?: string
         ) => {
             setError(null);
             try {
                 await auth.connect(el, {
-                    presentation: 'inline',
-                    scope: ['openid', 'offline_access'],
-                    attributes: attributes ?? [],
-                    ...(link?.methods ? { methods: link.methods } : {}),
-                    ...(link?.clientId ? { clientId: link.clientId } : {}),
-                    ...(link?.billingGrant ? { billingGrant: link.billingGrant } : {})
+                    ...(attributes?.length ? { attributes } : {}),
+                    ...(billingGrant ? { billingGrant } : {})
                 });
             } catch (e) {
                 if ((e as { code?: string }).code !== 'cancelled') {
