@@ -67,6 +67,9 @@ function driveConfig(): AuthFrameConfig {
         ...base,
         clientId: PAGE_CLIENT_ID,
         scope: ['openid', 'email', 'profile', 'offline_access'],
+        // The person's name and email, shared at sign-in: Drive shows who
+        // owns and shares each file.
+        attributes: ['name', 'email'],
         presentation: 'page',
         pitch: DRIVE_PITCH,
         app: {
